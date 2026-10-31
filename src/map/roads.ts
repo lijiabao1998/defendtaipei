@@ -132,7 +132,12 @@ export class RoadTiles {
   size = 200;
   have = new Set<string>();
   tiles = new Map<string, Tile>();
-  loading = new Set<string>();
+  loading = new Map<string, symbol>();
+  private wanted = new Set<string>();
+  private retryAt = new Map<string, number>();
+  // Failed construction may leave partial global registrations. Keep the key
+  // quarantined until a page reload rather than repeating construction.
+  private failedBuild = new Set<string>();
   cache = new Map<string, TileData>();
   state: Record<string, string[]> = {};
   cur = '';
@@ -149,10 +154,16 @@ export class RoadTiles {
   reset() {
     this.state = {};
     clearRoadTiles();
+    this.loading.clear();
+    this.retryAt.clear();
+    this.wanted.clear();
     for (const k of [...this.tiles.keys()]) this.unload(k);
     this.cur = '';
   }
   rebuild() {
+    this.loading.clear();
+    this.retryAt.clear();
+    this.wanted.clear();
     for (const k of [...this.tiles.keys()]) this.unload(k);
     this.cur = '';
   }
@@ -169,11 +180,24 @@ export class RoadTiles {
       ck = tx + '_' + tz;
     if (ck !== this.cur) {
       this.cur = ck;
-      const want = new Set<string>();
-      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) want.add(tx + i + '_' + (tz + j));
-      for (const k of [...this.tiles.keys()]) if (!want.has(k)) this.unload(k);
-      for (const k of want) if (this.have.has(k) && !this.tiles.has(k) && !this.loading.has(k)) this.load(k);
+      this.wanted = new Set<string>();
+      for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) this.wanted.add(tx + i + '_' + (tz + j));
+      for (const k of [...this.tiles.keys()]) if (!this.wanted.has(k)) this.unload(k);
+      // Invalidate pending requests too. Their completion must not publish into a new generation.
+      for (const k of this.loading.keys()) if (!this.wanted.has(k)) this.loading.delete(k);
+      for (const k of this.retryAt.keys()) if (!this.wanted.has(k)) this.retryAt.delete(k);
     }
+    // Retry failed fetches without requiring the player to cross another tile boundary.
+    const now = performance.now();
+    for (const k of this.wanted)
+      if (
+        this.have.has(k) &&
+        !this.tiles.has(k) &&
+        !this.loading.has(k) &&
+        !this.failedBuild.has(k) &&
+        now >= (this.retryAt.get(k) ?? 0)
+      )
+        this.load(k);
     // traffic-light cycle: 0-12 s axis A green, 12-15 amber, 15-27 axis B green, 27-30 amber; all dark after the blackout
     this.phase = (this.phase + dt) % 30;
     const on = this.d.power(),
@@ -238,18 +262,34 @@ export class RoadTiles {
     this.mark(key, id);
   }
   private async load(k: string) {
-    this.loading.add(k);
+    const token = Symbol(k);
+    this.loading.set(k, token);
+    let building = false;
     try {
-      const td = this.cache.get(k) || (await (await fetch(this.d.base + `data/tiles/${k}.json`)).json());
+      let td = this.cache.get(k);
+      if (!td) {
+        const response = await fetch(this.d.base + `data/tiles/${k}.json`);
+        if (!response.ok) throw new Error(`road tile request failed: ${response.status}`);
+        td = await response.json();
+      }
+      if (this.loading.get(k) !== token) return;
       this.cache.set(k, td);
-      if (this.loading.has(k) && !this.tiles.has(k)) {
+      if (!this.tiles.has(k)) {
+        building = true;
         this.tiles.set(k, this.build(k, td));
         this.stats.loads++;
       }
+      this.retryAt.delete(k);
     } catch (e) {
-      console.warn('tile', k, e);
+      if (this.loading.get(k) === token) {
+        console.warn('tile', k, e);
+        // A failed build may already have published geometry or colliders; do not retry it blindly.
+        if (building) this.failedBuild.add(k);
+        else this.retryAt.set(k, performance.now() + 1000);
+      }
+    } finally {
+      if (this.loading.get(k) === token) this.loading.delete(k);
     }
-    this.loading.delete(k);
   }
   private unload(k: string) {
     const t = this.tiles.get(k);
