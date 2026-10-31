@@ -23,6 +23,7 @@ import type { GameMap } from '../map/map';
 import { RocSystem, ROC_NAME, type RocKind } from '../npc/roc';
 import { placeRooftop, dressRoof, pickRoofMat, setShackNight, roofClass, roofStats } from '../map/rooftin';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { makeLampBatches } from './lamps';
 import { ITEMS, LOOT } from '../systems/items';
 import { iconURL, iconMat } from '../ui/icons';
 import { GF, FH, ARC, arcadeFits, buildArcade, flushArcades, setArcadeDeps, arcadeAudit } from '../map/arcade';
@@ -1688,23 +1689,9 @@ function buildLamps() {
   const poleG = mergeGeometries([pole, arm]);
   const head = new THREE.BoxGeometry(0.35, 0.12, 0.5);
   head.translate(0, 4.88, 1.1);
-  const pm = new THREE.InstancedMesh(
-    poleG,
-    new THREE.MeshStandardMaterial({ color: 0x5a6066, metalness: 0.5, roughness: 0.5 }),
-    lamps.length,
-  );
+  const poleMat = new THREE.MeshStandardMaterial({ color: 0x5a6066, metalness: 0.5, roughness: 0.5 });
   lampHeadMat = new THREE.MeshStandardMaterial({ color: 0xdddddd, emissive: 0xffc070, emissiveIntensity: 0 });
-  const hm = new THREE.InstancedMesh(head, lampHeadMat, lamps.length);
-  const m4 = new THREE.Matrix4(),
-    q = new THREE.Quaternion();
-  lamps.forEach(([x, z, a], i) => {
-    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), a);
-    m4.compose(new THREE.Vector3(x, 0, z), q, new THREE.Vector3(1, 1, 1));
-    pm.setMatrixAt(i, m4);
-    hm.setMatrixAt(i, m4);
-  });
-  pm.castShadow = true;
-  scene.add(pm, hm);
+  scene.add(...makeLampBatches(lamps, poleG, head, poleMat, lampHeadMat));
   for (let i = 0; i < 8; i++) {
     const l = new THREE.PointLight(0xffc070, 0, 22, 1.6);
     scene.add(l);

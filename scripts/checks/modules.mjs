@@ -22,6 +22,7 @@ try {
     'scripts/checks/tile-transaction.mjs',
     'scripts/checks/nav-rollback-risk.mjs',
     'scripts/checks/nav-ownership.mjs',
+    'src/core/lamps.check.ts',
     'src/story/index.check.ts',
     'src/map/tiles/manager.check.ts',
     'src/map/tiles/grid-lod.check.ts',
