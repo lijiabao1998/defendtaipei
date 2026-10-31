@@ -1,5 +1,6 @@
 import { build } from 'esbuild';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 async function load(file) {
   const out = await build({ entryPoints: [file], bundle: true, write: false, format: 'esm', platform: 'node' });
   return import('data:text/javascript;base64,' + Buffer.from(out.outputFiles[0].text).toString('base64'));
@@ -148,3 +149,78 @@ await coldAlarmRoom.alarm();
 assert.equal(coldAlarmRoom.s.looted.kept, 'player');
 assert.equal(coldAlarmRoom.timer, null);
 console.log('PASS: durable idle alarm restores checkpoint after Room eviction');
+// Co-op v2: authoritative inventories, ammunition, contested known loot and durable survivors.
+const coop = core.newState(42, 0, 0, 1);
+core.addPlayer(coop, 'a', 'A', 'courier', 'm', 0, 0);
+core.addPlayer(coop, 'b', 'B', 'courier', 'm', 1, 0);
+let seq = 0;
+const command = c => core.applyCmd(coop, 'a', { ...c, seq: ++seq });
+assert.equal(command({ t: 'equip', weapon: 'rifle' }), 'not owned');
+assert.equal(command({ t: 'equip', weapon: 'pistol' }), '');
+Object.assign(coop.enemies[0], { x: 8, z: 0, hp: 60 });
+assert.equal(command({ t: 'attack', target: 0 }), '');
+assert.equal(coop.players.a.inv.a9, 11);
+assert.equal(coop.enemies[0].hp, 12);
+assert.equal(command({ t: 'attack', target: 0 }), 'cooldown');
+assert.equal(coop.players.a.inv.a9, 11);
+for (let i = 0; i < 8; i++) core.step(coop, false);
+assert.equal(command({ t: 'attack', target: 0 }), '');
+assert.equal(coop.enemies[0].hp, 0);
+assert.equal(coop.players.a.kills, 1);
+assert.ok(coop.loot['enemy:0']);
+assert.equal(command({ t: 'attack', target: 0 }), 'no target');
+assert.equal(coop.players.a.kills, 1);
+assert.equal(command({ t: 'loot', id: 'invented', x: 0, z: 0 }), 'unknown loot');
+assert.equal(command({ t: 'loot', id: '__proto__', x: 0, z: 0 }), 'unknown loot');
+assert.equal(command({ t: 'loot', id: 'enemy:0', x: 0, z: 0 }), 'range');
+assert.equal(command({ t: 'loot', id: 'supply:0' }), '');
+assert.equal(coop.players.a.inv.a9, 34);
+assert.equal(core.applyCmd(coop, 'b', { t: 'loot', id: 'supply:0', seq: 1 }), 'taken');
+assert.equal(coop.players.b.inv.a9, 12);
+coop.players.a.hp = 40;
+assert.equal(command({ t: 'use', item: 'medkit' }), '');
+assert.equal(coop.players.a.hp, 75);
+assert.equal(coop.players.a.inv.medkit, 3);
+coop.players.a.inv.a9 = 0;
+coop.players.a.cd = 0;
+coop.enemies[0].hp = 60;
+assert.equal(command({ t: 'attack', target: 0 }), 'no ammo');
+assert.equal(coop.enemies[0].hp, 60);
+const baseline = core.clone(coop);
+coop.players.a.inv.a9 = 7;
+coop.loot.extra = { x: 1, z: 2, items: { medkit: 1 } };
+const replica = core.clone(baseline);
+core.patch(replica, core.diff(baseline, coop));
+assert.deepEqual(replica, coop);
+for (const p of Object.values(coop.players)) p.on = false;
+const retained = new Room({ storage: { get: async () => 'COOP2' } }, { DB: db });
+retained.code = 'COOP2';
+retained.s = coop;
+await retained.alarm();
+const cold = new Room({}, { DB: db });
+await cold.load('COOP2');
+core.addPlayer(cold.s, 'a', 'A', 'courier', 'm', 999, 999);
+assert.equal(cold.s.players.a.inv.a9, 7);
+assert.equal(cold.s.players.a.hp, 75);
+assert.equal(cold.s.players.a.x, 0);
+assert.equal(cold.s.players.a.ack, seq);
+assert.equal(cold.s.looted['supply:0'], 'a');
+for (const id of ['c', 'd', 'e']) assert.equal(core.addPlayer(cold.s, id, id, 'courier', 'm', 0, 0), null);
+assert.equal(core.addPlayer(cold.s, 'f', 'F', 'courier', 'm', 0, 0), 'room full');
+assert.equal(core.addPlayer(cold.s, 'b', 'B', 'courier', 'm', 0, 0), 'room full');
+console.log(
+  'PASS: co-op weapon ownership/damage/ammo/cooldown, known contested loot, medkits, deltas, durable identity and active capacity',
+);
+
+// Low-FPS snapshots reconcile between frames: send only after local motion/collision resolves.
+const gameSource = readFileSync('src/core/main.ts', 'utf8');
+assert.ok(gameSource.indexOf('  netFrame(dt);') > gameSource.indexOf('      collideDoors(player.pos);'));
+console.log('PASS: multiplayer movement publication follows local movement/collision resolution');
+
+// Static renderer wiring contracts; real performance and visual quality still require browser evidence.
+const renderSource = readFileSync('src/core/main.ts', 'utf8');
+const settingsSource = readFileSync('src/ui/settings.ts', 'utf8');
+assert.match(renderSource, /antialias: SET\.quality !== 'low'/);
+assert.match(renderSource, /renderer\.shadowMap\.enabled = SET\.quality !== 'low'/);
+assert.match(settingsSource, /QPIX[^=]*= \{ low: 0\.75, med: 1\.25, high: 1\.5 \}/);
+console.log('PASS: low rendering budget wiring; medium/high pixel budgets retained (not a performance measurement)');

@@ -23,6 +23,7 @@ import type { GameMap } from '../map/map';
 import { RocSystem, ROC_NAME, type RocKind } from '../npc/roc';
 import { placeRooftop, dressRoof, pickRoofMat, setShackNight, roofClass, roofStats } from '../map/rooftin';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { makeLampBatches } from './lamps';
 import { ITEMS, LOOT } from '../systems/items';
 import { iconURL, iconMat } from '../ui/icons';
 import { GF, FH, ARC, arcadeFits, buildArcade, flushArcades, setArcadeDeps, arcadeAudit } from '../map/arcade';
@@ -113,7 +114,8 @@ const pick = <T>(a: T[]) => a[Math.floor(rnd() * a.length)];
 const $ = (id: string) => document.getElementById(id)!;
 
 // ---------- renderer ----------
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+// Low is a real rendering budget, not a simulation shortcut. Medium/high retain the previous appearance.
+const renderer = new THREE.WebGLRenderer({ antialias: SET.quality !== 'low', powerPreference: 'high-performance' });
 const MOBILE =
   matchMedia('(pointer: coarse)').matches ||
   'ontouchstart' in window ||
@@ -130,7 +132,7 @@ if (MOBILE) document.body.classList.add('mobile');
 }
 renderer.setPixelRatio(Math.min(devicePixelRatio, MOBILE ? Math.min(1.25, QPIX[SET.quality]) : QPIX[SET.quality]));
 renderer.setSize(innerWidth, innerHeight);
-renderer.shadowMap.enabled = true;
+renderer.shadowMap.enabled = SET.quality !== 'low';
 renderer.shadowMap.type = MOBILE ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 $('app').appendChild(renderer.domElement);
@@ -1687,23 +1689,9 @@ function buildLamps() {
   const poleG = mergeGeometries([pole, arm]);
   const head = new THREE.BoxGeometry(0.35, 0.12, 0.5);
   head.translate(0, 4.88, 1.1);
-  const pm = new THREE.InstancedMesh(
-    poleG,
-    new THREE.MeshStandardMaterial({ color: 0x5a6066, metalness: 0.5, roughness: 0.5 }),
-    lamps.length,
-  );
+  const poleMat = new THREE.MeshStandardMaterial({ color: 0x5a6066, metalness: 0.5, roughness: 0.5 });
   lampHeadMat = new THREE.MeshStandardMaterial({ color: 0xdddddd, emissive: 0xffc070, emissiveIntensity: 0 });
-  const hm = new THREE.InstancedMesh(head, lampHeadMat, lamps.length);
-  const m4 = new THREE.Matrix4(),
-    q = new THREE.Quaternion();
-  lamps.forEach(([x, z, a], i) => {
-    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), a);
-    m4.compose(new THREE.Vector3(x, 0, z), q, new THREE.Vector3(1, 1, 1));
-    pm.setMatrixAt(i, m4);
-    hm.setMatrixAt(i, m4);
-  });
-  pm.castShadow = true;
-  scene.add(pm, hm);
+  scene.add(...makeLampBatches(lamps, poleG, head, poleMat, lampHeadMat));
   for (let i = 0; i < 8; i++) {
     const l = new THREE.PointLight(0xffc070, 0, 22, 1.6);
     scene.add(l);
@@ -2177,11 +2165,20 @@ function soonToast(t: string) {
 let MP: { base: string; code: string } | null = null;
 const remRigs = new Map<string, Rig>(),
   enRigs = new Map<number, Rig>();
+const lootRigs = new Map<string, THREE.Mesh>();
+const coopActive = () => MP && net?.s?.coop === 2;
 const remPrev = new Map<string, [number, number]>();
 function syncServerVitals() {
   const own = MP && net?.s?.players[net.you];
   if (!own) return;
   player.hp = clamp(own.hp, 0, 100);
+  if (coopActive() && own.inv) {
+    const inventoryChanged = JSON.stringify(player.inv) !== JSON.stringify(own.inv);
+    player.inv = { ...own.inv };
+    if (inventoryChanged && panelOpen) renderPanel();
+    // Equipment intent is sent separately; server never accepts unowned weapons.
+    if (player.equip && !own.inv[player.equip]) player.equip = own.weapon || '';
+  }
   player.bleed = false; // The prototype server has no separate bleeding state.
   if (own.hp <= 0 && !dead) die();
 }
@@ -2286,6 +2283,21 @@ function netFrame(dt: number) {
     if (Math.hypot(dx, dz) > 0.02) r.root.rotation.y = Math.atan2(dx, dz);
     animate(r, e.hp <= 0 ? 'death' : sp > 2 ? 'run' : sp > 0.2 ? 'walk' : 'idle', Math.min(sp, 4), dt);
   }
+  if (coopActive()) {
+    for (const [id, loot] of Object.entries(s.loot || {})) {
+      let marker = lootRigs.get(id);
+      if (!marker) {
+        marker = new THREE.Mesh(
+          new THREE.BoxGeometry(0.45, 0.45, 0.45),
+          new THREE.MeshBasicMaterial({ color: 0x55ffcc }),
+        );
+        marker.position.set(loot.x, 0.35, loot.z);
+        scene.add(marker);
+        lootRigs.set(id, marker);
+      }
+      marker.visible = !s.looted[id];
+    }
+  }
   const h = document.getElementById('mphud');
   if (h && Object.values(s.players).filter(p => p.on).length < 2)
     h.textContent = tr(
@@ -2301,7 +2313,7 @@ function netFrame(dt: number) {
 function netAttack() {
   if (!net?.s) return;
   let best = -1,
-    bd = 1.9;
+    bd = coopActive() ? ITEMS[net.s.players[net.you]?.weapon || '']?.range || 1.1 : 1.9;
   for (const e of net.s.enemies) {
     if (e.hp <= 0) continue;
     const d = Math.hypot(e.x - player.pos.x, e.z - player.pos.z);
@@ -3910,6 +3922,11 @@ function addItem(k: string, n = 1) {
 function useItem(k: string) {
   const d = ITEMS[k];
   if (!player.inv[k]) return;
+  if (coopActive() && d.kind !== 'melee' && d.kind !== 'gun') {
+    if (d.kind === 'med') net!.cmd({ t: 'use', item: k } as any);
+    else soonToast(tr('合作模式僅支援武器、彈藥與醫療補給', 'Co-op supports weapons, ammunition and medical supplies'));
+    return;
+  }
   if (d.kind === 'melee' || d.kind === 'gun') {
     player.equip = player.equip === k ? '' : k;
     syncHeldWeapon();
@@ -4664,6 +4681,15 @@ function rideTo(i: number, j: number) {
   }, 3000);
 }
 function interact() {
+  if (coopActive()) {
+    const loot = Object.entries(net!.s!.loot || {}).find(
+      ([id, l]) => !net!.s!.looted[id] && Math.hypot(l.x - player.pos.x, l.z - player.pos.z) <= 2.2,
+    );
+    if (loot) net!.cmd({ t: 'loot', id: loot[0] } as any);
+    else if (doorNear(1.6) && !doorNear(1.6)!.barricaded) return toggleDoor(doorNear(1.6)!);
+    else soonToast(tr('靠近綠色補給箱或敵人掉落物再互動', 'Move near a green supply crate or enemy drop to collect'));
+    return;
+  }
   if (npcInteract()) return;
   if (roofB || roofDoor()) {
     if (roofToggle()) return;
@@ -4918,6 +4944,12 @@ function playerAttack() {
   const d = k ? ITEMS[k] : ({ dmg: 8, range: 1.1, noise: 2, cd: 0.5, kind: 'melee' } as any);
   if (player.cd > 0) return;
   netAttack();
+  if (coopActive()) {
+    player.cd = d.cd || 0.5;
+    if (d.kind === 'gun') player.rig.shootT = 0.14;
+    else startMelee(player.rig, Math.max(0.42, (d.cd || 0.5) * 0.85));
+    return; // Server owns hits, ammo, deaths and drops; never run the solo damage path.
+  }
   player.cd = d.cd;
   if (d.kind === 'gun') player.rig.shootT = 0.14;
   else startMelee(player.rig, Math.max(0.42, (d.cd || 0.5) * 0.85));
@@ -5537,7 +5569,6 @@ function update(dt: number) {
   roadT.update(player.pos.x, player.pos.z, dt);
   district.update(player.pos.x, player.pos.z);
   traffic.update(dt);
-  netFrame(dt);
   if (drive.cur) {
     const v = drive.cur;
     const b = roadT.barrierAt(v.pos.x, v.pos.z, v.s.two ? 1.2 : 2.0);
@@ -6115,6 +6146,8 @@ function update(dt: number) {
     streetT = 0.7;
     updateStreet();
   }
+  // Send this frame's resolved movement before a snapshot can reconcile it away.
+  netFrame(dt);
   drawHud(inside);
 }
 let redT = 0;
@@ -6284,6 +6317,18 @@ function drawHud(inside: Bld | null) {
       ? tr('[B] 拆除封門', '[B] Remove barricade')
       : tr('[B] 封門（鐵鎚+木板）', '[B] Barricade (hammer + plank)');
   } else pr.style.display = 'none';
+  if (coopActive()) {
+    const available = Object.entries(net!.s!.loot || {}).some(
+      ([id, l]) => !net!.s!.looted[id] && Math.hypot(l.x - player.pos.x, l.z - player.pos.z) <= 2.2,
+    );
+    const localDoor = doorNear(1.6);
+    pr.style.display = (available || (localDoor && !localDoor.barricaded)) && !panelOpen ? 'block' : 'none';
+    pr.textContent = available
+      ? tr('[E] 搜刮共享補給', '[E] Loot shared supplies')
+      : localDoor?.open
+        ? tr('[E] 關門', '[E] Close door')
+        : tr('[E] 開門', '[E] Open door');
+  }
   // v22.4 prompts show the key actually bound (settings → 按鍵設定)
   const t0 = pr.textContent || '';
   if (t0.startsWith('[E]')) pr.textContent = `[${keyLabel('interact')}]` + t0.slice(3);
@@ -7184,8 +7229,8 @@ async function boot() {
   (mpw.querySelector('#mpcode') as HTMLInputElement).value = MPQ.get('room') || '';
   const mpScope = document.createElement('p');
   mpScope.textContent = tr(
-    '實驗連線：同步玩家與哨兵；背包、劇情與搜刮仍為個人狀態。需要可連線伺服器，不覆寫單機存檔。',
-    'Experimental: players and sentries are shared; inventory, story and loot remain local. Requires a reachable server. Single-player saves are protected.',
+    '實驗連線：相容合作伺服器統一戰鬥、彈藥與綠色補給箱；劇情與城區模擬尚未共享。不覆寫單機存檔。',
+    'Experimental: compatible co-op servers own combat, ammo and green supply crates. Story and city simulation are not shared. Single-player saves are protected.',
   );
   mpw.appendChild(mpScope);
   const mpMsg = (t: string) => {

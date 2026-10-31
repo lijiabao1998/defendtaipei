@@ -1,12 +1,17 @@
 name: Multiplayer prototype verification
 on:
   push:
-    branches: [onna/multiplayer-prototype-20261030]
+    branches: [onna/multiplayer-prototype-20261030, onna/coop-v66-20261031]
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   multiplayer:
+    strategy:
+      fail-fast: false
+      matrix:
+        door_fixture: ['0', '1']
+    name: Multiplayer (door fixture ${{ matrix.door_fixture }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -21,9 +26,10 @@ jobs:
       - name: Two independent browser clients through real Worker
         env:
           WRANGLER_SEND_METRICS: 'false'
-          VITE_MP_SERVER: https://defendtaipei-mp.lijiabao1998.workers.dev
-          MP_SERVER: https://defendtaipei-mp.lijiabao1998.workers.dev
+          VITE_MP_SERVER: http://localhost:8787
+          MP_SERVER: http://localhost:8787
           MP_USE_DEFAULT: '1'
+          MP_DOOR_FIXTURE: ${{ matrix.door_fixture }}
         run: |
           printf 'AUTH_SECRET=ephemeral-ci-only-not-production-secret\n' > server/.dev.vars
           cd server
@@ -37,7 +43,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: multiplayer-test-evidence
+          name: multiplayer-test-evidence-${{ matrix.door_fixture }}
           path: |
             /tmp/dt-worker.log
             /tmp/dt-vite.log
