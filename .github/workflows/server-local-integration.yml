@@ -1,0 +1,49 @@
+name: Server dependency local integration
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  local-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci && npm ci --prefix server
+      - run: npm run typecheck && node scripts/checks/multiplayer-unit.mjs
+      - name: Four clients against local Worker and local D1
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+          MP_TEST_IDLE_RECOVERY: '1'
+          MP_TEST_LOCAL_ONLY: '1'
+        run: |
+          set -eu
+          printf 'AUTH_SECRET=ephemeral-local-test-only\n' > server/.dev.vars
+          cd server
+          npx wrangler d1 migrations apply dt_saves --local --persist-to "$RUNNER_TEMP/dt-d1"
+          npx wrangler dev --local --ip 127.0.0.1 --port 8787 --inspector-port 9230 --persist-to "$RUNNER_TEMP/dt-d1" > "$RUNNER_TEMP/dt-worker.log" 2>&1 &
+          worker_pid=$!
+          trap 'kill "$worker_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8787/ > /dev/null; then ready=1; break; fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then cat "$RUNNER_TEMP/dt-worker.log"; exit 1; fi
+          cd ..
+          node server/test-mp.mjs http://127.0.0.1:8787
+      - name: Upload local Worker log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-local-worker-log
+          path: ${{ runner.temp }}/dt-worker.log
+          if-no-files-found: ignore
+          retention-days: 7
