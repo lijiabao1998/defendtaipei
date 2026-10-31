@@ -44,7 +44,7 @@ export function saveSettings() {
   applyVolumes();
 }
 export const QSCALE: Record<Quality, number> = { low: 0.5, med: 0.75, high: 1 };
-export const QPIX: Record<Quality, number> = { low: 0.75, med: 1.25, high: 1.5 };
+export const QPIX: Record<Quality, number> = { low: 0.5, med: 1.25, high: 1.5 };
 
 /** rebindable actions; fire = left mouse, menu = Esc are fixed */
 export const ACTIONS: [id: string, label: string, def: string][] = [

@@ -222,5 +222,5 @@ const renderSource = readFileSync('src/core/main.ts', 'utf8');
 const settingsSource = readFileSync('src/ui/settings.ts', 'utf8');
 assert.match(renderSource, /antialias: SET\.quality !== 'low'/);
 assert.match(renderSource, /renderer\.shadowMap\.enabled = SET\.quality !== 'low'/);
-assert.match(settingsSource, /QPIX[^=]*= \{ low: 0\.75, med: 1\.25, high: 1\.5 \}/);
+assert.match(settingsSource, /QPIX[^=]*= \{ low: 0\.5, med: 1\.25, high: 1\.5 \}/);
 console.log('PASS: low rendering budget wiring; medium/high pixel budgets retained (not a performance measurement)');
