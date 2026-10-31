@@ -7,10 +7,30 @@ const timeout = setTimeout(
     console.error('Multiplayer test timed out');
     process.exit(1);
   },
-  process.env.MP_TEST_IDLE_RECOVERY ? 170000 : 60000,
+  process.env.MP_TEST_IDLE_RECOVERY ? 180000 : 60000,
 );
 const B = process.argv[2] || 'http://localhost:8787';
+if (process.env.MP_TEST_LOCAL_ONLY === '1') {
+  const url = new URL(B);
+  assert.equal(url.protocol, 'http:');
+  assert.equal(url.hostname, '127.0.0.1');
+  assert.equal(url.port, '8787');
+  assert.equal(url.pathname, '/');
+  assert.equal(url.username + url.password + url.search + url.hash, '');
+}
 const W = B.replace('http', 'ws');
+async function waitUntil(condition, label, budget = 10000) {
+  const deadline = Date.now() + budget;
+  while (!condition() && Date.now() < deadline) await new Promise(r => setTimeout(r, 25));
+  assert.ok(condition(), `${label} timed out`);
+}
+function close(c) {
+  if (c.ws.readyState === WebSocket.CLOSED) return Promise.resolve();
+  return new Promise(resolve => {
+    c.ws.once('close', resolve);
+    c.ws.close();
+  });
+}
 const out = {};
 const post = async (p, tok) =>
   (await fetch(B + p, { method: 'POST', headers: tok ? { Authorization: 'Bearer ' + tok } : {} })).json();
@@ -64,7 +84,10 @@ await new Promise(r => setTimeout(r, 1500));
 const cmd = (c, o) => c.ws.send(JSON.stringify({ k: 'cmd', c: { seq: ++c.seq, ...o } }));
 cmd(cs[0], { t: 'move', x: 0.3, z: 0 });
 cmd(cs[1], { t: 'move', x: 2.3, z: 0 });
-await new Promise(r => setTimeout(r, 300));
+await waitUntil(
+  () => cs[1].s.players[users[0].uid]?.x === 0.3 && cs[0].s.players[users[1].uid]?.x === 2.3,
+  'bidirectional movement',
+);
 assert.equal(cs[1].s.players[users[0].uid].x, 0.3);
 assert.equal(cs[0].s.players[users[1].uid].x, 2.3);
 out.bidirectionalMovement = true;
@@ -72,14 +95,13 @@ for (let i = 0; i < 180; i++) cs[0].ws.send(JSON.stringify({ k: 'ack', tick: 0 }
 cmd(cs[0], { t: 'equip', weapon: 'hammer' });
 cmd(cs[1], { t: 'equip', weapon: 'pipe' });
 cmd(cs[2], { t: 'equip', weapon: 'hammer' });
-const equipDeadline = Date.now() + 5000;
-while (
-  (cs[1].s.players[users[0].uid]?.weapon !== 'hammer' ||
-    cs[0].s.players[users[1].uid]?.weapon !== 'pipe' ||
-    cs[0].s.players[users[2].uid]?.weapon !== 'hammer') &&
-  Date.now() < equipDeadline
-)
-  await new Promise(r => setTimeout(r, 25));
+await waitUntil(
+  () =>
+    cs[1].s.players[users[0].uid]?.weapon === 'hammer' &&
+    cs[0].s.players[users[1].uid]?.weapon === 'pipe' &&
+    cs[0].s.players[users[2].uid]?.weapon === 'hammer',
+  'bidirectional equipment',
+);
 assert.equal(cs[1].s.players[users[0].uid].weapon, 'hammer');
 assert.equal(cs[0].s.players[users[1].uid].weapon, 'pipe');
 assert.equal(cs[0].s.players[users[2].uid].weapon, 'hammer');
@@ -89,18 +111,14 @@ cmd(cs[0], { t: 'move', x: 80, z: 0 }); // speed hack
 cmd(cs[1], { t: 'loot', id: 'supply:0', x: 2, z: 0 });
 cmd(cs[2], { t: 'loot', id: 'supply:0', x: 2.5, z: 0 }); // contested loot
 cmd(cs[3], { t: 'attack', target: 0 });
-// Wait for the losing claim's explicit rejection instead of assuming socket order.
-const contestDeadline = Date.now() + 5000;
-while (
-  (!cs[0].rej.includes('speed') || (!cs[1].rej.includes('taken') && !cs[2].rej.includes('taken'))) &&
-  Date.now() < contestDeadline
-)
-  await new Promise(r => setTimeout(r, 25));
+await waitUntil(
+  () => cs[0].rej.includes('speed') && (cs[1].rej.includes('taken') || cs[2].rej.includes('taken')),
+  'speed rejection and contested loot',
+);
 out.rejects = cs.map(c => c.rej);
 out.stream = cs.map(c => ({ snaps: c.snaps, deltas: c.deltas, avgBytes: Math.round(c.bytes / c.msgs) }));
 // reconnect P1 with same token
-cs[1].ws.close();
-await new Promise(r => setTimeout(r, 800));
+await close(cs[1]);
 const re = await join(users[1], 'P1', 2);
 out.reconnect = {
   snap: re.snaps,
@@ -115,15 +133,7 @@ do {
   out.info = await (await fetch(`${B}/api/rooms/${code}`)).json();
 } while (out.info.tick < 200 && Date.now() < tickDeadline);
 // Await every WebSocket close handshake before timing the server's grace period.
-await Promise.all(
-  [...cs, re].map(c => {
-    if (c.ws.readyState === WebSocket.CLOSED) return Promise.resolve();
-    return new Promise(resolve => {
-      c.ws.once('close', resolve);
-      c.ws.close();
-    });
-  }),
-);
+await Promise.all([...cs, re].map(close));
 assert.equal(out.noauth, 401);
 assert.equal(out.badroom, 404);
 assert.equal(out.fifth, 'room full');
