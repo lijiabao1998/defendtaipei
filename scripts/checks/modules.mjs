@@ -9,6 +9,12 @@ import { spawnSync } from 'node:child_process';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const temp = await mkdtemp(join(tmpdir(), 'defendtaipei-checks-'));
 try {
+  const roadCheck = spawnSync(process.execPath, [join(root, 'scripts/checks/road-stream.mjs')], {
+    stdio: 'inherit',
+    cwd: root,
+  });
+  if (roadCheck.error) throw roadCheck.error;
+  if (roadCheck.status !== 0) throw new Error(`road-stream.mjs failed (${roadCheck.signal || roadCheck.status})`);
   for (const entry of [
     'scripts/checks/bus.mjs',
     'scripts/checks/save.mjs',
