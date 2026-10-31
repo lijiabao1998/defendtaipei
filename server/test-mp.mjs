@@ -7,7 +7,7 @@ const timeout = setTimeout(
     console.error('Multiplayer test timed out');
     process.exit(1);
   },
-  process.env.MP_TEST_IDLE_RECOVERY ? 140000 : 60000,
+  process.env.MP_TEST_IDLE_RECOVERY ? 170000 : 60000,
 );
 const B = process.argv[2] || 'http://localhost:8787';
 const W = B.replace('http', 'ws');
@@ -114,7 +114,16 @@ do {
   await new Promise(r => setTimeout(r, 250));
   out.info = await (await fetch(`${B}/api/rooms/${code}`)).json();
 } while (out.info.tick < 200 && Date.now() < tickDeadline);
-for (const c of [...cs, re]) c.ws.close();
+// Await every WebSocket close handshake before timing the server's grace period.
+await Promise.all(
+  [...cs, re].map(c => {
+    if (c.ws.readyState === WebSocket.CLOSED) return Promise.resolve();
+    return new Promise(resolve => {
+      c.ws.once('close', resolve);
+      c.ws.close();
+    });
+  }),
+);
 assert.equal(out.noauth, 401);
 assert.equal(out.badroom, 404);
 assert.equal(out.fifth, 'room full');
@@ -136,9 +145,21 @@ if (process.env.MP_TEST_IDLE_RECOVERY) {
   const idle = await (await fetch(`${B}/api/rooms/${code}`)).json();
   assert.equal(idle.players, 0);
   assert.ok(idle.tick > out.info.tick);
-  await new Promise(r => setTimeout(r, 500));
-  const stopped = await (await fetch(`${B}/api/rooms/${code}`)).json();
-  assert.equal(stopped.tick, idle.tick);
+  // The idle alarm can write one last tick after the timer has stopped. Require
+  // a continuous 12 seconds without another D1 update, within a bounded window.
+  // This exceeds the normal 200-tick (10-second) checkpoint interval.
+  let stopped = idle;
+  let stableSince = Date.now();
+  const stopDeadline = Date.now() + 25000;
+  while (Date.now() - stableSince < 12000 && Date.now() < stopDeadline) {
+    await new Promise(r => setTimeout(r, 1000));
+    const current = await (await fetch(`${B}/api/rooms/${code}`)).json();
+    assert.equal(current.players, 0);
+    assert.ok(current.tick >= stopped.tick);
+    if (current.tick !== stopped.tick) stableSince = Date.now();
+    stopped = current;
+  }
+  assert.ok(Date.now() - stableSince >= 12000, 'idle room did not reach a stable checkpoint');
   const restored = await join(users[winnerIndex], 'P' + winnerIndex, winnerIndex === 1 ? 2 : 2.5);
   assert.equal(restored.s.looted['supply:0'], winner);
   assert.equal(restored.s.players[users[1].uid].inv.a9, winner === users[1].uid ? 36 : 12);
