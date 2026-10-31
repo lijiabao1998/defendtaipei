@@ -8,14 +8,16 @@ const useDefault = process.env.MP_USE_DEFAULT === '1';
 // Optional independent diagnostic only; default retains the full natural office-spawn route.
 const doorFixture = process.env.MP_DOOR_FIXTURE === '1';
 const useFirefox = process.env.PW_BROWSER === 'firefox';
-const browser = await (useFirefox ? firefox : chromium).launch({
+const options = {
   executablePath: process.env.PW_CHROMIUM || undefined,
   args: useFirefox ? [] : ['--no-sandbox', '--use-gl=swiftshader', '--enable-unsafe-swiftshader'],
-});
+};
+const browsers = [];
 try {
+  for (let i = 0; i < 2; i++) browsers.push(await (useFirefox ? firefox : chromium).launch(options));
   const contexts = await Promise.all([
-    browser.newContext({ viewport: { width: 960, height: 640 } }),
-    browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: !useFirefox, hasTouch: true }),
+    browsers[0].newContext({ viewport: { width: 960, height: 640 } }),
+    browsers[1].newContext({ viewport: { width: 390, height: 844 }, isMobile: !useFirefox, hasTouch: true }),
   ]);
   const pages = await Promise.all(contexts.map(c => c.newPage()));
   for (const p of pages) {
@@ -284,7 +286,7 @@ try {
     }),
   );
 } catch (error) {
-  for (const [i, c] of browser.contexts().entries())
+  for (const [i, c] of browsers.flatMap(browser => browser.contexts()).entries())
     for (const p of c.pages()) {
       await p.screenshot({ path: shot(`multiplayer-failure-${i}.png`) }).catch(() => {});
       console.error(
@@ -312,5 +314,5 @@ try {
     }
   throw error;
 } finally {
-  await browser.close();
+  await Promise.all(browsers.map(browser => browser.close()));
 }
