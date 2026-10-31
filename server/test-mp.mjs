@@ -7,7 +7,7 @@ const timeout = setTimeout(
     console.error('Multiplayer test timed out');
     process.exit(1);
   },
-  process.env.MP_TEST_IDLE_RECOVERY ? 110000 : 45000,
+  process.env.MP_TEST_IDLE_RECOVERY ? 140000 : 60000,
 );
 const B = process.argv[2] || 'http://localhost:8787';
 const W = B.replace('http', 'ws');
@@ -55,7 +55,9 @@ function join(u, name, x = 0) {
   });
 }
 const cs = [];
-for (let i = 0; i < 4; i++) cs.push(await join(users[i], 'P' + i, i * 2));
+// Both claimants must be within the 2.2m range of the supply at x=1.
+// Cross-socket message order is intentionally unconstrained.
+for (let i = 0; i < 4; i++) cs.push(await join(users[i], 'P' + i, [0, 2, 2.5, 6][i]));
 const fifth = await join(users[4], 'P4');
 out.fifth = fifth.err || fifth.closed;
 await new Promise(r => setTimeout(r, 1500));
@@ -69,16 +71,31 @@ out.bidirectionalMovement = true;
 for (let i = 0; i < 180; i++) cs[0].ws.send(JSON.stringify({ k: 'ack', tick: 0 }));
 cmd(cs[0], { t: 'equip', weapon: 'hammer' });
 cmd(cs[1], { t: 'equip', weapon: 'pipe' });
-await new Promise(r => setTimeout(r, 300));
+cmd(cs[2], { t: 'equip', weapon: 'hammer' });
+const equipDeadline = Date.now() + 5000;
+while (
+  (cs[1].s.players[users[0].uid]?.weapon !== 'hammer' ||
+    cs[0].s.players[users[1].uid]?.weapon !== 'pipe' ||
+    cs[0].s.players[users[2].uid]?.weapon !== 'hammer') &&
+  Date.now() < equipDeadline
+)
+  await new Promise(r => setTimeout(r, 25));
 assert.equal(cs[1].s.players[users[0].uid].weapon, 'hammer');
 assert.equal(cs[0].s.players[users[1].uid].weapon, 'pipe');
+assert.equal(cs[0].s.players[users[2].uid].weapon, 'hammer');
 out.weaponReplication = true;
 out.ackBacklogDoesNotDropEquipment = true;
 cmd(cs[0], { t: 'move', x: 80, z: 0 }); // speed hack
 cmd(cs[1], { t: 'loot', id: 'supply:0', x: 2, z: 0 });
-cmd(cs[2], { t: 'loot', id: 'supply:0', x: 4, z: 0 }); // contested loot (P2 too far + taken)
+cmd(cs[2], { t: 'loot', id: 'supply:0', x: 2.5, z: 0 }); // contested loot
 cmd(cs[3], { t: 'attack', target: 0 });
-await new Promise(r => setTimeout(r, 1500));
+// Wait for the losing claim's explicit rejection instead of assuming socket order.
+const contestDeadline = Date.now() + 5000;
+while (
+  (!cs[0].rej.includes('speed') || (!cs[1].rej.includes('taken') && !cs[2].rej.includes('taken'))) &&
+  Date.now() < contestDeadline
+)
+  await new Promise(r => setTimeout(r, 25));
 out.rejects = cs.map(c => c.rej);
 out.stream = cs.map(c => ({ snaps: c.snaps, deltas: c.deltas, avgBytes: Math.round(c.bytes / c.msgs) }));
 // reconnect P1 with same token
@@ -91,8 +108,12 @@ out.reconnect = {
   sameId: !!re.s.players[users[1].uid],
   looted: re.s.looted,
 };
-await new Promise(r => setTimeout(r, 11000));
-out.info = await (await fetch(`${B}/api/rooms/${code}`)).json();
+// Wait for 200 authoritative ticks, bounded by wall-clock time.
+const tickDeadline = Date.now() + 30000;
+do {
+  await new Promise(r => setTimeout(r, 250));
+  out.info = await (await fetch(`${B}/api/rooms/${code}`)).json();
+} while (out.info.tick < 200 && Date.now() < tickDeadline);
 for (const c of [...cs, re]) c.ws.close();
 assert.equal(out.noauth, 401);
 assert.equal(out.badroom, 404);
@@ -102,7 +123,12 @@ assert.equal(out.rejects.filter(r => r.includes('taken')).length, 1);
 assert.ok(out.stream.every(c => c.deltas > 0));
 assert.equal(out.reconnect.sameId, true);
 assert.equal(out.reconnect.players, 4);
-assert.ok([users[1].uid, users[2].uid].includes(out.reconnect.looted['supply:0']));
+const winner = out.reconnect.looted['supply:0'];
+assert.ok([users[1].uid, users[2].uid].includes(winner));
+const winnerIndex = users[1].uid === winner ? 1 : 2;
+const loserIndex = winnerIndex === 1 ? 2 : 1;
+assert.ok(out.rejects[loserIndex].includes('taken'));
+assert.ok(!out.rejects[winnerIndex].includes('taken'));
 assert.ok(out.info.tick >= 200);
 if (process.env.MP_TEST_IDLE_RECOVERY) {
   // Wait beyond the actual server grace period: tick stops and final D1 checkpoint is written.
@@ -113,11 +139,15 @@ if (process.env.MP_TEST_IDLE_RECOVERY) {
   await new Promise(r => setTimeout(r, 500));
   const stopped = await (await fetch(`${B}/api/rooms/${code}`)).json();
   assert.equal(stopped.tick, idle.tick);
-  const restored = await join(users[1], 'P1', 2);
-  assert.equal(restored.s.looted['supply:0'], out.reconnect.looted['supply:0']);
-  assert.equal(restored.s.players[users[1].uid].inv.a9, 36);
+  const restored = await join(users[winnerIndex], 'P' + winnerIndex, winnerIndex === 1 ? 2 : 2.5);
+  assert.equal(restored.s.looted['supply:0'], winner);
+  assert.equal(restored.s.players[users[1].uid].inv.a9, winner === users[1].uid ? 36 : 12);
+  assert.equal(restored.s.players[users[2].uid].inv.a9, winner === users[2].uid ? 36 : 12);
   assert.equal(restored.s.players[users[1].uid].weapon, 'pipe');
+  assert.equal(restored.s.players[users[2].uid].weapon, 'hammer');
   assert.ok(restored.s.players[users[1].uid].ack > 0);
+  assert.ok(restored.s.players[users[2].uid].ack > 0);
+  assert.ok(restored.s.players[winner].on);
   out.durableSurvivorInventory = true;
   restored.ws.close();
   out.noR2IdleRecovery = true;
