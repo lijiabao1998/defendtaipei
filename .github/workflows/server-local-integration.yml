@@ -1,11 +1,6 @@
 name: Server dependency local integration
 on:
   pull_request:
-    paths:
-      - 'server/**'
-      - 'src/core/sim/**'
-      - 'scripts/checks/multiplayer-unit.mjs'
-      - '.github/workflows/server-local-integration.yml'
   workflow_dispatch:
 permissions:
   contents: read
