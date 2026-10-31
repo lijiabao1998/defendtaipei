@@ -7,10 +7,30 @@ const timeout = setTimeout(
     console.error('Multiplayer test timed out');
     process.exit(1);
   },
-  process.env.MP_TEST_IDLE_RECOVERY ? 110000 : 45000,
+  process.env.MP_TEST_IDLE_RECOVERY ? 180000 : 60000,
 );
 const B = process.argv[2] || 'http://localhost:8787';
+if (process.env.MP_TEST_LOCAL_ONLY === '1') {
+  const url = new URL(B);
+  assert.equal(url.protocol, 'http:');
+  assert.equal(url.hostname, '127.0.0.1');
+  assert.equal(url.port, '8787');
+  assert.equal(url.pathname, '/');
+  assert.equal(url.username + url.password + url.search + url.hash, '');
+}
 const W = B.replace('http', 'ws');
+async function waitUntil(condition, label, budget = 10000) {
+  const deadline = Date.now() + budget;
+  while (!condition() && Date.now() < deadline) await new Promise(r => setTimeout(r, 25));
+  assert.ok(condition(), `${label} timed out`);
+}
+function close(c) {
+  if (c.ws.readyState === WebSocket.CLOSED) return Promise.resolve();
+  return new Promise(resolve => {
+    c.ws.once('close', resolve);
+    c.ws.close();
+  });
+}
 const out = {};
 const post = async (p, tok) =>
   (await fetch(B + p, { method: 'POST', headers: tok ? { Authorization: 'Bearer ' + tok } : {} })).json();
@@ -62,28 +82,36 @@ await new Promise(r => setTimeout(r, 1500));
 const cmd = (c, o) => c.ws.send(JSON.stringify({ k: 'cmd', c: { seq: ++c.seq, ...o } }));
 cmd(cs[0], { t: 'move', x: 0.3, z: 0 });
 cmd(cs[1], { t: 'move', x: 2.3, z: 0 });
-await new Promise(r => setTimeout(r, 300));
+await waitUntil(
+  () => cs[1].s.players[users[0].uid]?.x === 0.3 && cs[0].s.players[users[1].uid]?.x === 2.3,
+  'bidirectional movement',
+);
 assert.equal(cs[1].s.players[users[0].uid].x, 0.3);
 assert.equal(cs[0].s.players[users[1].uid].x, 2.3);
 out.bidirectionalMovement = true;
 for (let i = 0; i < 180; i++) cs[0].ws.send(JSON.stringify({ k: 'ack', tick: 0 }));
 cmd(cs[0], { t: 'equip', weapon: 'hammer' });
 cmd(cs[1], { t: 'equip', weapon: 'pipe' });
-await new Promise(r => setTimeout(r, 300));
+await waitUntil(
+  () => cs[1].s.players[users[0].uid]?.weapon === 'hammer' && cs[0].s.players[users[1].uid]?.weapon === 'pipe',
+  'bidirectional equipment',
+);
 assert.equal(cs[1].s.players[users[0].uid].weapon, 'hammer');
 assert.equal(cs[0].s.players[users[1].uid].weapon, 'pipe');
 out.weaponReplication = true;
 out.ackBacklogDoesNotDropEquipment = true;
 cmd(cs[0], { t: 'move', x: 80, z: 0 }); // speed hack
 cmd(cs[1], { t: 'loot', id: 'b12_0', x: 2, z: 0 });
-cmd(cs[2], { t: 'loot', id: 'b12_0', x: 4, z: 0 }); // contested loot (P2 too far + taken)
+cmd(cs[2], { t: 'loot', id: 'b12_0', x: 4, z: 0 }); // both claimants are in range
 cmd(cs[3], { t: 'attack', target: 0 });
-await new Promise(r => setTimeout(r, 1500));
+await waitUntil(
+  () => cs[0].rej.includes('speed') && (cs[1].rej.includes('taken') || cs[2].rej.includes('taken')),
+  'speed rejection and contested loot',
+);
 out.rejects = cs.map(c => c.rej);
 out.stream = cs.map(c => ({ snaps: c.snaps, deltas: c.deltas, avgBytes: Math.round(c.bytes / c.msgs) }));
 // reconnect P1 with same token
-cs[1].ws.close();
-await new Promise(r => setTimeout(r, 800));
+await close(cs[1]);
 const re = await join(users[1], 'P1', 2);
 out.reconnect = {
   snap: re.snaps,
@@ -91,9 +119,13 @@ out.reconnect = {
   sameId: !!re.s.players[users[1].uid],
   looted: re.s.looted,
 };
-await new Promise(r => setTimeout(r, 11000));
-out.info = await (await fetch(`${B}/api/rooms/${code}`)).json();
-for (const c of [...cs, re]) c.ws.close();
+// Wait for 200 authoritative ticks rather than relying on a fixed delay.
+const tickDeadline = Date.now() + 30000;
+do {
+  await new Promise(r => setTimeout(r, 250));
+  out.info = await (await fetch(`${B}/api/rooms/${code}`)).json();
+} while (out.info.tick < 200 && Date.now() < tickDeadline);
+await Promise.all([...cs, re].map(close));
 assert.equal(out.noauth, 401);
 assert.equal(out.badroom, 404);
 assert.equal(out.fifth, 'room full');
@@ -102,7 +134,11 @@ assert.equal(out.rejects.filter(r => r.includes('taken')).length, 1);
 assert.ok(out.stream.every(c => c.deltas > 0));
 assert.equal(out.reconnect.sameId, true);
 assert.equal(out.reconnect.players, 4);
-assert.ok([users[1].uid, users[2].uid].includes(out.reconnect.looted.b12_0));
+const winner = out.reconnect.looted.b12_0;
+assert.ok([users[1].uid, users[2].uid].includes(winner));
+const loserIndex = winner === users[1].uid ? 2 : 1;
+assert.ok(out.rejects[loserIndex].includes('taken'));
+assert.ok(!out.rejects[loserIndex === 1 ? 2 : 1].includes('taken'));
 assert.ok(out.info.tick >= 200);
 if (process.env.MP_TEST_IDLE_RECOVERY) {
   // Wait beyond the actual server grace period: tick stops and final D1 checkpoint is written.
@@ -110,9 +146,20 @@ if (process.env.MP_TEST_IDLE_RECOVERY) {
   const idle = await (await fetch(`${B}/api/rooms/${code}`)).json();
   assert.equal(idle.players, 0);
   assert.ok(idle.tick > out.info.tick);
-  await new Promise(r => setTimeout(r, 500));
-  const stopped = await (await fetch(`${B}/api/rooms/${code}`)).json();
-  assert.equal(stopped.tick, idle.tick);
+  // The idle alarm can persist one final tick after the timer stops. Require
+  // a continuous stable D1 snapshot longer than the normal checkpoint period.
+  let stopped = idle;
+  let stableSince = Date.now();
+  const stopDeadline = Date.now() + 25000;
+  while (Date.now() - stableSince < 12000 && Date.now() < stopDeadline) {
+    await new Promise(r => setTimeout(r, 1000));
+    const current = await (await fetch(`${B}/api/rooms/${code}`)).json();
+    assert.equal(current.players, 0);
+    assert.ok(current.tick >= stopped.tick);
+    if (current.tick !== stopped.tick) stableSince = Date.now();
+    stopped = current;
+  }
+  assert.ok(Date.now() - stableSince >= 12000, 'idle room did not reach a stable checkpoint');
   const restored = await join(users[1], 'P1', 2);
   assert.equal(restored.s.looted.b12_0, out.reconnect.looted.b12_0);
   restored.ws.close();
