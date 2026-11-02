@@ -52,6 +52,8 @@ jobs:
             script: scripts/checks/story-lifecycle.mjs
           - name: alert test tone
             script: scripts/checks/v2321testtone.mjs
+          - name: enterable district buildings
+            script: scripts/checks/v233enter.mjs
     steps:
       - uses: actions/checkout@v4
         with:

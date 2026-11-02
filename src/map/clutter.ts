@@ -249,10 +249,25 @@ const laundry = (r: () => number): Part[] => {
 };
 // ---------- plan ----------
 type Ctx = { pip: (p: V2, pts: V2[]) => boolean; onRoad: (x: number, z: number) => boolean };
-export function plan(b: any, ctx: Ctx): Plan | null {
+/** v23.3 streamed district buildings pass their own seed and per-tile container ids */
+export type PlanOpt = { seed?: number; contId?: (n: number) => string };
+const seedOf = (b: any, o?: PlanOpt) => o?.seed ?? (b.id + 1) * 2654435761;
+function pickUse(b: any, street: boolean, r: () => number): Use {
+  return b.type && b.type !== 'home'
+    ? 'grocery'
+    : street && r() < 0.55
+      ? (['eatery', 'scooter', 'grocery'] as Use[])[Math.floor(r() * 3)]
+      : 'home';
+}
+/** the ground-floor use plan() will pick, without planning the furniture (door frame colour at tile build) */
+export function useOf(b: any, street: boolean, o?: PlanOpt): Use {
+  return pickUse(b, street, mulberry(seedOf(b, o)));
+}
+export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
   const door = b.door;
   if (!door) return null;
-  const r = mulberry((b.id + 1) * 2654435761);
+  const r = mulberry(seedOf(b, opt));
+  const contId = opt?.contId ?? ((n: number) => `f${b.id}_${n}`);
   const O = door.p as V2;
   const ex = door.c[0] - door.a[0],
     ez = door.c[1] - door.a[1],
@@ -277,12 +292,7 @@ export function plan(b: any, ctx: Ctx): Plan | null {
   const inside = (u: number, v: number) => ctx.pip(W(u, v), b.pts);
   const area = (b.maxx - b.minx) * (b.maxz - b.minz);
   const street = ctx.onRoad(O[0] - N[0] * 3, O[1] - N[1] * 3);
-  const use: Use =
-    b.type && b.type !== 'home'
-      ? 'grocery'
-      : street && r() < 0.55
-        ? (['eatery', 'scooter', 'grocery'] as Use[])[Math.floor(r() * 3)]
-        : 'home';
+  const use = pickUse(b, street, r);
   const P: Plan = { use, O, U, N, pieces: [], decals: [], segs: [], conts: [] };
   const rects: [number, number, number, number][] = [];
   /** place a piece at (u, v) facing `face` (0 = toward door, 1 = side, 2 = back, 3 = other side); tries nudges */
@@ -320,7 +330,7 @@ export function plan(b: any, ctx: Ctx): Plan | null {
       }
       if (pc.cont)
         P.conts.push({
-          id: `f${b.id}_${P.conts.length}`,
+          id: contId(P.conts.length),
           p: W(uu, vv),
           label: pc.cont.label,
           loot: pc.cont.loot,

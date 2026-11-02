@@ -8,7 +8,8 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { canvasTex, roadMat } from './textures';
 import { lotTex, ARCADE_MATS, worldUV } from './paving';
-import { stair, leanTo, ac, brickPatch, brickMat, vsign, vsignMat, VSN, furnishRoom } from './walkup';
+import { stair, leanTo, ac, brickPatch, brickMat, vsign, vsignMat, VSN } from './walkup';
+import { useOf, type Use } from './clutter';
 import { Forest } from './trees';
 import { placeRooftop, dressRoof, pickRoofMat, roofClass, roofDetMat, roofConc } from './rooftin';
 import { VehicleSystem, type VehicleKind } from '../systems/vehicles';
@@ -32,6 +33,35 @@ export type DIndex = {
   tiles: Record<string, [number, number]>;
 };
 export type Front = { x: number; z: number; nx: number; nz: number; ux: number; uz: number; len: number };
+/** v23.3 enterable district building: the whole ground floor is walkable behind a street door and is furnished
+ * lazily near the player by core/main through clutter.ts (same planner as the core blocks). Deterministic per tile. */
+export type DEnter = {
+  key: string;
+  /** building index in the tile data (stable; container ids derive from it) */
+  bi: number;
+  /** 32-bit seed for the interior plan */
+  id: number;
+  pts: V2[];
+  h: number;
+  type: 'home';
+  minx: number;
+  maxx: number;
+  minz: number;
+  maxz: number;
+  c: V2;
+  /** street door: centre and jambs */
+  door: { p: V2; a: V2; c: V2 };
+  /** ground-floor use the planner will pick (door frame colour) */
+  use: Use;
+  /** street test result shared with the planner */
+  street: boolean;
+  /** footprint edge index that holds the door */
+  edge: number;
+  /** oriented cut box: origin, axis U (N = (-Uz, Ux) points inward), [umin, umax, vmin, vmax] with margin */
+  O: V2;
+  U: V2;
+  ub: [number, number, number, number];
+};
 export type TileInfo = {
   key: string;
   cx: number;
@@ -39,7 +69,7 @@ export type TileInfo = {
   fronts: Front[];
   roads: DRoad[];
   rnd: () => number;
-  rooms: { x: number; z: number; kind: 'home' | 'shop'; nx: number; nz: number }[];
+  enter: DEnter[];
 };
 type Seg = { a: V2; b: V2; low?: boolean };
 export type DistrictDeps = {
@@ -74,6 +104,20 @@ export const RIVER_W = 140;
 export const LOAD_R = 520,
   DETAIL_R = 300,
   UNLOAD_R = 680;
+/** v23.3 enterable buildings: share of eligible street-front buildings, cap per tile, door width, cut-box margin */
+export const ENTER_P = 0.6,
+  ENTER_CAP = 24,
+  DOOR_W = 1.4,
+  CUT_M = 1.0;
+const DOOR_H = 2.4,
+  INSET = 0.1,
+  EG = 10;
+const PLASTER = [0xe8e2d0, 0xd8dcd0, 0xe6d8c4, 0xe2e6dc];
+function hash32(key: string) {
+  let h = 2166136261;
+  for (let i = 0; i < key.length; i++) h = Math.imul(h ^ key.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
 
 export function seeded(key: string) {
   let h = 2166136261;
@@ -276,6 +320,8 @@ export class District {
   stats = { loads: 0, unloads: 0, maxLoaded: 0, builtMs: 0 };
   saved: Record<string, any> = {};
   private rgrid = new Map<string, [V2, V2, number][]>();
+  /** v23.3 enterable buildings of loaded tiles, bucketed in EG m cells */
+  private egrid = new Map<string, DEnter[]>();
   private queue: string[] = [];
   private busy = false;
   constructor(private d: DistrictDeps) {
@@ -349,6 +395,96 @@ export class District {
   }
   inside(x: number, z: number) {
     return !this.ix || this.ix.boundary.some(b => pip([x, z], b));
+  }
+  /** v23.3 the enterable building whose footprint contains (x, z), if its tile is loaded */
+  enterAt(x: number, z: number): DEnter | null {
+    for (const e of this.egrid.get(Math.floor(x / EG) + ',' + Math.floor(z / EG)) || [])
+      if (x > e.minx && x < e.maxx && z > e.minz && z < e.maxz && pip([x, z], e.pts)) return e;
+    return null;
+  }
+  /** v23.3 every enterable building of the loaded tiles */
+  *enterables() {
+    for (const t of this.tiles.values()) yield* t.info.enter;
+  }
+  private egridEach(e: DEnter, f: (k: string) => void) {
+    for (let x = Math.floor(e.minx / EG); x <= Math.floor(e.maxx / EG); x++)
+      for (let z = Math.floor(e.minz / EG); z <= Math.floor(e.maxz / EG); z++) f(x + ',' + z);
+  }
+  /**
+   * v23.3 decide whether a footprint becomes enterable and where its street door goes. Uses its own random stream
+   * (er) so the rest of the tile's deterministic content keeps its sequence.
+   */
+  private planEnter(key: string, bi: number, pts: V2[], area: number, lv: number, h: number, er: () => number) {
+    if (area < 20 || area > 1500 || lv > 8 || er() >= ENTER_P) return null;
+    let best = -1,
+      bl = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i],
+        c = pts[(i + 1) % pts.length];
+      const L = Math.hypot(c[0] - a[0], c[1] - a[1]);
+      if (L < 3.6) continue;
+      const ux = (c[0] - a[0]) / L,
+        uz = (c[1] - a[1]) / L;
+      let nx = uz,
+        nz = -ux;
+      const mx = (a[0] + c[0]) / 2,
+        mz = (a[1] + c[1]) / 2;
+      if (pip([mx + nx * 0.3, mz + nz * 0.3], pts)) ((nx = -nx), (nz = -nz));
+      if (this.roadDist(mx + nx * 3, mz + nz * 3) > 3) continue;
+      if (L > bl) ((bl = L), (best = i));
+    }
+    if (best < 0) return null;
+    const a = pts[best],
+      c = pts[(best + 1) % pts.length];
+    const ux = (c[0] - a[0]) / bl,
+      uz = (c[1] - a[1]) / bl;
+    const t0 = 0.7 + er() * Math.max(0, bl - DOOR_W - 1.4);
+    const d0: V2 = [a[0] + ux * t0, a[1] + uz * t0],
+      d1: V2 = [a[0] + ux * (t0 + DOOR_W), a[1] + uz * (t0 + DOOR_W)];
+    const O: V2 = [(d0[0] + d1[0]) / 2, (d0[1] + d1[1]) / 2];
+    let N: V2 = [-uz, ux];
+    if (!pip([O[0] + N[0] * 0.6, O[1] + N[1] * 0.6], pts)) N = [uz, -ux];
+    if (!pip([O[0] + N[0] * 0.6, O[1] + N[1] * 0.6], pts)) return null;
+    const U: V2 = [N[1], -N[0]]; // so that N = (-Uz, Ux), the planner's right-handed frame
+    let umin = 1e9,
+      umax = -1e9,
+      vmin = 1e9,
+      vmax = -1e9;
+    for (const q of pts) {
+      const du = (q[0] - O[0]) * U[0] + (q[1] - O[1]) * U[1],
+        dv = (q[0] - O[0]) * N[0] + (q[1] - O[1]) * N[1];
+      umin = Math.min(umin, du);
+      umax = Math.max(umax, du);
+      vmin = Math.min(vmin, dv);
+      vmax = Math.max(vmax, dv);
+    }
+    if (umax - umin < 3 || vmax < 3) return null;
+    const xs = pts.map(q => q[0]),
+      zs = pts.map(q => q[1]);
+    const id = hash32('dt23e:' + key + ':' + bi);
+    const street = this.roadDist(O[0] - N[0] * 3, O[1] - N[1] * 3) < 5;
+    const e: DEnter = {
+      key,
+      bi,
+      id,
+      pts,
+      h,
+      type: 'home',
+      minx: Math.min(...xs),
+      maxx: Math.max(...xs),
+      minz: Math.min(...zs),
+      maxz: Math.max(...zs),
+      c: [xs.reduce((s, v) => s + v, 0) / xs.length, zs.reduce((s, v) => s + v, 0) / zs.length],
+      door: { p: O, a: d0, c: d1 },
+      use: 'home',
+      street,
+      edge: best,
+      O,
+      U,
+      ub: [umin - CUT_M, umax + CUT_M, vmin - CUT_M, vmax + CUT_M],
+    };
+    e.use = useOf(e, street, { seed: id });
+    return e;
   }
   /** distance to nearest loaded/cached district road edge (centre distance minus half width) */
   roadDist(x: number, z: number) {
@@ -426,6 +562,8 @@ export class District {
     const tile = this.build(k, this.data.get(k)!, (tx + 0.5) * T, (tz + 0.5) * T);
     this.stats.builtMs = Math.max(this.stats.builtMs, performance.now() - t0);
     this.tiles.set(k, tile);
+    for (const e of tile.info.enter)
+      this.egridEach(e, c => (this.egrid.get(c) || this.egrid.set(c, []).get(c)!).push(e));
     this.stats.loads++;
     this.stats.maxLoaded = Math.max(this.stats.maxLoaded, this.tiles.size);
     this.d.onLoad?.(tile.info);
@@ -439,6 +577,13 @@ export class District {
       if (m.isMesh && m.geometry && !(m.geometry as any).shared) m.geometry.dispose();
     });
     for (const s of t.segs) this.d.removeSeg(s);
+    for (const e of t.info.enter)
+      this.egridEach(e, c => {
+        const a = this.egrid.get(c);
+        const i = a ? a.indexOf(e) : -1;
+        if (i >= 0) a!.splice(i, 1);
+        if (a && !a.length) this.egrid.delete(c);
+      });
     this.tiles.delete(k);
     this.stats.unloads++;
     this.d.onUnload?.(k);
@@ -539,11 +684,59 @@ export class District {
     const brickG: THREE.BufferGeometry[] = [],
       vsG: THREE.BufferGeometry[] = [],
       tileG: THREE.BufferGeometry[][] = ARCADE_MATS.map(() => []);
-    const rooms: { x: number; z: number; kind: 'home' | 'shop'; nx: number; nz: number }[] = [];
+    // v23.3 footprints of this tile and its neighbours (already fetched), to reject nested / blocked doors
+    const [ktx, ktz] = key.split('_').map(Number);
+    const near = [-1, 0, 1].flatMap(i =>
+      [-1, 0, 1].flatMap(j =>
+        (this.data.get(ktx + i + '_' + (ktz + j))?.b || [])
+          .filter(o => o.p.length >= 3)
+          .map(o => {
+            const xs = o.p.map(q => q[0]),
+              zs = o.p.map(q => q[1]);
+            return { p: o.p, x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };
+          }),
+      ),
+    );
+    const otherAt = (x: number, z: number, self: V2[]) =>
+      near.some(o => o.p !== self && x > o.x0 && x < o.x1 && z > o.z0 && z < o.z1 && pip([x, z], o.p));
+    // v23.3 enterable buildings (own random stream so the rest of the tile keeps its deterministic sequence)
+    const er = seeded('dt23e:' + key);
+    const enter: DEnter[] = [];
+    /** points just outside each street door: keep parked scooters out of the doorway */
+    const doorOut: V2[] = [];
     let stairs = 0;
     const local = (gs: THREE.BufferGeometry[], m: THREE.Matrix4, into: THREE.BufferGeometry[]) =>
       gs.forEach(q => into.push(q.applyMatrix4(m)));
-    for (const b of td.b) {
+    /**
+     * vertical wall quad p→q between y0 and y1 whose lit side faces `face` (x, z). v23.3: the triangle order follows
+     * the facing side, so walls render from outside whatever the winding of the OSM ring (single-sided materials).
+     */
+    const wallQuad = (
+      p: V2,
+      q: V2,
+      y0: number,
+      y1: number,
+      uv: [number, number, number, number],
+      face: V2,
+      hex: number,
+      jitter: number,
+    ) => {
+      const pg = new THREE.BufferGeometry();
+      pg.setAttribute(
+        'position',
+        new THREE.Float32BufferAttribute([p[0], y0, p[1], q[0], y0, q[1], q[0], y1, q[1], p[0], y1, p[1]], 3),
+      );
+      const [u0, u1, v0, v1] = uv;
+      pg.setAttribute('uv', new THREE.Float32BufferAttribute([u0, v0, u1, v0, u1, v1, u0, v1], 2));
+      const [fx, fz] = face;
+      pg.setAttribute('normal', new THREE.Float32BufferAttribute([fx, 0, fz, fx, 0, fz, fx, 0, fz, fx, 0, fz], 3));
+      // front face of (p, q, q-top) points to (-(qz - pz), qx - px)
+      const front = -(q[1] - p[1]) * fx + (q[0] - p[0]) * fz;
+      pg.setIndex(front >= 0 ? [0, 1, 2, 0, 2, 3] : [0, 2, 1, 0, 3, 2]);
+      return paint(pg, hex, jitter);
+    };
+    for (let bi = 0; bi < td.b.length; bi++) {
+      const b = td.b[bi];
       const pts = b.p;
       if (pts.length < 3) continue;
       let A = 0;
@@ -558,6 +751,25 @@ export class District {
       const h = GF + (lv - 1) * FH;
       const tint = WALLTINT[Math.floor(rnd() * WALLTINT.length)];
       const awn = AWN[Math.floor(rnd() * AWN.length)];
+      let ent = enter.length < ENTER_CAP ? this.planEnter(key, bi, pts, Math.abs(A / 2), lv, h, er) : null;
+      // not when the outline sits inside another one (overlapping OSM parts) or the door opens into a neighbour
+      if (
+        ent &&
+        (otherAt(ent.c[0], ent.c[1], pts) ||
+          otherAt(ent.door.p[0] + ent.U[1] * 0.8, ent.door.p[1] - ent.U[0] * 0.8, pts) ||
+          otherAt(ent.door.p[0] - ent.U[1] * 0.8, ent.door.p[1] + ent.U[0] * 0.8, pts))
+      )
+        ent = null;
+      const plaster = PLASTER[Math.floor(er() * PLASTER.length)];
+      if (ent) {
+        enter.push(ent);
+        // tiled floor over the whole footprint (one style per building)
+        const sh = new THREE.Shape(pts.map(p => new THREE.Vector2(p[0], -p[1])));
+        const fl = new THREE.ShapeGeometry(sh);
+        fl.rotateX(-Math.PI / 2);
+        fl.translate(0, 0.03, 0);
+        tileG[Math.floor(er() * tileG.length)].push(worldUV(fl, 1));
+      }
       let s0 = 0;
       for (let i = 0; i < pts.length; i++) {
         const a = pts[i],
@@ -575,54 +787,21 @@ export class District {
         const angE = Math.atan2(nx, nz),
           XX = nz,
           XZ = -nx; // local +x in world
-        // v21.5 enterable ground floor: one bay of a street-front walk-up opens into a furnished room
-        let room: { w: number; d: number; cx: number; cz: number } | null = null;
-        if (L >= 4 && L < 40 && rdE <= 3 && lv <= 7 && rooms.length < 6 && rnd() < 0.3) {
-          const w = Math.min(4.2, L - 0.6),
-            d = 4.6,
-            t0 = 0.3 + rnd() * (L - w - 0.6);
-          const cx2 = a[0] + ux * (t0 + w / 2),
-            cz2 = a[1] + uz * (t0 + w / 2);
-          const ok = [
-            [-w / 2 + 0.2, -d + 0.2],
-            [w / 2 - 0.2, -d + 0.2],
-            [0, -d / 2],
-          ].every(([lx, lz]) => pip([cx2 + XX * lx + nx * lz, cz2 + XZ * lx + nz * lz], pts));
-          if (ok) room = { w, d, cx: cx2, cz: cz2 };
-        }
-        if (room) {
-          const { w, d, cx: rx, cz: rz } = room;
-          const W2 = (lx: number, lz: number): V2 => [rx + XX * lx + nx * lz, rz + XZ * lx + nz * lz];
-          const dl = W2(-0.7, 0),
-            dr = W2(0.7, 0);
-          // street wall split around a 1.4 m doorway, then the room's own side and back walls
-          const near = (q: V2) => Math.hypot(q[0] - a[0], q[1] - a[1]);
-          const [d0, d1] = near(dl) < near(dr) ? [dl, dr] : [dr, dl];
-          const rs: Seg[] = [
-            { a: [a[0], a[1]], b: d0 },
-            { a: d1, b: [c[0], c[1]] },
-            { a: W2(-w / 2, 0), b: W2(-w / 2, -d) },
-            { a: W2(w / 2, 0), b: W2(w / 2, -d) },
-            { a: W2(-w / 2, -d), b: W2(w / 2, -d) },
-          ];
-          for (const sg of rs) {
-            segs.push(sg);
-            this.d.addSeg(sg);
-          }
-          const kind = rnd() < 0.5 ? 'home' : 'shop';
-          const M = place(rx, 0, rz, angE, 1, 1, 1);
-          local(furnishRoom({ kind, w, d }, rnd, GF), M, misc);
-          // old tile floor (one style per room)
-          const fl = new THREE.BoxGeometry(w, 0.04, d).translate(0, 0.02, -d / 2).applyMatrix4(M);
-          tileG[Math.floor(rnd() * tileG.length)].push(worldUV(fl, 1));
-          const ip = W2(0, -d / 2);
-          rooms.push({ x: ip[0], z: ip[1], kind, nx, nz });
-          if (kind === 'shop' && rnd() < 0.5) {
-            const sp = W2(0.6, -2.6);
-            veh.push({ x: sp[0], z: sp[1], ang: angE, kind: 'scooter' });
-          }
-        } else {
-          const seg: Seg = { a: [a[0], a[1]], b: [c[0], c[1]] };
+        const isDoor = !!ent && ent.edge === i;
+        // street wall: v23.3 split around the doorway of an enterable building
+        const runs: [V2, V2][] = isDoor
+          ? [
+              [[a[0], a[1]], ent!.door.a],
+              [ent!.door.c, [c[0], c[1]]],
+            ]
+          : [
+              [
+                [a[0], a[1]],
+                [c[0], c[1]],
+              ],
+            ];
+        for (const [p, q] of runs) {
+          const seg: Seg = { a: p, b: q };
           segs.push(seg);
           this.d.addSeg(seg);
         }
@@ -650,19 +829,44 @@ export class District {
           }
         }
         // wall quads: ground band (shutters) + upper floors (stained walk-up bays)
-        const quad = (y0: number, y1: number, v0: number, v1: number) => {
-          const pg = new THREE.BufferGeometry();
-          const P = [a[0], y0, a[1], c[0], y0, c[1], c[0], y1, c[1], a[0], y1, a[1]];
-          const u0 = s0 / 3.6,
-            u1 = (s0 + L) / 3.6;
-          pg.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
-          pg.setAttribute('uv', new THREE.Float32BufferAttribute([u0, v0, u1, v0, u1, v1, u0, v1], 2));
-          pg.setAttribute('normal', new THREE.Float32BufferAttribute([nx, 0, nz, nx, 0, nz, nx, 0, nz, nx, 0, nz], 3));
-          pg.setIndex([0, 1, 2, 0, 2, 3]);
-          return paint(pg, tint, 0.06);
-        };
-        gr.push(quad(0, Math.min(GF, h), 0, 1));
-        if (h > GF) up.push(quad(GF, h, 0, (h - GF) / FH));
+        const gH = Math.min(GF, h);
+        const uAt = (q: V2) => (s0 + Math.hypot(q[0] - a[0], q[1] - a[1])) / 3.6;
+        const out: V2 = [nx, nz];
+        if (isDoor) {
+          const [d0, d1] = [ent!.door.a, ent!.door.c];
+          gr.push(wallQuad([a[0], a[1]], d0, 0, gH, [uAt(a), uAt(d0), 0, 1], out, tint, 0.06));
+          gr.push(wallQuad(d1, [c[0], c[1]], 0, gH, [uAt(d1), uAt(c), 0, 1], out, tint, 0.06));
+          gr.push(wallQuad(d0, d1, DOOR_H, gH, [uAt(d0), uAt(d1), DOOR_H / GF, 1], out, tint, 0.06));
+        } else gr.push(wallQuad([a[0], a[1]], [c[0], c[1]], 0, gH, [uAt(a), uAt(c), 0, 1], out, tint, 0.06));
+        if (h > GF)
+          up.push(wallQuad([a[0], a[1]], [c[0], c[1]], GF, h, [uAt(a), uAt(c), 0, (h - GF) / FH], out, tint, 0.06));
+        if (ent) {
+          // v23.3 plastered inner face, inset so it never fights the outer one; split around the doorway too
+          const inn: V2 = [-nx, -nz];
+          const ins = (q: V2): V2 => [q[0] - nx * INSET, q[1] - nz * INSET];
+          const iq = (p: V2, q: V2, y0: number, y1: number) =>
+            misc.push(wallQuad(ins(p), ins(q), y0, y1, [0, 1, 0, 1], inn, plaster, 0.03));
+          if (isDoor) {
+            const [d0, d1] = [ent.door.a, ent.door.c];
+            iq([a[0], a[1]], d0, 0, gH);
+            iq(d1, [c[0], c[1]], 0, gH);
+            iq(d0, d1, DOOR_H, gH);
+            // painted door frame + threshold (homes: red, shops: orange), like the core doors
+            const fc = ent.use === 'home' ? 0xc0392b : 0xe8681c;
+            const M = place(ent.door.p[0], 0, ent.door.p[1], angE, 1, 1, 1);
+            local(
+              [
+                box(0.14, 2.45, 0.34, -DOOR_W / 2 - 0.07, 1.225, 0, fc),
+                box(0.14, 2.45, 0.34, DOOR_W / 2 + 0.07, 1.225, 0, fc),
+                box(DOOR_W + 0.28, 0.16, 0.34, 0, DOOR_H + 0.03, 0, fc),
+                box(DOOR_W + 0.2, 0.06, 0.6, 0, 0.03, 0, 0xd8d2c4),
+              ],
+              M,
+              misc,
+            );
+            doorOut.push([ent.door.p[0] + nx * 1.2, ent.door.p[1] + nz * 1.2]);
+          } else iq([a[0], a[1]], [c[0], c[1]], 0, gH);
+        }
         s0 += L;
         // street-facing edge → walk-up dressing
         const rd = this.roadDist(mx + nx * 3, mz + nz * 3);
@@ -854,14 +1058,21 @@ export class District {
     );
     inst(LAMP, lampMat, lamps, detail);
     forest.build(detail, true);
-    if (veh.length) {
+    // v23.3 keep parked scooters out of the street doors
+    const vehOk = veh.filter(v => !doorOut.some(q => Math.hypot(v.x - q[0], v.z - q[1]) < 1.6));
+    if (vehOk.length) {
       const vg = new THREE.Group();
-      new VehicleSystem(vg as any).build(veh, mergeGeometries, rnd);
+      new VehicleSystem(vg as any).build(vehOk, mergeGeometries, rnd);
       detail.add(vg);
     }
+    // v23.3 tile meshes take part in the building cut (occlusion.ts) while the player is inside one of them
+    g.traverse(o => {
+      const m = (o as THREE.Mesh).material;
+      if (m) for (const x of Array.isArray(m) ? m : [m]) x.userData.cut = true;
+    });
     this.d.scene.add(g);
     void m4;
-    return { key, cx, cz, g, detail, segs, info: { key, cx, cz, fronts, roads: td.r, rnd, rooms } };
+    return { key, cx, cz, g, detail, segs, info: { key, cx, cz, fronts, roads: td.r, rnd, enter } };
   }
   // ---------- cheap landmarks ----------
   /** footprints the core map must leave empty (its own generic boxes are replaced by the landmark) */
