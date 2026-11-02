@@ -6,6 +6,7 @@ const MAP: [RegExp, string][] = [
   [/開門|撬|open door|pry/i, tr('開門', 'Open')],
   [/爬上|climb to|climb up/i, tr('爬上', 'Climb')],
   [/下樓|爬下|下到|go downstairs|climb down|descend|take the stairs|down to the street/i, tr('下樓', 'Down')],
+  [/上樓|go upstairs/i, tr('上樓', 'Up')],
   [/下車|get off|get out|exit vehicle/i, tr('下車', 'Exit')],
   [
     /騎|開車|上車|^開|^ride(?!.*(?:line|metro|train))|^drive|board(?!.*(?:line|metro|train))|enter vehicle/i,

@@ -30,6 +30,7 @@ import { makeRig, animate, setWeapon, setLodFocus, Rig, AnimState, startMelee, m
 import { SwingTrail } from '../systems/trail';
 import * as SQ from '../npc/squadai';
 import * as CL from '../map/clutter';
+import * as UP from '../map/upstairs';
 import * as BC from '../story/broadcasts/broadcast';
 import { Nav, smooth } from '../systems/nav';
 import { RoadTiles } from '../map/roads';
@@ -566,6 +567,9 @@ function collide(pos: THREE.Vector3, r: number) {
         pos.z = cz + (oz / d) * r;
       }
     }
+  // v23.4 the off-map spaces (metro at z < -6000, upstairs floors east of the district) have their own walls;
+  // clamping them to the map bounds snapped the player out of the station on the first step
+  if (offMap(pos.x, pos.z)) return;
   pos.x = clamp(pos.x, WORLD.minx, WORLD.maxx);
   pos.z = clamp(pos.z, WORLD.minz, WORLD.maxz);
 }
@@ -673,6 +677,23 @@ const bounds = { minx: -500, maxx: 500, minz: -500, maxz: 500 };
 /** whole-district clamp (set from the district index; falls back to the core bounds) */
 const WORLD = { minx: -500, maxx: 500, minz: -500, maxz: 500 };
 const WORLD_B = { ...WORLD };
+/** v23.4 metro (below) or upstairs floor (east): spaces outside the map with their own walls */
+const offMap = (x: number, z: number) => z < -6000 || UP.isUp(x);
+/** v23.4 the 2F the player is on (one at a time, off-map), with the ground point it is anchored to */
+type UpState = {
+  b: Bld | DEnter;
+  dist: DEnter | null;
+  P: CL.Plan;
+  room: UP.UpRoom;
+  furn: THREE.Group;
+  segs: Seg[];
+  conts: Cont[];
+  /** ground-floor point at the foot of the stairs: map streaming, saving and the HUD use it while upstairs */
+  anchor: V2;
+};
+let up: UpState | null = null;
+/** where the player is on the map (the stairwell while upstairs) */
+const mapPos = (): V2 => (up ? up.anchor : [player.pos.x, player.pos.z]);
 function bldAt(x: number, z: number) {
   for (const b of blds) if (x > b.minx && x < b.maxx && z > b.minz && z < b.maxz && pip([x, z], b.pts)) return b;
   return null;
@@ -683,7 +704,7 @@ function placeAt(x: number, z: number): Bld | DEnter | null {
 }
 /** v23.3 indoors for player-facing checks (sleep, shelter, drones, muffled sound): core or district building */
 function indoorAt(x: number, z: number) {
-  return !!placeAt(x, z);
+  return UP.isUp(x) || !!placeAt(x, z);
 }
 
 // ---------- sectors ----------
@@ -3315,7 +3336,8 @@ function clutterTick(dt: number) {
   clutT -= dt;
   if (clutT > 0) return;
   clutT = 0.3;
-  const P = player.pos;
+  const [px, pz] = mapPos(); // v23.4 upstairs: keep the ground floor below furnished
+  const P = { x: px, z: pz };
   let budget = 2;
   const cand: [Bld, number][] = [];
   for (const b of blds) {
@@ -3358,7 +3380,7 @@ function clutterTick(dt: number) {
 }
 // v23.3 enterable district buildings: the same planner furnishes them; furniture, its cover segments and the
 // containers exist only near the player. Container ids t<tile>:<1000 + 64·building + n> are saved with the tile.
-type DClut = { g?: THREE.Group; segs: Seg[] };
+type DClut = { g?: THREE.Group; segs: Seg[]; plan?: CL.Plan };
 const dClut = new Map<DEnter, DClut>();
 const dContId = (e: DEnter, n: number) => `t${e.key}:${1000 + e.bi * 64 + n}`;
 function dPlan(e: DEnter) {
@@ -3375,7 +3397,8 @@ function dropDClut(e: DEnter, live: DClut) {
   dClut.delete(e);
 }
 function districtClutter(budget: number) {
-  const P = player.pos;
+  const [px, pz] = mapPos();
+  const P = { x: px, z: pz };
   const cand: [DEnter, number][] = [];
   for (const e of district.enterables()) {
     const d = Math.max(e.minx - P.x, P.x - e.maxx, e.minz - P.z, P.z - e.maxz, 0);
@@ -3392,6 +3415,7 @@ function districtClutter(budget: number) {
     const live: DClut = { segs: [] };
     dClut.set(e, live);
     if (!C) continue;
+    live.plan = C;
     live.g = CL.build(C);
     scene.add(live.g);
     for (const sg of C.segs) {
@@ -3413,6 +3437,147 @@ function districtClutter(budget: number) {
       rec.conts.push(c);
     }
   }
+}
+// ---------- v23.4 upstairs: 2F of blocks whose ground floor has a stairwell (core and district alike) ----------
+/** world point of a plan-frame (u, v) */
+const planW = (P: CL.Plan, u: number, v: number): V2 => [
+  P.O[0] + P.U[0] * u + P.N[0] * v,
+  P.O[1] + P.U[1] * u + P.N[1] * v,
+];
+const isDEnter = (b: Bld | DEnter): b is DEnter => 'bi' in b;
+const groundPlan = (b: Bld | DEnter): CL.Plan | undefined =>
+  isDEnter(b) ? dClut.get(b)?.plan : ((b as any).clut as CL.Plan | undefined);
+/** the stairwell the player stands at the foot of (ground floor), if any */
+function stairAt(): { b: Bld | DEnter; P: CL.Plan } | null {
+  if (up || drive.cur || roofB || offMap(player.pos.x, player.pos.z)) return null;
+  const b = placeAt(player.pos.x, player.pos.z);
+  const P = b && groundPlan(b);
+  if (!b || !P?.stair) return null;
+  const q = planW(P, P.stair.u, P.stair.v - 1.15);
+  return Math.hypot(q[0] - player.pos.x, q[1] - player.pos.z) < 1.6 ? { b, P } : null;
+}
+/** standing at the top of the stairs (2F) */
+const upLanding = () => !!up && Math.hypot(up.room.land[0] - player.pos.x, up.room.land[1] - player.pos.z) < 1.6;
+/** a free ground-floor spot beside the stairwell (the planner keeps the doorway clear as the fallback) */
+function stairFoot(b: Bld | DEnter, P: CL.Plan): V2 {
+  const { u, v } = P.stair!;
+  for (const [du, dv] of [
+    [0, -1.75],
+    [-0.95, -1.75],
+    [0.95, -1.75],
+    [0, -2.4],
+    [-1.25, -1.0],
+    [1.25, -1.0],
+    [-1.25, 0],
+    [1.25, 0],
+  ]) {
+    const q = planW(P, u + du, v + dv);
+    if (pip(q, b.pts) && walkable(q[0], q[1])) return q;
+  }
+  return planW(P, 0, 1.0);
+}
+function goUp(b: Bld | DEnter, P: CL.Plan) {
+  const dist = isDEnter(b) ? b : null;
+  const off: V2 = [UP.UP_O[0] - b.c[0], UP.UP_O[1] - b.c[1]];
+  const T = (q: V2): V2 => [q[0] + off[0], q[1] + off[1]];
+  const door = b.door!;
+  const bUp = {
+    id: b.id,
+    pts: b.pts.map(T),
+    door: { p: T(door.p), a: T(door.a), c: T(door.c) },
+    type: 'home',
+    h: b.h,
+    minx: b.minx + off[0],
+    maxx: b.maxx + off[0],
+    minz: b.minz + off[1],
+    maxz: b.maxz + off[1],
+  };
+  const st = P.stair!;
+  const seed = ((dist ? dist.id : (b.id + 1) * 2654435761) ^ 0x5bd1e995) >>> 0;
+  const contId = (n: number) => (dist ? `t${dist.key}:${20000 + dist.bi * 64 + n}` : `u${b.id}_${n}`);
+  // same frame as the ground plan (same door), furniture kept off the stair opening and its landing
+  const P2 = CL.plan(
+    bUp,
+    { pip, onRoad: () => false },
+    { seed, contId, reserve: [[st.u - 0.8, st.v - 2.5, st.u + 0.8, st.v + 1.3]], noStair: true },
+  );
+  if (!P2) return false;
+  const street = (i: number) => {
+    const a = b.pts[i],
+      c = b.pts[(i + 1) % b.pts.length];
+    const L = Math.hypot(c[0] - a[0], c[1] - a[1]) || 1;
+    let nx = (c[1] - a[1]) / L,
+      nz = -(c[0] - a[0]) / L;
+    const mx = (a[0] + c[0]) / 2,
+      mz = (a[1] + c[1]) / 2;
+    if (pip([mx + nx * 0.3, mz + nz * 0.3], b.pts)) ((nx = -nx), (nz = -nz));
+    return roadDist(mx + nx * 3, mz + nz * 3) < 4;
+  };
+  const room = UP.buildUpstairs({ pts: bUp.pts, F: { O: P2.O, U: P2.U, N: P2.N }, stair: st, street, seed });
+  scene.add(room.g);
+  const furn = CL.build(P2);
+  scene.add(furn);
+  const segs: Seg[] = [];
+  for (const q of room.segs) {
+    const sg = { a: q.a, b: q.b } as Seg;
+    addSeg(sg);
+    segs.push(sg);
+  }
+  for (const q of P2.segs) {
+    const sg = { a: q.a, b: q.b, h: q.h } as Seg;
+    addSeg(sg, q.h < 1.3);
+    segs.push(sg);
+  }
+  const sv = dist ? district.saved[dist.key]?.c || {} : null;
+  const cs: Cont[] = [];
+  for (const k of P2.conts) {
+    let x = k.seed >>> 0;
+    const r = () => (x = (x * 1664525 + 1013904223) >>> 0) / 4294967296;
+    const items = (sv ? sv[+k.id.split(':')[1]] : savedF.get(k.id)) ?? rollLoot(k.loot, r);
+    const c = makeCont(k.id, k.p, 'crate', undefined, { ...items });
+    c.label = k.label;
+    c.mesh.visible = false;
+    cs.push(c);
+  }
+  up = { b, dist, P, room, furn, segs, conts: cs, anchor: stairFoot(b, P) };
+  player.pos.set(room.land[0], 0, room.land[1]);
+  player.vel.set(0, 0, 0);
+  player.cover = null;
+  log(tr('你走上二樓。', 'You go up to the second floor.'), '#fd9');
+  return true;
+}
+function goDown() {
+  const u = up!;
+  UP.disposeUpstairs(u.room);
+  CL.dispose(u.furn);
+  for (const sg of u.segs) removeSeg(sg);
+  // keep what was taken: district containers per tile, core ones with the other furniture containers
+  if (u.dist && u.conts.length) {
+    const c: Record<number, Record<string, number>> = { ...(district.saved[u.dist.key]?.c || {}) };
+    for (const q of u.conts) c[+q.id.split(':')[1]] = q.items;
+    district.save(u.dist.key, 'c', c);
+  }
+  for (const q of u.conts) {
+    if (!u.dist) savedF.set(q.id, q.items);
+    q.mesh.parent?.remove(q.mesh);
+    const i = conts.indexOf(q);
+    if (i >= 0) conts.splice(i, 1);
+  }
+  up = null;
+  const q = stairFoot(u.b, u.P);
+  player.pos.set(q[0], 0, q[1]);
+  player.vel.set(0, 0, 0);
+  log(tr('你走下樓梯，回到一樓。', 'You go back down to the ground floor.'), '#fd9');
+}
+/** [E] at the foot of the stairs / at the top: change floor */
+function upToggle() {
+  if (up) {
+    if (!upLanding()) return false;
+    goDown();
+    return true;
+  }
+  const s = stairAt();
+  return !!s && goUp(s.b, s.P);
 }
 function noise(x: number, z: number, r: number) {
   if (started && r >= 10) {
@@ -3639,6 +3804,7 @@ BC.unlockBroadcast();
 const pDist = (x: number, z: number) => Math.hypot(player.pos.x - x, player.pos.z - z);
 function surfaceAt(x: number, z: number): AU.Surface {
   if (z < -6000) return 'metro';
+  if (UP.isUp(x)) return 'wood';
   const b = bldAt(x, z);
   if (b) return b.type === 'home' || b.type === 'house' || b.type === 'residential' ? 'wood' : 'tile';
   const e = district.enterAt(x, z);
@@ -4729,6 +4895,7 @@ function rideTo(i: number, j: number) {
 }
 function interact() {
   if (npcInteract()) return;
+  if (upToggle()) return; // v23.4 stairs between the ground floor and 2F
   if (roofB || roofDoor()) {
     if (roofToggle()) return;
   }
@@ -5439,7 +5606,7 @@ function save() {
     r: ROLE.id,
     surv,
     g: player.gender,
-    p: [player.pos.x, player.pos.z],
+    p: mapPos(), // v23.4 saved upstairs → resume at the foot of the stairs
     hp: player.hp,
     hu: player.hunger,
     th: player.thirst,
@@ -5454,7 +5621,11 @@ function save() {
     ex: UT.ev.ex || 0,
     inf: INF,
     ut: UT,
-    conts: conts.map(c => [c.id, c.items, c.p]),
+    conts: [
+      ...conts.map(c => [c.id, c.items, c.p]),
+      // v23.4 furniture containers restored from the save but not built again yet: keep them (were dropped)
+      ...[...savedF].filter(([id]) => !conts.some(c => c.id === id)).map(([id, items]) => [id, items, [0, 0]]),
+    ],
     dead: sols.filter(s => s.state === 'dead').map(s => s.id),
     bar: doors.map((d, i) => (d.barricaded ? i : -1)).filter(i => i >= 0),
     radio: radioLog,
@@ -5518,7 +5689,7 @@ function update(dt: number) {
     gmap?.update();
     updatePrologue(dt);
   }
-  pumpRoofs(player.pos.x, player.pos.z, started ? 3 : 8);
+  pumpRoofs(...mapPos(), started ? 3 : 8);
   if (!started || dead || paused) return;
   updateInformant(dt);
   if (evac && evacOpen() && Math.hypot(player.pos.x - evac.pos[0], player.pos.z - evac.pos[1]) < 5) doEvac();
@@ -5598,8 +5769,11 @@ function update(dt: number) {
       player.vel.set(0, 0, 0);
     }
   } else drive.update(dt, new THREE.Vector3(), UT.power);
-  roadT.update(player.pos.x, player.pos.z, dt);
-  district.update(player.pos.x, player.pos.z);
+  {
+    const [mx, mz] = mapPos(); // v23.4 upstairs: keep streaming around the building
+    roadT.update(mx, mz, dt);
+    district.update(mx, mz);
+  }
   traffic.update(dt);
   netFrame(dt);
   if (drive.cur) {
@@ -5771,7 +5945,9 @@ function update(dt: number) {
   // v21.2 shader cutaway around the camera→player line (see occlusion.ts); camera itself unchanged
   updateOcclusion(player.pos.x, player.pos.y, player.pos.z);
   // v23.3 inside an enterable district building: cut its upper floors and roof away (core blocks lower their walls)
-  setBuildingCut(player.pos.z < -6000 || roofB ? null : district.enterAt(player.pos.x, player.pos.z));
+  setBuildingCut(
+    up ? up.room.box : player.pos.z < -6000 || roofB ? null : district.enterAt(player.pos.x, player.pos.z),
+  );
   // buildings cutaway
   const inside = bldAt(player.pos.x, player.pos.z);
   for (const b of blds) {
@@ -6190,6 +6366,7 @@ function flashRed() {
   setTimeout(() => (renderer.domElement.style.filter = ''), 150);
 }
 function updateStreet() {
+  const [qx, qz] = mapPos();
   let best = '',
     bd = 25;
   for (const r of roads) {
@@ -6200,15 +6377,15 @@ function updateStreet() {
       const dx = bx - ax,
         dz = bz - az;
       const l2 = dx * dx + dz * dz || 1;
-      const t = clamp(((player.pos.x - ax) * dx + (player.pos.z - az) * dz) / l2, 0, 1);
-      const d = Math.hypot(player.pos.x - ax - dx * t, player.pos.z - az - dz * t);
+      const t = clamp(((qx - ax) * dx + (qz - az) * dz) / l2, 0, 1);
+      const d = Math.hypot(qx - ax - dx * t, qz - az - dz * t);
       if (d < bd) {
         bd = d;
         best = r.n;
       }
     }
   }
-  const sec = sectorOf(player.pos.x, player.pos.z);
+  const sec = sectorOf(qx, qz);
   $('street').textContent =
     getLanguage() === 'en'
       ? `📍 ${translateLabel(best) || 'Alley'}・${SECTOR_LABEL(sec)} district ${liberated.has(sec) ? '(reclaimed)' : '(occupied)'}`
@@ -6273,7 +6450,13 @@ function drawHud(inside: Bld | null) {
     }
   }
   const rd = roofB ? null : roofDoor();
-  if (roofB && !panelOpen) {
+  if (up && upLanding() && !panelOpen) {
+    pr.style.display = 'block';
+    pr.textContent = tr('[E] 下樓（回一樓）', '[E] Go downstairs (ground floor)');
+  } else if (!up && !panelOpen && stairAt()) {
+    pr.style.display = 'block';
+    pr.textContent = tr('[E] 上樓（二樓）', '[E] Go upstairs (2nd floor)');
+  } else if (roofB && !panelOpen) {
     pr.style.display = 'block';
     pr.textContent = tr('[E] 走樓梯下到街上', '[E] Take the stairs down to the street');
   } else if (rd && !panelOpen) {
@@ -6843,7 +7026,10 @@ async function boot() {
         more: async () => (await fetch(import.meta.env.BASE_URL + 'data/district/map.json')).json(),
       },
       liberated: () => liberated,
-      player: () => ({ x: player.pos.x, z: player.pos.z, rot: player.mesh ? player.mesh.rotation.y : 0 }),
+      player: () => {
+        const [x, z] = mapPos();
+        return { x, z, rot: player.mesh ? player.mesh.rotation.y : 0 };
+      },
       parks: (parks?.clusters || []) as V2[],
       outposts: () => checkpoints,
       evac: () => (evac ? (evac.pos as V2) : null),
@@ -7037,13 +7223,15 @@ async function boot() {
         if (s) c.items = s[1];
         map.delete(c.id);
       }
-      map.forEach(c =>
-        /^f\d+_/.test(String(c[0]))
-          ? savedF.set(c[0], c[1])
-          : String(c[0]).startsWith('pb')
-            ? makeBucket(c[0], c[2], c[1])
-            : makeCont(c[0], c[2], 'crate', undefined, c[1]),
-      );
+      map.forEach(c => {
+        const id = String(c[0]);
+        // core furniture (f…) and upstairs (u…) containers come back when their building is furnished again
+        if (/^[fu]\d+_/.test(id)) savedF.set(c[0], c[1]);
+        // v23.4 district containers are restored per tile from district.saved (making crates here duplicated them)
+        else if (/^t-?\d+_-?\d+:/.test(id)) return;
+        else if (id.startsWith('pb')) makeBucket(c[0], c[2], c[1]);
+        else makeCont(c[0], c[2], 'crate', undefined, c[1]);
+      });
       if (Array.isArray(sv.radio)) radioLog = sv.radio.slice(-200);
       (sv.bar || []).forEach((i: number) => doors[i] && setBarricade(doors[i]));
       checkSectors(true);
@@ -7477,6 +7665,33 @@ async function boot() {
         ).length,
       })),
     indoor: () => indoorAt(player.pos.x, player.pos.z),
+    // v23.4 upstairs test hooks: a free spot at the foot of the stairs of the building the player is in
+    stairSpot: () => {
+      const b = placeAt(player.pos.x, player.pos.z);
+      const P = b && groundPlan(b);
+      return b && P?.stair ? stairFoot(b, P) : null;
+    },
+    stairs: () =>
+      [
+        ...blds.filter(b => (b as any).clut?.stair),
+        ...[...dClut.entries()].filter(([, v]) => v.plan?.stair).map(([e]) => e),
+      ].map(b => ({
+        id: b.id,
+        d: isDEnter(b) ? b.key + '#' + b.bi : 'core',
+        c: b.c,
+        foot: stairFoot(b, groundPlan(b)!),
+      })),
+    upToggle: () => upToggle(),
+    upState: () =>
+      up
+        ? {
+            up: true,
+            land: up.room.land,
+            anchor: up.anchor,
+            conts: up.conts.map(c => [c.id, c.label, Object.keys(c.items).length]),
+            pieces: up.furn.children.length,
+          }
+        : { up: false },
     ai: () => ({
       radio,
       stats: aiStats,

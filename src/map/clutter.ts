@@ -42,6 +42,8 @@ export type Plan = {
   decals: Part[];
   segs: { a: V2; b: V2; h: number }[];
   conts: { id: string; p: V2; label: string; loot: string; seed: number }[];
+  /** v23.4 centre of the stairwell piece in the (O, U, N) frame, when one was placed (multi-storey blocks) */
+  stair?: { u: number; v: number };
 };
 function mulberry(a: number) {
   return () => {
@@ -250,7 +252,14 @@ const laundry = (r: () => number): Part[] => {
 // ---------- plan ----------
 type Ctx = { pip: (p: V2, pts: V2[]) => boolean; onRoad: (x: number, z: number) => boolean };
 /** v23.3 streamed district buildings pass their own seed and per-tile container ids */
-export type PlanOpt = { seed?: number; contId?: (n: number) => string };
+export type PlanOpt = {
+  seed?: number;
+  contId?: (n: number) => string;
+  /** v23.4 areas (u0, v0, u1, v1 in the plan frame) kept free of furniture, e.g. the stair opening upstairs */
+  reserve?: [number, number, number, number][];
+  /** v23.4 skip the ground-floor stairwell (upstairs floors draw their own stair head) */
+  noStair?: boolean;
+};
 const seedOf = (b: any, o?: PlanOpt) => o?.seed ?? (b.id + 1) * 2654435761;
 function pickUse(b: any, street: boolean, r: () => number): Use {
   return b.type && b.type !== 'home'
@@ -294,7 +303,7 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
   const street = ctx.onRoad(O[0] - N[0] * 3, O[1] - N[1] * 3);
   const use = pickUse(b, street, r);
   const P: Plan = { use, O, U, N, pieces: [], decals: [], segs: [], conts: [] };
-  const rects: [number, number, number, number][] = [];
+  const rects: [number, number, number, number][] = [...(opt?.reserve ?? [])];
   /** place a piece at (u, v) facing `face` (0 = toward door, 1 = side, 2 = back, 3 = other side); tries nudges */
   const put = (
     parts: Part[],
@@ -506,7 +515,7 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     for (let i = 0; i < 6; i++) P.decals.push([dw, 0.09, 0.03, 0x9aa0a0 - (i % 2) * 0x080808, 0, 2.35 - i * 0.1, 0.06]);
   }
   // ---- stairwell (multi-storey blocks) ----
-  if (b.h > 6 && D > 5 && umax - umin > 5) {
+  if (!opt?.noStair && b.h > 6 && D > 5 && umax - umin > 5) {
     const su = uR - 0.6,
       sv = back - 1.6;
     if (
@@ -517,7 +526,10 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
       const st: Part[] = [];
       for (let i = 0; i < 8; i++) st.push([1.0, 0.18 * (i + 1), 0.28, 0x9a968c, 0, 0.09 * (i + 1), -1.0 + i * 0.28]);
       st.push([0.04, 1.0, 2.3, STEEL, -0.52, 1.1, 0]);
-      put(st, su, sv, 0, 1.1, 2.3, 1.2);
+      if (put(st, su, sv, 0, 1.1, 2.3, 1.2)) {
+        const pc = P.pieces[P.pieces.length - 1]; // put() may have nudged it sideways
+        P.stair = { u: pc.u, v: pc.v };
+      }
       put(shoeRack(r), su - 1.3, sv + 0.8, 0, 0.9, 0.32, 0.7);
       put(mailboxes(), su - 1.3, sv + 1.25, 0, 1.2, 0.15, 0);
       put(bicycle(), su - 1.4, sv - 0.6, 1, 0.3, 1.5, 0.8);
