@@ -56,6 +56,8 @@ jobs:
             script: scripts/checks/v233enter.mjs
           - name: upstairs floors
             script: scripts/checks/v234upstairs.mjs
+          - name: guns and healing
+            script: scripts/checks/v235guns.mjs
     steps:
       - uses: actions/checkout@v4
         with:

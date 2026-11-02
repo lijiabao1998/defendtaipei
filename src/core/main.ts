@@ -26,7 +26,20 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { ITEMS, LOOT } from '../systems/items';
 import { iconURL, iconMat } from '../ui/icons';
 import { GF, FH, ARC, arcadeFits, buildArcade, flushArcades, setArcadeDeps, arcadeAudit } from '../map/arcade';
-import { makeRig, animate, setWeapon, setLodFocus, Rig, AnimState, startMelee, meleeQ, hitStop } from '../npc/human';
+import {
+  makeRig,
+  animate,
+  setWeapon,
+  setLodFocus,
+  Rig,
+  AnimState,
+  startMelee,
+  meleeQ,
+  hitStop,
+  fireShot,
+} from '../npc/human';
+import { RECOIL } from '../npc/firearms';
+import { Casings } from '../systems/casings';
 import { SwingTrail } from '../systems/trail';
 import * as SQ from '../npc/squadai';
 import * as CL from '../map/clutter';
@@ -1873,7 +1886,7 @@ function spawnSoldiers(dead: Set<number>) {
     const route = r.p.slice(Math.max(0, s0 - 3), s0 + 4) as V2[];
     const night = i >= 48;
     const rig = spawnRig(SOLDIER_OPTS);
-    setWeapon(rig, 'rifle');
+    setWeapon(rig, i % 4 === 1 ? 'qbz95' : 'rifle'); // v23.5 a mix of QBZ-191 and bullpup QBZ-95-1 silhouettes
     const mesh = rig.root;
     const cone = new THREE.Mesh(
       coneGeo,
@@ -1978,7 +1991,7 @@ function sandbags(x: number, z: number, ang: number, n = 4) {
 const sandGeo = new THREE.BoxGeometry(0.6, 0.3, 0.45);
 function dSoldier(key: string, tid: number, route: V2[], sector: number, post?: V2) {
   const rig = spawnRig(SOLDIER_OPTS);
-  setWeapon(rig, 'rifle');
+  setWeapon(rig, tid % 4 === 1 ? 'qbz95' : 'rifle');
   const cone = new THREE.Mesh(
     coneGeo,
     new THREE.MeshBasicMaterial({ color: 0xffee88, transparent: true, opacity: 0.12, depthWrite: false }),
@@ -3605,6 +3618,54 @@ function log(msg: string, col = '#e8e2d0', cls = '') {
 }
 
 // ---------- effects ----------
+// v23.5 every shot: recoil on the rig (fireShot), a muzzle flash light, a spent case out of the port, and for the
+// player a small screen jolt (shake offset only, camera unchanged). Effects only within 30 m of the player.
+const muzzleLight = new THREE.PointLight(0xffc070, 0, 11, 2);
+scene.add(muzzleLight);
+let muzzleT = 0;
+const casings = new Casings(scene);
+const _mp = new THREE.Vector3(),
+  _ep = new THREE.Vector3(),
+  _wq = new THREE.Quaternion(),
+  _rt = new THREE.Vector3(),
+  _bk = new THREE.Vector3();
+const gunStats = { shots: 0, cases: 0, flashes: 0 };
+function gunFx(r: Rig, isPlayer: boolean) {
+  const fam = fireShot(r);
+  gunStats.shots++;
+  if (!r.muzzle || !r.eject) return;
+  if (!isPlayer && r.root.position.distanceTo(player.mesh.position) > 30) return;
+  r.root.updateMatrixWorld(true);
+  r.muzzle.getWorldPosition(_mp);
+  if (fam !== 'smg') {
+    muzzleLight.position.copy(_mp);
+    muzzleLight.intensity = fam === 'launcher' ? 16 : fam === 'pistol' ? 5 : 9;
+    muzzleT = 0.06;
+    gunStats.flashes++;
+  }
+  if (fam !== 'launcher') {
+    r.eject.getWorldPosition(_ep);
+    r.weapon.getWorldQuaternion(_wq);
+    _rt.set(-1, 0, 0).applyQuaternion(_wq).setY(0).normalize(); // the gun's right side (firearms.ts)
+    _bk.set(0, 0, -1).applyQuaternion(_wq).setY(0).normalize();
+    casings.eject(
+      _ep,
+      _rt,
+      _bk,
+      r.root.position.y,
+      fam === 'shotgun' ? 'shell' : fam === 'pistol' ? 'pistol' : 'rifle',
+    );
+    gunStats.cases++;
+  }
+  if (isPlayer) blastFx.kick(0, RECOIL[fam].shake);
+}
+function gunFxTick(dt: number) {
+  if (muzzleT > 0) {
+    muzzleT -= dt;
+    muzzleLight.intensity = muzzleT > 0 ? muzzleLight.intensity * 0.6 : 0;
+  }
+  casings.update(dt);
+}
 const tracerMat = new THREE.LineBasicMaterial({ color: 0xffdd88, transparent: true });
 const fx: { o: THREE.Object3D; t: number }[] = [];
 function tracer(a: THREE.Vector3, b: THREE.Vector3) {
@@ -4006,7 +4067,7 @@ function scopeFire() {
   if (!player.inv[d.ammo!]) return log(tr('沒有子彈了', 'Out of ammunition'), '#f99');
   if (--player.inv[d.ammo!] <= 0) delete player.inv[d.ammo!];
   player.cd = d.cd;
-  player.rig.shootT = 0.14;
+  gunFx(player.rig, true);
   AU.gunshot(AU.gunKind(k, d), 0, indoorAt(player.pos.x, player.pos.z));
   noise(player.pos.x, player.pos.z, 80); // a rifle crack: soldiers come to search
   const o = new THREE.Vector3(player.pos.x, eyeY(), player.pos.z);
@@ -5150,8 +5211,7 @@ function playerAttack() {
   if (player.cd > 0) return;
   netAttack();
   player.cd = d.cd;
-  if (d.kind === 'gun') player.rig.shootT = 0.14;
-  else startMelee(player.rig, Math.max(0.42, (d.cd || 0.5) * 0.85));
+  if (d.kind !== 'gun') startMelee(player.rig, Math.max(0.42, (d.cd || 0.5) * 0.85));
   const dir = new THREE.Vector3(aimPt.x - player.pos.x, 0, aimPt.z - player.pos.z).normalize();
   if (d.kind === 'gun') {
     if (!player.inv[d.ammo]) {
@@ -5160,6 +5220,7 @@ function playerAttack() {
       return;
     }
     if (--player.inv[d.ammo] <= 0) delete player.inv[d.ammo];
+    gunFx(player.rig, true);
     AU.gunshot(AU.gunKind(k, d), 0, indoorAt(player.pos.x, player.pos.z));
     noise(player.pos.x, player.pos.z, d.noise);
     if (d.at) {
@@ -5732,7 +5793,7 @@ function update(dt: number) {
   player.fatigue = clamp(player.fatigue, 0, 100);
   if (player.hunger <= 0 || player.thirst <= 0) player.hp -= gm * 8;
   if (player.bleed) player.hp -= dt * 0.6;
-  if (player.hunger > 50 && player.thirst > 50 && !player.bleed) player.hp = Math.min(100, player.hp + gm * 6);
+  player.hp = Math.min(100, player.hp + gm * regenRate());
   if (MP) syncServerVitals();
   else if (player.hp <= 0) return die();
   if (dead) return;
@@ -5746,6 +5807,7 @@ function update(dt: number) {
   updateShells(dt);
   player.cd -= dt;
   meleeTick(dt);
+  gunFxTick(dt);
   clutterTick(dt);
   // movement
   if (drive.cur) {
@@ -6112,7 +6174,7 @@ function update(dt: number) {
           !s.crouch &&
           (!s.cov || atCov || dist < 8)
         ) {
-          s.rig.shootT = 0.14;
+          gunFx(s.rig, false);
           s.cd = (1.1 + rnd() * 0.6) * (s.role === 'suppress' ? 0.6 : flanking ? 1.6 : 1);
           AU.gunshot('rifle', dist, !!bldAt(s.pos.x, s.pos.z) || indoorAt(player.pos.x, player.pos.z));
           noise(s.pos.x, s.pos.z, 40);
@@ -6391,6 +6453,14 @@ function updateStreet() {
       ? `📍 ${translateLabel(best) || 'Alley'}・${SECTOR_LABEL(sec)} district ${liberated.has(sec) ? '(reclaimed)' : '(occupied)'}`
       : `📍 ${translateLabel(best) || '巷弄'}・${SECTOR_LABEL(sec)}區 ${liberated.has(sec) ? '（已奪回）' : '（佔領中）'}`;
 }
+/**
+ * v23.5 natural healing in HP per game hour: 6 when fed and watered (> 50, as before), 18 when both are nearly
+ * full (≥ 80); none while bleeding.
+ */
+function regenRate() {
+  if (player.bleed || player.hunger <= 50 || player.thirst <= 50) return 0;
+  return player.hunger >= 80 && player.thirst >= 80 ? 18 : 6;
+}
 function bar(name: string, v: number, col: string) {
   return `<div class="bar"><div class="t"><span>${name}</span><span>${Math.round(v)}</span></div><div class="b"><i style="width:${clamp(v, 0, 100)}%;background:${col}"></i></div></div>`;
 }
@@ -6402,6 +6472,7 @@ function drawHud(inside: Bld | null) {
   if (player.fatigue > 75) m.push(tr('疲憊', 'Exhausted'));
   if (player.bleed) m.push(tr('流血', 'Bleeding'));
   if (player.hp < 30) m.push(tr('重傷', 'Severely injured'));
+  if (player.hp < 100 && regenRate() >= 18) m.push(tr('飽足・回血中', 'Well fed · Healing'));
   if (player.sneak) m.push(tr('潛行中', 'Sneaking'));
   if (player.sleeping) m.push(tr('睡眠中', 'Sleeping'));
   if (sols.some(s => s.state === 'combat' && s.mesh.visible)) m.push(tr('被追捕', 'Being pursued'));
@@ -7875,6 +7946,21 @@ async function boot() {
       fire: MB.fire,
     }),
     equipSet: (k: string) => (player.equip = k),
+    // v23.5 firing feedback and natural healing (test hooks)
+    gun: () => ({
+      ...gunStats,
+      live: casings.live,
+      heat: player.rig.heat,
+      fam: player.rig.gunFam,
+      model: !!player.rig.gunInner,
+      kind: player.rig.weaponKind,
+    }),
+    regen: () => regenRate(),
+    /** test close-ups only: zoom past the player's wheel range */
+    zoomTo: (z: number) => {
+      zoom = z;
+      resize();
+    },
     damageSol,
     toggleInv,
     addItem,

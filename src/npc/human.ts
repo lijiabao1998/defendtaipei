@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { fabricMat, Fabric } from '../map/fabric';
+import { gunModel, gunFam, gunMat, makeFlash, RECOIL, type GunFam } from './firearms';
 export type AnimState =
   'idle' | 'walk' | 'run' | 'sneak' | 'melee' | 'aim' | 'shoot' | 'loot' | 'hurt' | 'death' | 'sleep' | 'carry';
 export type RigOpts = {
@@ -58,6 +59,17 @@ export type Rig = {
   shoveT: number;
   state: AnimState;
   weaponKind: string;
+  /** v23.5 gun in hand: family (recoil character), inner pivot (slides back on recoil), muzzle / port points */
+  gunFam: GunFam | null;
+  gunInner: THREE.Group | null;
+  muzzle: THREE.Object3D | null;
+  eject: THREE.Object3D | null;
+  flash: THREE.Mesh | null;
+  flashT: number;
+  /** sustained-fire heat 0..1 (muzzle climb, braced stance) and this shot's sideways shudder */
+  heat: number;
+  jit: [number, number];
+  shots: number;
   f: boolean;
   t: number;
   sp: Record<string, [number, number]>;
@@ -608,6 +620,15 @@ export function makeRig(o: RigOpts): Rig {
     shoveT: 0,
     state: 'idle',
     weaponKind: '',
+    gunFam: null,
+    gunInner: null,
+    muzzle: null,
+    eject: null,
+    flash: null,
+    flashT: 0,
+    heat: 0,
+    jit: [0, 0],
+    shots: 0,
     f,
     t: Math.random() * 10,
     sp: {},
@@ -630,6 +651,9 @@ export function setWeapon(r: Rig, kind: string) {
   if (r.weaponKind === kind) return;
   r.weaponKind = kind;
   r.weapon.clear();
+  r.gunFam = gunFam(kind);
+  r.gunInner = r.muzzle = r.eject = r.flash = null;
+  r.weapon.position.set(0, 0, 0);
   const add = (g: THREE.BufferGeometry, c: number, x = 0, y = 0, z = 0) => {
     const m = new THREE.Mesh(g, wm(c));
     m.position.set(x, y, z);
@@ -637,18 +661,22 @@ export function setWeapon(r: Rig, kind: string) {
     r.weapon.add(m);
     return m;
   };
-  if (kind === 'rifle') {
-    add(box(0.045, 0.07, 0.62), 0x22261f, 0, -0.03, 0.14);
-    add(box(0.035, 0.035, 0.28), 0x1a1a1a, 0, -0.01, 0.55);
-    add(box(0.04, 0.15, 0.05), 0x1a1a1a, 0, -0.12, 0.18);
-    add(box(0.04, 0.09, 0.03), 0x1a1a1a, 0, -0.08, 0.0);
-    add(box(0.05, 0.09, 0.2), 0x3d4329, 0, -0.04, -0.24);
-    add(box(0.03, 0.04, 0.12), 0x111111, 0, 0.03, 0.12);
-    r.weapon.rotation.set(Math.PI / 2, 0, 0);
-    r.wRx0 = Math.PI / 2;
-  } else if (kind === 'pistol') {
-    add(box(0.032, 0.045, 0.19), 0x222222, 0, 0, 0.06);
-    add(box(0.03, 0.1, 0.04), 0x333333, 0, -0.055, 0);
+  const gm = gunModel(kind);
+  if (gm) {
+    // v23.5 one merged model per gun (firearms.ts), inside a pivot that recoils back into the hand
+    const inner = new THREE.Group();
+    const m = new THREE.Mesh(gm.geo, gunMat);
+    m.castShadow = true;
+    inner.add(m);
+    const mz = new THREE.Object3D();
+    mz.position.copy(gm.muzzle);
+    const ej = new THREE.Object3D();
+    ej.position.copy(gm.eject);
+    const fl = makeFlash();
+    mz.add(fl);
+    inner.add(mz, ej);
+    r.weapon.add(inner);
+    Object.assign(r, { gunInner: inner, muzzle: mz, eject: ej, flash: fl });
     r.weapon.rotation.set(Math.PI / 2, 0, 0);
     r.wRx0 = Math.PI / 2;
   } else if (kind === 'bat') {
@@ -670,6 +698,26 @@ export function setWeapon(r: Rig, kind: string) {
     r.weapon.rotation.set(Math.PI / 2, 0, 0);
     r.wRx0 = Math.PI / 2;
   }
+}
+/**
+ * v23.5 one shot: restart the kick, add heat (sustained fire climbs and braces harder), roll a sideways shudder and
+ * light the muzzle flash. Returns the family so callers can scale screen shake, casings and the flash light.
+ */
+export function fireShot(r: Rig): GunFam {
+  const fam = r.gunFam ?? 'rifle';
+  const R = RECOIL[fam];
+  r.shootT = 0.14;
+  r.heat = Math.min(1, r.heat + R.heat);
+  r.jit = [(Math.random() - 0.5) * 2 * R.jitter, (Math.random() - 0.5) * 2 * R.jitter];
+  r.shots++;
+  if (r.flash) {
+    r.flashT = fam === 'smg' ? 0.025 : 0.05; // suppressed: barely a flicker
+    r.flash.rotation.z = Math.random() * Math.PI;
+    const k =
+      (fam === 'smg' ? 0.35 : fam === 'pistol' ? 0.7 : fam === 'launcher' ? 1.8 : 1) * (0.85 + Math.random() * 0.4);
+    r.flash.scale.set(k, k, k * (0.8 + Math.random() * 0.5));
+  }
+  return fam;
 }
 const cl01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const sm = (x: number) => {
@@ -831,6 +879,11 @@ export function animate(r: Rig, state: AnimState, speed: number, dt: number) {
     r.meleeT = Math.max(0, r.meleeT - dt * 0.08); // hit-stop: freeze the swing for a beat on contact
   } else r.meleeT = Math.max(0, r.meleeT - dt);
   r.shootT = Math.max(0, r.shootT - dt);
+  r.heat = Math.max(0, r.heat - dt * (r.shootT > 0 ? 0.9 : 1.8)); // cools fast once the trigger is let go
+  if (r.flash) {
+    r.flashT = Math.max(0, r.flashT - dt);
+    r.flash.visible = r.flashT > 0;
+  }
   r.hurtT = Math.max(0, r.hurtT - dt);
   r.vaultT = Math.max(0, r.vaultT - dt);
   r.shoveT = Math.max(0, r.shoveT - dt);
@@ -849,7 +902,8 @@ export function animate(r: Rig, state: AnimState, speed: number, dt: number) {
   ease('aim', state === 'aim' || state === 'shoot' || r.shootT > 0 ? 1 : 0, 10);
   ease('loot', state === 'loot' ? 1 : 0, 6);
   ease('sneak', state === 'sneak' ? 1 : 0, 5);
-  ease('carry', r.weaponKind === 'rifle' && state !== 'aim' ? 1 : 0, 6);
+  const longGun = !!r.gunFam && r.gunFam !== 'pistol';
+  ease('carry', longGun && state !== 'aim' ? 1 : 0, 6);
   ease('sleep', state === 'sleep' ? 1 : 0, 3);
   const T = zero();
   const LT = r.legT,
@@ -934,7 +988,7 @@ export function animate(r: Rig, state: AnimState, speed: number, dt: number) {
   const A = W.aim;
   if (A > 0.01) {
     const kick = r.shootT > 0.05 ? 0.22 : 0;
-    const two = r.weaponKind === 'rifle' ? 1 : 0.7;
+    const two = longGun ? 1 : 0.7;
     T.uaR = T.uaR * (1 - A) + (-1.5 - kick) * A;
     T.laR = T.laR * (1 - A) + 0.02 * A;
     T.uaRz = T.uaRz * (1 - A);
@@ -1063,21 +1117,32 @@ export function animate(r: Rig, state: AnimState, speed: number, dt: number) {
     );
     r.hips.position.y = reach + 0.105 + 0.03 * walkW + breath * 0.003; // + heel/toe corner of the pitched shoe
   }
-  // gun recoil: fast kick, slower settle; muzzle rises on the weapon
-  if (r.shootT > 0 && r.weapon) {
+  // v23.5 gun recoil: per shot a fast kick and slow settle (muzzle snaps up, the gun slides back into the hand,
+  // arms and chest are punched back, a sideways shudder); under sustained fire the heat keeps the muzzle climbing,
+  // braces the shoulders and rocks the whole stance back, so full-auto reads as violent, not as a twitch.
+  let recZ = 0;
+  if (r.weapon && r.gunFam) {
+    const R = RECOIL[r.gunFam];
     const t0 = 1 - r.shootT / 0.14,
-      c = t0 < 0.18 ? t0 / 0.18 : (1 - (t0 - 0.18) / 0.82) ** 2;
-    const m = r.weaponKind === 'pistol' ? 1.4 : 1;
-    r.weapon.rotation.x = r.wRx0 - c * 0.28 * m;
-    r.uaR.rotation.x -= c * 0.14 * m;
-    r.laR.rotation.x -= c * 0.1 * m;
-    r.uaL.rotation.x -= c * 0.08;
-    r.chest.rotation.x -= c * 0.05 * m;
-    r.head.rotation.x -= c * 0.04;
-  } else if (r.weapon) r.weapon.rotation.x = r.wRx0;
+      c = r.shootT > 0 ? (t0 < 0.18 ? t0 / 0.18 : (1 - (t0 - 0.18) / 0.82) ** 2) : 0;
+    const H = r.heat * A;
+    const B = R.body;
+    r.weapon.rotation.x = r.wRx0 - c * R.kick - H * R.climb;
+    r.weapon.rotation.y = r.jit[0] * c;
+    r.weapon.rotation.z = r.jit[1] * c * 1.5;
+    if (r.gunInner) r.gunInner.position.z = -c * R.back;
+    r.uaR.rotation.x -= (c * 0.16 + H * 0.08) * B;
+    r.laR.rotation.x -= c * 0.12 * B;
+    r.uaL.rotation.x -= (c * 0.1 + H * 0.06) * B;
+    r.chest.rotation.x -= (c * 0.06 + H * 0.07) * B;
+    r.chest.rotation.y += r.jit[0] * c * 0.8 * B;
+    r.spine.rotation.z += r.jit[1] * c * 0.5 * B;
+    r.head.rotation.x -= c * 0.05 + H * 0.03;
+    recZ = -(c * 0.025 + H * 0.035) * B;
+  } else if (r.weapon) r.weapon.rotation.set(r.wRx0, 0, 0);
   r.body.position.y = lift + (W.sleep > 0.01 ? 0.25 * W.sleep : 0);
   r.body.position.x = r.sp.bodyZoff?.[0] ?? 0;
-  r.body.position.z = -(r.hurtT > 0 ? 0.12 * sm(r.hurtT / 0.35) : 0) + stepZ;
+  r.body.position.z = -(r.hurtT > 0 ? 0.12 * sm(r.hurtT / 0.35) : 0) + stepZ + recZ;
 }
 function applySprings(r: Rig, T: Pose, dt: number, om: number) {
   const n = Math.max(1, Math.ceil(dt / 0.012)),
