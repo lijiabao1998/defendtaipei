@@ -353,6 +353,32 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     uL = umin + 0.5,
     uR = umax - 0.5,
     mid = (umin + umax) / 2;
+  // v23.4 multi-storey blocks: reserve the stairwell corner (back right, else back left) before furnishing, so the
+  // stairs to the 2F fit (the furniture used to fill that corner first in almost every building)
+  let stairUV: [number, number] | null = null;
+  let stairRes: [number, number, number, number] | null = null;
+  if (!opt?.noStair && b.h > 6 && D > 5 && umax - umin > 5) {
+    const sv = back - 1.6;
+    for (const su of [uR - 0.6, uL + 0.6]) {
+      const fits = [
+        [0, 0],
+        [-0.55, -1.15],
+        [0.55, -1.15],
+        [-0.55, 1.15],
+        [0.55, 1.15],
+        [-0.55, -2.1],
+        [0.55, -2.1],
+      ].every(([du, dv]) => inside(su + du, sv + dv));
+      const res: [number, number, number, number] = [su - 0.6, sv - 2.1, su + 0.6, sv + 1.2];
+      const free = !rects.some(q => res[0] < q[2] && res[2] > q[0] && res[1] < q[3] && res[3] > q[1]);
+      if (fits && free && Math.hypot(su, sv) > 2.7) {
+        stairUV = [su, sv];
+        stairRes = res;
+        rects.push(res);
+        break;
+      }
+    }
+  }
   const scatter = (n: number, kinds: ('cloth' | 'glass' | 'paper')[]) => {
     for (let i = 0; i < n; i++) {
       const u = umin + 0.4 + r() * (umax - umin - 0.8),
@@ -514,27 +540,22 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     const dw = el * 0.95;
     for (let i = 0; i < 6; i++) P.decals.push([dw, 0.09, 0.03, 0x9aa0a0 - (i % 2) * 0x080808, 0, 2.35 - i * 0.1, 0.06]);
   }
-  // ---- stairwell (multi-storey blocks) ----
-  if (!opt?.noStair && b.h > 6 && D > 5 && umax - umin > 5) {
-    const su = uR - 0.6,
-      sv = back - 1.6;
-    if (
-      inside(su, sv) &&
-      inside(su, sv - 1.5) &&
-      !rects.some(q => su - 0.6 < q[2] && su + 0.6 > q[0] && sv - 1.6 < q[3] && sv + 1.6 > q[1])
-    ) {
-      const st: Part[] = [];
-      for (let i = 0; i < 8; i++) st.push([1.0, 0.18 * (i + 1), 0.28, 0x9a968c, 0, 0.09 * (i + 1), -1.0 + i * 0.28]);
-      st.push([0.04, 1.0, 2.3, STEEL, -0.52, 1.1, 0]);
-      if (put(st, su, sv, 0, 1.1, 2.3, 1.2)) {
-        const pc = P.pieces[P.pieces.length - 1]; // put() may have nudged it sideways
-        P.stair = { u: pc.u, v: pc.v };
-      }
-      put(shoeRack(r), su - 1.3, sv + 0.8, 0, 0.9, 0.32, 0.7);
-      put(mailboxes(), su - 1.3, sv + 1.25, 0, 1.2, 0.15, 0);
-      put(bicycle(), su - 1.4, sv - 0.6, 1, 0.3, 1.5, 0.8);
-      put(boxes(r, 2), su - 0.3, sv - 1.8, 0, 0.55, 0.55, 0.9);
+  // ---- stairwell (multi-storey blocks), in the corner reserved above; its landing stays clear ----
+  if (stairUV && stairRes) {
+    const [su, sv] = stairUV;
+    rects.splice(rects.indexOf(stairRes), 1);
+    const st: Part[] = [];
+    for (let i = 0; i < 8; i++) st.push([1.0, 0.18 * (i + 1), 0.28, 0x9a968c, 0, 0.09 * (i + 1), -1.0 + i * 0.28]);
+    st.push([0.04, 1.0, 2.3, STEEL, -0.52, 1.1, 0]);
+    if (put(st, su, sv, 0, 1.1, 2.3, 1.2)) {
+      const pc = P.pieces[P.pieces.length - 1]; // put() may have nudged it sideways
+      P.stair = { u: pc.u, v: pc.v };
     }
+    rects.push([su - 0.6, sv - 2.1, su + 0.6, sv - 1.15]);
+    const side = su > mid ? -1 : 1; // toward the room
+    put(shoeRack(r), su + side * 1.3, sv + 0.8, 0, 0.9, 0.32, 0.7);
+    put(mailboxes(), su + side * 1.3, sv + 1.25, 0, 1.2, 0.15, 0);
+    put(bicycle(), su + side * 1.4, sv - 0.6, 1, 0.3, 1.5, 0.8);
   }
   // ---- signs of a hurried flight: candles, bullet holes, flyers on the walls ----
   for (let i = 0; i < 2 + Math.floor(r() * 3); i++) {
