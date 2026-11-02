@@ -14,13 +14,14 @@ const KIND = {
   market: b => b.s === 'marketplace' || /市場/.test(b.n || ''),
   office: b => /^(office|commercial|government)$/.test(b.k || ''),
 };
+// the key container each kind must have (placed first, so the 6–14 container cap never drops it)
 const LABEL = {
-  school: '講桌抽屜|置物櫃|書包|保健室藥櫃',
-  clinic: '護理站|藥品櫃',
-  temple: '供桌|功德箱',
+  school: '講桌抽屜|保健室藥櫃',
+  clinic: '藥品櫃',
+  temple: '供桌',
   market: '攤位',
-  office: '辦公桌抽屜|檔案櫃',
-  police: '警用置物櫃|辦公桌抽屜|檔案櫃',
+  office: '檔案櫃',
+  police: '警用置物櫃',
 };
 const dir = 'public/data/district/';
 const cand = {};
@@ -69,7 +70,12 @@ for (const kind of Object.keys(KIND)) {
   }
   res[kind] = done || 'none enterable among candidates';
   if (!done) fail.push(`${kind}: no enterable building found`);
-  else if (!done.live || !done.indoor || !done.conts.some(l => new RegExp(LABEL[kind]).test(l)))
+  else if (
+    !done.live ||
+    !done.indoor ||
+    done.conts.length > 14 ||
+    !done.conts.some(l => new RegExp(LABEL[kind]).test(l))
+  )
     fail.push(`${kind}: ${JSON.stringify(done)}`);
 }
 // core kinds (named buildings): furnished with their own containers
@@ -77,6 +83,10 @@ await G(`g.tp(0,0)`);
 await wait(3000);
 const core = await G(`return g.coreKinds()`);
 res.core = core.reduce((a, q) => ((a[q.kind] = (a[q.kind] || 0) + 1), a), {});
+// every core public building should carry its key container (allow a few odd outlines where nothing fits)
+res.coreMissing = core.filter(q => !q.conts.some(l => new RegExp(LABEL[q.kind]).test(l))).map(q => `${q.kind}#${q.id}`);
+if (res.coreMissing.length > core.length / 4)
+  fail.push(`core: key containers missing in ${res.coreMissing.join(', ')}`);
 const pc = core.find(q => q.kind === 'police') || core.find(q => q.kind === 'clinic') || core[0];
 if (pc) {
   await G(`g.tp(${pc.inside[0]},${pc.inside[1]})`);

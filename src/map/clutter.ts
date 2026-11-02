@@ -505,6 +505,8 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
   const street = ctx.onRoad(O[0] - N[0] * 3, O[1] - N[1] * 3);
   const use = pickUse(b, street, r);
   const P: Plan = { use, O, U, N, pieces: [], decals: [], segs: [], conts: [] };
+  /** v23.6 public buildings: a few searchable containers (6–14 by floor area), the key ones placed first */
+  const contCap = SPECIAL.has(use) ? Math.max(6, Math.min(14, Math.floor(((umax - umin) * D) / 60))) : Infinity;
   const rects: [number, number, number, number][] = [...(opt?.reserve ?? [])];
   /** place a piece at (u, v) facing `face` (0 = toward door, 1 = side, 2 = back, 3 = other side); tries nudges */
   const put = (
@@ -539,7 +541,7 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
         const wc = cs.map(([a, c]) => W(a, c));
         for (let i = 0; i < 4; i++) P.segs.push({ a: wc[i], b: wc[(i + 1) % 4], h: ch });
       }
-      if (pc.cont)
+      if (pc.cont && P.conts.length < contCap)
         P.conts.push({
           id: contId(P.conts.length),
           p: W(uu, vv),
@@ -610,11 +612,34 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
       for (let u = umin + 0.9; u < umax - 0.7 && n < cap; u += du) if (f(u, v, n)) n++;
     return n;
   };
+  /** put against the back wall, stepping forward until it fits (irregular outlines, the stairwell corner) */
+  const atBack = (
+    parts: Part[],
+    u: number,
+    off: number,
+    cw: number,
+    cd: number,
+    ch: number,
+    extra?: Partial<Piece>,
+  ) => {
+    for (let dv = 0; back - off - dv > 2.5; dv += 0.6)
+      if (put(parts, u, back - off - dv, 0, cw, cd, ch, extra)) return true;
+    return false;
+  };
   if (use === 'school') {
-    // classroom: board and teacher's desk on the back wall, desks in rows facing it, lockers by the door
-    put(blackboard(Math.min(4, W2 - 1.2)), mid, back - 0.05, 0, Math.min(4, W2 - 1.2), 0.15, 0);
-    put(teacherDesk(), mid, back - 1.2, 0, 1.4, 0.7, 0.8, { cont: { label: '講桌抽屜', loot: 'home' } });
-    put(medCabinet(), uR - 0.3, back - 0.3, 0, 0.9, 0.45, 1.8, { cont: { label: '保健室藥櫃', loot: 'medshelf' } });
+    // classrooms side by side along the back wall (a board and a teacher's desk every ~9 m), lockers by the door,
+    // a nurse's cabinet, then desks in rows facing the boards
+    const nRoom = Math.max(1, Math.round(W2 / 9));
+    for (let k = 0; k < nRoom; k++) {
+      const cu = umin + ((k + 0.5) * W2) / nRoom,
+        bw = Math.min(4, W2 / nRoom - 1.2);
+      atBack(blackboard(bw), cu, 0.05, bw, 0.15, 0);
+      atBack(teacherDesk(), cu, 1.2, 1.4, 0.7, 0.8, k < 2 ? { cont: { label: '講桌抽屜', loot: 'home' } } : {});
+    }
+    atBack(medCabinet(), uL + 0.6, 0.3, 0.9, 0.45, 1.8, { cont: { label: '保健室藥櫃', loot: 'medshelf' } });
+    for (let u = uL + 0.5, i = 0; u < uR - 0.4; u += 0.95, i++)
+      if (Math.abs(u) > 1.9)
+        put(locker(0x6a7a8a), u, 0.3, 2, 0.9, 0.45, 1.8, i % 3 ? {} : { cont: { label: '置物櫃', loot: 'wardrobe' } });
     rows(1.3, 1.4, 2.4, back - 2.1, many, (u, v, i) =>
       put(
         studentDesk(r, r() < 0.15),
@@ -624,18 +649,15 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
         0.62,
         1.05,
         0.75,
-        i % 7 === 3 ? { cont: { label: '書包', loot: 'grocery' } } : {},
+        i % 9 === 4 ? { cont: { label: '書包', loot: 'grocery' } } : {},
       ),
     );
-    for (let u = uL + 0.5, i = 0; u < uR - 0.4; u += 0.95, i++)
-      if (Math.abs(u) > 1.9)
-        put(locker(0x6a7a8a), u, 0.3, 2, 0.9, 0.45, 1.8, i % 2 ? {} : { cont: { label: '置物櫃', loot: 'wardrobe' } });
     scatter(Math.min(30, Math.floor((W2 * D) / 10)), ['paper', 'paper', 'cloth']);
   } else if (use === 'clinic') {
     // ward: nurses' station by the door, medicine cabinets on the back wall, beds with curtains in rows
     put(counter(2.2), uL + 1.6, 1.9, 0, 2.2, 0.6, 1.0, { cont: { label: '護理站', loot: 'pharmacy' } });
     for (let u = uL + 0.6, i = 0; u < uR - 0.4 && i < 6; u += 1.0, i++)
-      put(medCabinet(), u, back - 0.3, 0, 0.9, 0.45, 1.8, i < 3 ? { cont: { label: '藥品櫃', loot: 'medshelf' } } : {});
+      atBack(medCabinet(), u, 0.3, 0.9, 0.45, 1.8, i < 3 ? { cont: { label: '藥品櫃', loot: 'medshelf' } } : {});
     rows(1.9, 2.8, 3.2, back - 1.6, many, (u, v) => put(hospitalBed(r), u, v, 0, 1.3, 2.1, 0.6));
     for (let i = 0; i < 2 + Math.floor(r() * 3); i++)
       put(wheelchair(), umin + 1 + r() * (W2 - 2), 2.2 + r() * (D - 3), Math.floor(r() * 4), 0.6, 0.6, 0.8);
@@ -643,21 +665,15 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
   } else if (use === 'temple') {
     // main hall: deity altar on the back wall, offering table, bronze incense burner, red pillars, kneelers
     const aw = Math.min(3.6, W2 - 1.4);
-    put(templeAltar(aw), mid, back - 0.55, 0, aw, 1.1, 1.3, {
-      glow: templeLamps(aw),
-      cont: { label: '供桌', loot: 'altar' },
-    });
-    put(
+    atBack(templeAltar(aw), mid, 0.55, aw, 1.1, 1.3, { glow: templeLamps(aw), cont: { label: '供桌', loot: 'altar' } });
+    atBack(
       [...table(Math.min(2.4, aw), 0.8, 0x8a1c14, 0.85), [Math.min(2, aw - 0.3), 0.12, 0.3, 0xe8b040, 0, 0.92, 0]],
       mid,
-      back - 1.9,
-      0,
+      1.9,
       Math.min(2.4, aw),
       0.8,
       0.9,
-      {
-        cont: { label: '供桌', loot: 'altar' },
-      },
+      { cont: { label: '供桌', loot: 'altar' } },
     );
     put(incenseBurner(), mid, Math.min(back - 3.4, Math.max(2.8, D * 0.45)), 0, 0.9, 0.8, 1.1, { glow: incenseGlow() });
     put(donationBox(), mid + 1.5, 2.3, 0, 0.5, 0.4, 0.7, { cont: { label: '功德箱', loot: 'altar' } });
@@ -679,7 +695,7 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
         1.65,
         0.85,
         1.0,
-        r() < 0.5 ? { cont: { label: '攤位', loot: loots[i % 4] } } : {},
+        r() < 0.3 ? { cont: { label: '攤位', loot: loots[i % 4] } } : {},
       ),
     );
     for (let i = 0; i < 4 + Math.floor(W2 / 3); i++)
@@ -689,39 +705,30 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     // station: front counter, desks with monitors, a holding cell and lockers at the back
     put(counter(2.4), mid, 2.2, 0, 2.4, 0.6, 1.0);
     if (W2 > 6) put(cellBars(2.2), uL + 1.4, back - 1.0, 0, 2.3, 2.0, 2.2);
-    for (let u = uR - 0.5, i = 0; u > mid && i < 4; u -= 0.95, i++)
-      put(
-        locker(0x4a5a6a),
-        u,
-        back - 0.25,
-        0,
-        0.9,
-        0.45,
-        1.8,
-        i < 2 ? { cont: { label: '警用置物櫃', loot: 'police' } } : {},
-      );
+    // lockers from the middle of the back wall toward the left (the stairwell takes the back-right corner)
+    for (let u = mid - 0.5, i = 0; u > uL && i < 4; u -= 0.95, i++)
+      atBack(locker(0x4a5a6a), u, 0.25, 0.9, 0.45, 1.8, i < 2 ? { cont: { label: '警用置物櫃', loot: 'police' } } : {});
+    put(filingCabinet(), uL + 0.3, D * 0.5, 1, 0.5, 0.6, 1.3, { cont: { label: '檔案櫃', loot: 'home' } });
     rows(1.9, 2.1, 3.6, back - 2.2, Math.min(24, many), (u, v, i) =>
       put(officeDesk(r), u, v, 2, 1.25, 1.3, 0.8, i % 3 === 1 ? { cont: { label: '辦公桌抽屜', loot: 'home' } } : {}),
     );
-    put(filingCabinet(), uL + 0.3, D * 0.5, 1, 0.5, 0.6, 1.3, { cont: { label: '檔案櫃', loot: 'home' } });
     scatter(Math.min(24, Math.floor((W2 * D) / 10)), ['paper', 'paper', 'glass']);
   } else if (use === 'office') {
     // offices / bank / post office / library: counter by the door, desks in rows, filing cabinets on the walls
     put(counter(2.4), mid, 2.0, 0, 2.4, 0.6, 1.0);
-    rows(1.9, 2.1, 3.4, back - 0.9, many, (u, v, i) =>
-      put(officeDesk(r), u, v, 2, 1.25, 1.3, 0.8, i % 4 === 2 ? { cont: { label: '辦公桌抽屜', loot: 'store' } } : {}),
-    );
     for (let i = 0; i < 2 + Math.floor(W2 / 4); i++)
-      put(
+      atBack(
         filingCabinet(),
         umin + 0.6 + r() * (W2 - 1.2),
-        back - 0.3,
-        0,
+        0.3,
         0.5,
         0.6,
         1.3,
         i < 2 ? { cont: { label: '檔案櫃', loot: 'home' } } : {},
       );
+    rows(1.9, 2.1, 3.4, back - 0.9, many, (u, v, i) =>
+      put(officeDesk(r), u, v, 2, 1.25, 1.3, 0.8, i % 4 === 2 ? { cont: { label: '辦公桌抽屜', loot: 'store' } } : {}),
+    );
     scatter(Math.min(30, Math.floor((W2 * D) / 8)), ['paper', 'paper', 'paper', 'glass']);
   }
   // ---- ground-floor use ----

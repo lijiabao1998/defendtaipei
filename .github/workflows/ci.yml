@@ -58,6 +58,8 @@ jobs:
             script: scripts/checks/v234upstairs.mjs
           - name: guns and healing
             script: scripts/checks/v235guns.mjs
+          - name: public buildings
+            script: scripts/checks/v236public.mjs
     steps:
       - uses: actions/checkout@v4
         with:
