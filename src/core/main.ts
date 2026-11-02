@@ -74,10 +74,10 @@ import { VehicleSystem, VehicleKind } from '../systems/vehicles';
 import { furnish, nightMarket, setPower } from '../map/interiors';
 import { buildDecay } from '../map/decay';
 import { buildAlley } from '../map/alley';
-import { updateOcclusion, OCC } from '../map/occlusion';
+import { updateOcclusion, OCC, CUT, setBuildingCut } from '../map/occlusion';
 import { lotTex } from '../map/paving';
 import { walkH } from '../map/roads';
-import { dressWalkup, District, type TileInfo } from '../map/district';
+import { dressWalkup, District, type TileInfo, type DEnter } from '../map/district';
 import { buildDoorDeco, DoorView, doorSound, isHomeDoor, type LiveDoor } from '../map/doors';
 import { SniperSys, findPosts, sniperActive, type Sniper } from '../systems/sniper';
 import { Scope, SCOPED, ballistic } from '../systems/scope';
@@ -621,7 +621,7 @@ function escapePath(px: number, pz: number, R = 70): V2[] | null {
     const [i, j, d] = qu[qh++];
     const x = px + i * S,
       z = pz + j * S;
-    if (d > 12 && !bldAt(x, z) && roadDist(x, z) < 2.5) {
+    if (d > 12 && !placeAt(x, z) && roadDist(x, z) < 2.5) {
       const out: V2[] = [];
       for (let k = key(i, j); k !== -1; k = par.get(k)!) {
         const a = Math.floor(k / 8192) - N,
@@ -676,6 +676,14 @@ const WORLD_B = { ...WORLD };
 function bldAt(x: number, z: number) {
   for (const b of blds) if (x > b.minx && x < b.maxx && z > b.minz && z < b.maxz && pip([x, z], b.pts)) return b;
   return null;
+}
+/** v23.3 core building or enterable district building at (x, z): stable identity for same-room comparisons */
+function placeAt(x: number, z: number): Bld | DEnter | null {
+  return bldAt(x, z) ?? district.enterAt(x, z);
+}
+/** v23.3 indoors for player-facing checks (sleep, shelter, drones, muffled sound): core or district building */
+function indoorAt(x: number, z: number) {
+  return !!placeAt(x, z);
 }
 
 // ---------- sectors ----------
@@ -786,7 +794,7 @@ setBoomFx((p, big) => {
   const d = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
   blastFx.explode(p, big);
   blastFx.kick(d, big);
-  AU.shellBoom(d, !!bldAt(player.pos.x, player.pos.z), big);
+  AU.shellBoom(d, indoorAt(player.pos.x, player.pos.z), big);
 });
 /** shell damage factor at distance d: full lethal core, then quadratic falloff to the wounding radius */
 function shellDmg(d: number) {
@@ -846,7 +854,7 @@ function setupRecon(c: V2) {
       hidden: () => {
         const P = player.pos;
         return (
-          !!bldAt(P.x, P.z) ||
+          indoorAt(P.x, P.z) ||
           [
             [1.6, 0],
             [-1.6, 0],
@@ -910,7 +918,7 @@ function updateShells(dt: number) {
     let dmg = shellDmg(dp);
     if (dmg <= 0) continue;
     // indoors the walls stop almost all fragments; low walls / arcade pillars (cover) halve them
-    if (bldAt(player.pos.x, player.pos.z)) dmg *= 0.15;
+    if (indoorAt(player.pos.x, player.pos.z)) dmg *= 0.15;
     else if (findCover(player.pos.x, player.pos.z, 1.4)) dmg *= 0.5;
     lastShellHit = Math.round(dmg);
     player.hp -= dmg;
@@ -1186,7 +1194,7 @@ function rocCineStep(dt: number) {
 let armor: ArmorSystem | null = null;
 function setupArmor(c: V2) {
   armor = new ArmorSystem(scene, {
-    canSee: (ax, az, bx, bz) => !bldAt(bx, bz) && los([ax, az], [bx, bz]),
+    canSee: (ax, az, bx, bz) => !indoorAt(bx, bz) && los([ax, az], [bx, bz]),
     hurt: dmg => {
       if (player.sleeping) player.sleeping = false;
       AU.gunshot('mg', 30, false);
@@ -2000,13 +2008,7 @@ function onTileLoad(t: TileInfo) {
       }),
     );
   }
-  // v21.5 enterable ground-floor rooms: a cabinet / fridge / shelf inside each (ids 100+, saved per tile)
-  (t.rooms || []).forEach((rm, j) => {
-    const i = 100 + j;
-    const ty = rm.kind === 'shop' ? 'store' : 'home';
-    const preset = sv.c?.[i] ?? rollLoot(ty, r);
-    rec.conts.push(makeCont(`t${t.key}:${i}`, [rm.x - rm.nx * 1.2, rm.z - rm.nz * 1.2], ty, undefined, { ...preset }));
-  });
+  // v23.3 enterable buildings are furnished lazily near the player (clutterTick → districtClutter)
   const big = t.roads.filter(q => q.p.length >= 2 && !/foot|path|steps|cycle|service/.test(q.t));
   // garrison outpost for the area this tile anchors
   const gs = SECTORS.findIndex((_, i) => outerSector(i) && garrisonKey(i) === t.key);
@@ -2060,6 +2062,7 @@ function onTileLoad(t: TileInfo) {
 function onTileUnload(key: string) {
   const rec = dTile.get(key);
   if (!rec) return;
+  for (const [e, live] of dClut) if (e.key === key) dropDClut(e, live);
   for (const q of rec.sols) {
     scene.remove(q.rig.root);
     scene.remove(q.cone);
@@ -3266,7 +3269,7 @@ function updateGrenades(dt: number, night: boolean) {
     const p = new THREE.Vector3(g.p[0], 0.3, g.p[1]);
     blastFx.explode(p, 0.55);
     const dp = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
-    AU.shellBoom(dp, !!bldAt(player.pos.x, player.pos.z), 0.5);
+    AU.shellBoom(dp, indoorAt(player.pos.x, player.pos.z), 0.5);
     blastFx.kick(dp, 0.5);
     noise(p.x, p.z, 40);
     for (const o of sols)
@@ -3276,7 +3279,7 @@ function updateGrenades(dt: number, night: boolean) {
       }
     let dmg = SQ.grenadeDmg(dp);
     if (dmg <= 0) continue;
-    if (bldAt(p.x, p.z) !== bldAt(player.pos.x, player.pos.z)) dmg *= 0.2;
+    if (placeAt(p.x, p.z) !== placeAt(player.pos.x, player.pos.z)) dmg *= 0.2;
     else if (findCover(player.pos.x, player.pos.z, 1.2) && dp > 1.5) dmg *= 0.6;
     aiStats.grenHit++;
     player.hp -= dmg;
@@ -3350,7 +3353,66 @@ function clutterTick(dt: number) {
       }
     }
   }
-  CL.clutterStats.live = clutLive.size;
+  districtClutter(budget);
+  CL.clutterStats.live = clutLive.size + dClutLive();
+}
+// v23.3 enterable district buildings: the same planner furnishes them; furniture, its cover segments and the
+// containers exist only near the player. Container ids t<tile>:<1000 + 64·building + n> are saved with the tile.
+type DClut = { g?: THREE.Group; segs: Seg[] };
+const dClut = new Map<DEnter, DClut>();
+const dContId = (e: DEnter, n: number) => `t${e.key}:${1000 + e.bi * 64 + n}`;
+function dPlan(e: DEnter) {
+  return CL.plan(e, { pip, onRoad: () => e.street }, { seed: e.id, contId: n => dContId(e, n) });
+}
+const dClutLive = () => {
+  let n = 0;
+  for (const v of dClut.values()) if (v.g) n++;
+  return n;
+};
+function dropDClut(e: DEnter, live: DClut) {
+  if (live.g) CL.dispose(live.g);
+  for (const sg of live.segs) removeSeg(sg);
+  dClut.delete(e);
+}
+function districtClutter(budget: number) {
+  const P = player.pos;
+  const cand: [DEnter, number][] = [];
+  for (const e of district.enterables()) {
+    const d = Math.max(e.minx - P.x, P.x - e.maxx, e.minz - P.z, P.z - e.maxz, 0);
+    const live = dClut.get(e);
+    if (live) {
+      if (live.g) live.g.visible = d < 40;
+      if (d > 70) dropDClut(e, live);
+    } else if (d < 28) cand.push([e, d]);
+  }
+  cand.sort((a, b) => a[1] - b[1]);
+  for (const [e] of cand) {
+    if (budget-- <= 0) break;
+    const C = dPlan(e);
+    const live: DClut = { segs: [] };
+    dClut.set(e, live);
+    if (!C) continue;
+    live.g = CL.build(C);
+    scene.add(live.g);
+    for (const sg of C.segs) {
+      const q = { a: sg.a, b: sg.b, h: sg.h } as Seg;
+      addSeg(q, sg.h < 1.3);
+      live.segs.push(q);
+    }
+    const rec = dTile.get(e.key);
+    if (!rec) continue;
+    const sv = district.saved[e.key]?.c || {};
+    for (const k of C.conts) {
+      if (conts.some(c => c.id === k.id)) continue;
+      let x = k.seed >>> 0;
+      const r = () => (x = (x * 1664525 + 1013904223) >>> 0) / 4294967296;
+      const items = sv[+k.id.split(':')[1]] ?? rollLoot(k.loot, r);
+      const c = makeCont(k.id, k.p, 'crate', undefined, { ...items });
+      c.label = k.label;
+      c.mesh.visible = false; // the furniture itself is the container
+      rec.conts.push(c);
+    }
+  }
 }
 function noise(x: number, z: number, r: number) {
   if (started && r >= 10) {
@@ -3579,6 +3641,8 @@ function surfaceAt(x: number, z: number): AU.Surface {
   if (z < -6000) return 'metro';
   const b = bldAt(x, z);
   if (b) return b.type === 'home' || b.type === 'house' || b.type === 'residential' ? 'wood' : 'tile';
+  const e = district.enterAt(x, z);
+  if (e) return e.use === 'home' ? 'wood' : 'tile';
   return walkH(x, z) > 0.02 ? 'tile' : 'asphalt';
 }
 let stepA = 0,
@@ -3595,7 +3659,7 @@ function audioTick(dt: number) {
   }
   if (player.hp < auHp - 3 && !dead) AU.hurt(0);
   auHp = player.hp;
-  const inside = !!bldAt(player.pos.x, player.pos.z);
+  const inside = indoorAt(player.pos.x, player.pos.z);
   AU.ambience(dt, {
     rain: WX.amt,
     indoor: inside || player.pos.z < -6000,
@@ -3665,7 +3729,7 @@ function setupSnipers() {
         if (roofB === s.b) return true;
         if (roofB) return false;
         const P: V2 = [player.pos.x, player.pos.z];
-        if (bldAt(P[0], P[1])) return false; // indoors / under the arcade
+        if (indoorAt(P[0], P[1])) return false; // indoors / under the arcade
         if (vehicles.list.some(v => Math.hypot(v.pos.x - P[0], v.pos.z - P[1]) < 1.8)) return false; // behind a car
         return los(snpEye(s), P);
       },
@@ -3777,7 +3841,7 @@ function scopeFire() {
   if (--player.inv[d.ammo!] <= 0) delete player.inv[d.ammo!];
   player.cd = d.cd;
   player.rig.shootT = 0.14;
-  AU.gunshot(AU.gunKind(k, d), 0, !!bldAt(player.pos.x, player.pos.z));
+  AU.gunshot(AU.gunKind(k, d), 0, indoorAt(player.pos.x, player.pos.z));
   noise(player.pos.x, player.pos.z, 80); // a rifle crack: soldiers come to search
   const o = new THREE.Vector3(player.pos.x, eyeY(), player.pos.z);
   let hit: { s?: Sniper; sol?: Sol; head: boolean } | null = null;
@@ -3889,7 +3953,7 @@ function snpUpdate(dt: number) {
       gameMin > 1440 + 9 * 60 &&
       !surv.moral &&
       !snp.inZone(player.pos.x, player.pos.z) &&
-      !bldAt(player.pos.x, player.pos.z)
+      !indoorAt(player.pos.x, player.pos.z)
     )
       moralStart();
   }
@@ -3970,7 +4034,7 @@ function useItem(k: string) {
     callSupport();
     closePanel();
   } else if (k === 'fpv') {
-    if (bldAt(player.pos.x, player.pos.z)) {
+    if (indoorAt(player.pos.x, player.pos.z)) {
       log(tr('在室內無法起飛，先到戶外', 'Cannot launch indoors. Go outside first.'), '#f99');
       return;
     }
@@ -4012,7 +4076,7 @@ function useItem(k: string) {
     log(getLanguage() === 'en' ? `Used ${d.name}` : `使用了 ${d.name}`);
     if (--player.inv[k] <= 0) delete player.inv[k];
   } else if (k === 'bucket') {
-    if (bldAt(player.pos.x, player.pos.z)) {
+    if (indoorAt(player.pos.x, player.pos.z)) {
       log(
         tr(
           '水桶要放在戶外（沒有屋頂遮的地方）才接得到雨',
@@ -4841,7 +4905,7 @@ function barricade() {
   log(tr('門封好了（敲打聲可能引來巡邏）', 'Door barricaded (hammering may attract patrols).'), '#9f9');
 }
 function sleep() {
-  if (!bldAt(player.pos.x, player.pos.z)) {
+  if (!indoorAt(player.pos.x, player.pos.z)) {
     log(tr('只能在室內睡覺', 'You can only sleep indoors.'), '#f99');
     return;
   }
@@ -4881,7 +4945,7 @@ function tryVault() {
   const to = new THREE.Vector3(player.pos.x + fwd.x * 1.5, 0, player.pos.z + fwd.z * 1.5);
   const chk = to.clone();
   collide(chk, 0.35);
-  if (chk.distanceTo(to) > 0.2 || bldAt(to.x, to.z) !== bldAt(player.pos.x, player.pos.z))
+  if (chk.distanceTo(to) > 0.2 || placeAt(to.x, to.z) !== placeAt(player.pos.x, player.pos.z))
     return log(tr('另一側沒有空間', 'No room on the other side'));
   player.vFrom.copy(player.pos);
   player.vTo.copy(to);
@@ -4929,7 +4993,7 @@ function playerAttack() {
       return;
     }
     if (--player.inv[d.ammo] <= 0) delete player.inv[d.ammo];
-    AU.gunshot(AU.gunKind(k, d), 0, !!bldAt(player.pos.x, player.pos.z));
+    AU.gunshot(AU.gunKind(k, d), 0, indoorAt(player.pos.x, player.pos.z));
     noise(player.pos.x, player.pos.z, d.noise);
     if (d.at) {
       fireAT(k, d, dir);
@@ -5031,7 +5095,7 @@ function meleeResolve(d: any, dir: THREE.Vector3): Sol | null {
     // flinch + knockback away from the blow, paused for the same hit-stop beat
     hitStop(s.rig, 0.07);
     const kb = s.pos.clone().addScaledVector(dir, s.hp > 0 ? 0.45 : 0.25);
-    if (!bldAt(kb.x, kb.z) || bldAt(kb.x, kb.z) === bldAt(s.pos.x, s.pos.z)) {
+    if (!placeAt(kb.x, kb.z) || placeAt(kb.x, kb.z) === placeAt(s.pos.x, s.pos.z)) {
       s.pos.copy(kb);
       collide(s.pos, 0.35);
     }
@@ -5706,6 +5770,8 @@ function update(dt: number) {
   }
   // v21.2 shader cutaway around the camera→player line (see occlusion.ts); camera itself unchanged
   updateOcclusion(player.pos.x, player.pos.y, player.pos.z);
+  // v23.3 inside an enterable district building: cut its upper floors and roof away (core blocks lower their walls)
+  setBuildingCut(player.pos.z < -6000 || roofB ? null : district.enterAt(player.pos.x, player.pos.z));
   // buildings cutaway
   const inside = bldAt(player.pos.x, player.pos.z);
   for (const b of blds) {
@@ -5846,7 +5912,7 @@ function update(dt: number) {
               const kb = player.pos.clone();
               kb.x += ((player.pos.x - s.pos.x) / Math.max(0.3, dist)) * 0.6;
               kb.z += ((player.pos.z - s.pos.z) / Math.max(0.3, dist)) * 0.6;
-              if (bldAt(kb.x, kb.z) === bldAt(player.pos.x, player.pos.z)) {
+              if (placeAt(kb.x, kb.z) === placeAt(player.pos.x, player.pos.z)) {
                 collide(kb, 0.35);
                 player.pos.copy(kb);
               }
@@ -5872,7 +5938,7 @@ function update(dt: number) {
         ) {
           s.rig.shootT = 0.14;
           s.cd = (1.1 + rnd() * 0.6) * (s.role === 'suppress' ? 0.6 : flanking ? 1.6 : 1);
-          AU.gunshot('rifle', dist, !!bldAt(s.pos.x, s.pos.z) || !!bldAt(player.pos.x, player.pos.z));
+          AU.gunshot('rifle', dist, !!bldAt(s.pos.x, s.pos.z) || indoorAt(player.pos.x, player.pos.z));
           noise(s.pos.x, s.pos.z, 40);
           // v21.4 ray against walls / cover first, then the hit roll (lower vs a covered target)
           const clear = shotRay([s.pos.x, s.pos.z], pp, 1.4, playerAimH(), 1.0);
@@ -6358,8 +6424,8 @@ on('alert', e => siren(true, e?.kind ?? 'alert'));
 function siren(on: boolean, kind: 'alert' | 'clear' | 'test' = 'alert') {
   // v23.1 萬安-style street sirens (broadcast.ts); muffled indoors. v23.2.1: 'test' is a short quiet chime (audio.ts)
   if (!on) return;
-  if (kind === 'test') return AU.alertTest(!!bldAt(player.pos.x, player.pos.z));
-  BC.airRaid(kind, () => !!bldAt(player.pos.x, player.pos.z), AU.sfxCtx());
+  if (kind === 'test') return AU.alertTest(indoorAt(player.pos.x, player.pos.z));
+  BC.airRaid(kind, () => indoorAt(player.pos.x, player.pos.z), AU.sfxCtx());
 }
 function scrFlash(col: string, ms = 600) {
   const f = document.createElement('div');
@@ -7393,6 +7459,24 @@ async function boot() {
       conts: conts.filter(c => c.id[0] === 'f').map(c => [c.id, c.label, Object.keys(c.items).length, c.mesh.visible]),
       plans: blds.filter(b => (b as any).clut).map(b => [b.id, (b as any).clut.use, b.c, b.door!.p, b.h]),
     }),
+    // v23.3 enterable district buildings of the loaded tiles (door centre, inward normal, use, furnished now?)
+    denter: () =>
+      [...district.enterables()].map(e => ({
+        key: e.key,
+        bi: e.bi,
+        use: e.use,
+        door: e.door.p,
+        n: [-e.U[1], e.U[0]],
+        c: e.c,
+        live: !!dClut.get(e)?.g,
+        conts: conts.filter(
+          c =>
+            c.id.startsWith(`t${e.key}:`) &&
+            +c.id.split(':')[1] >= 1000 + e.bi * 64 &&
+            +c.id.split(':')[1] < 1064 + e.bi * 64,
+        ).length,
+      })),
+    indoor: () => indoorAt(player.pos.x, player.pos.z),
     ai: () => ({
       radio,
       stats: aiStats,
@@ -7405,6 +7489,7 @@ async function boot() {
       radioCd,
     }),
     OCC,
+    CUT,
     escapeCheck,
     unstuck,
     snp: () =>
@@ -7437,6 +7522,11 @@ async function boot() {
     audioFx: AU,
     autoStop: () => {
       AUTO.path = [];
+      AUTO.i = 0;
+    },
+    /** v23.3 follow explicit waypoints with the normal movement + collision */
+    autoPath: (pts: V2[]) => {
+      AUTO.path = pts;
       AUTO.i = 0;
     },
     autoWalk: () => {

@@ -1,4 +1,4 @@
-// v21.5 screenshots: district walk-ups (rear stairs / cages / ACs / signs) and an enterable ground-floor room.
+// v21.5 screenshots: district walk-ups (rear stairs / cages / ACs / signs) and an enterable building (v23.3).
 // argv: url outDir
 import { launch, pickRole } from '../lib.mjs';
 const [url, out] = process.argv.slice(2);
@@ -22,7 +22,8 @@ for (const [n, x, z] of [
   await G(`g.tp(${x},${z})`);
   await p.waitForTimeout(15000);
   await p.screenshot({ path: `${out}/${n}.png`, timeout: 120000 });
-  const rc = await G(`return g.conts.filter(c=>/:1\\d\\d$/.test(c.id)).map(c=>[c.id,c.p])`);
+  // v23.3: the single ground-floor rooms became whole enterable buildings (see v233enter.mjs); stand inside one
+  const rc = await G(`return g.denter().map(e=>[e.key+'#'+e.bi,[e.door[0]+e.n[0]*1.3,e.door[1]+e.n[1]*1.3]])`);
   res[n] = rc.length;
   if (rc.length && !res.room) {
     res.room = rc[0];
