@@ -9,7 +9,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { canvasTex, roadMat } from './textures';
 import { lotTex, ARCADE_MATS, worldUV } from './paving';
 import { stair, leanTo, ac, brickPatch, brickMat, vsign, vsignMat, VSN } from './walkup';
-import { useOf, type Use } from './clutter';
+import { useOf, specialKind, type Use } from './clutter';
 import { Forest } from './trees';
 import { placeRooftop, dressRoof, pickRoofMat, roofClass, roofDetMat, roofConc } from './rooftin';
 import { VehicleSystem, type VehicleKind } from '../systems/vehicles';
@@ -44,6 +44,8 @@ export type DEnter = {
   pts: V2[];
   h: number;
   type: 'home';
+  /** v23.6 public building kind (school, clinic, temple, market, police, office) from the OSM tags, if any */
+  kind?: Use;
   minx: number;
   maxx: number;
   minz: number;
@@ -414,8 +416,20 @@ export class District {
    * v23.3 decide whether a footprint becomes enterable and where its street door goes. Uses its own random stream
    * (er) so the rest of the tile's deterministic content keeps its sequence.
    */
-  private planEnter(key: string, bi: number, pts: V2[], area: number, lv: number, h: number, er: () => number) {
-    if (area < 20 || area > 1500 || lv > 8 || er() >= ENTER_P) return null;
+  private planEnter(
+    key: string,
+    bi: number,
+    pts: V2[],
+    area: number,
+    lv: number,
+    h: number,
+    er: () => number,
+    kind: Use | null,
+  ) {
+    // v23.6 public buildings (schools, hospitals, temples, markets, stations, offices) are always enterable,
+    // and may be big; ordinary ones are a random share of the street-front walk-ups
+    const roll = er();
+    if (kind ? area < 20 || area > 6000 || lv > 14 : area < 20 || area > 1500 || lv > 8 || roll >= ENTER_P) return null;
     let best = -1,
       bl = 0;
     for (let i = 0; i < pts.length; i++) {
@@ -470,6 +484,7 @@ export class District {
       pts,
       h,
       type: 'home',
+      kind: kind ?? undefined,
       minx: Math.min(...xs),
       maxx: Math.max(...xs),
       minz: Math.min(...zs),
@@ -751,7 +766,10 @@ export class District {
       const h = GF + (lv - 1) * FH;
       const tint = WALLTINT[Math.floor(rnd() * WALLTINT.length)];
       const awn = AWN[Math.floor(rnd() * AWN.length)];
-      let ent = enter.length < ENTER_CAP ? this.planEnter(key, bi, pts, Math.abs(A / 2), lv, h, er) : null;
+      let ent =
+        enter.length < ENTER_CAP
+          ? this.planEnter(key, bi, pts, Math.abs(A / 2), lv, h, er, specialKind(b.k, b.s, b.n))
+          : null;
       // not when the outline sits inside another one (overlapping OSM parts) or the door opens into a neighbour
       if (
         ent &&

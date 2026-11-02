@@ -1441,6 +1441,9 @@ function buildMap(data: any) {
       minz: Math.min(...zs),
       maxz: Math.max(...zs),
     };
+    // v23.6 schools, hospitals, temples, markets, stations, offices get their own fit-out (clutter.ts)
+    const kind = CL.specialKind('', ob.s, ob.n);
+    if (kind) (b as any).kind = kind;
     // door: longest edge
     let di = 0,
       dl = 0;
@@ -3499,6 +3502,7 @@ function goUp(b: Bld | DEnter, P: CL.Plan) {
     pts: b.pts.map(T),
     door: { p: T(door.p), a: T(door.a), c: T(door.c) },
     type: 'home',
+    kind: (b as any).kind, // v23.6 the floor above a school is classrooms too
     h: b.h,
     minx: b.minx + off[0],
     maxx: b.maxx + off[0],
@@ -7727,6 +7731,7 @@ async function boot() {
         door: e.door.p,
         n: [-e.U[1], e.U[0]],
         c: e.c,
+        kind: e.kind ?? null,
         live: !!dClut.get(e)?.g,
         conts: conts.filter(
           c =>
@@ -7752,6 +7757,20 @@ async function boot() {
         c: b.c,
         foot: stairFoot(b, groundPlan(b)!),
       })),
+    // v23.6 public buildings in the core: kind, a point just inside the door, furnished now?, its containers
+    coreKinds: () =>
+      blds
+        .filter(b => (b as any).kind && (b as any).clut)
+        .map(b => {
+          const P = (b as any).clut as CL.Plan;
+          return {
+            id: b.id,
+            kind: (b as any).kind,
+            inside: planW(P, 0, 1.3),
+            live: !!(b as any).clutG,
+            conts: P.conts.map(c => c.label),
+          };
+        }),
     upToggle: () => upToggle(),
     upState: () =>
       up

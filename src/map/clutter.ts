@@ -7,7 +7,33 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 type V2 = [number, number];
-export type Use = 'eatery' | 'scooter' | 'grocery' | 'home';
+export type Use =
+  'eatery' | 'scooter' | 'grocery' | 'home' | 'school' | 'clinic' | 'temple' | 'market' | 'police' | 'office';
+/** v23.6 buildings with their own fit-out (from OSM building / amenity tags or the name) */
+export const SPECIAL = new Set<Use>(['school', 'clinic', 'temple', 'market', 'police', 'office']);
+/**
+ * v23.6 what kind of public building a footprint is: k = OSM building=*, s = shop / amenity, n = name.
+ * null for ordinary homes and shops (and for toilets, shelters, sheds and the like).
+ */
+export function specialKind(k = '', s = '', n = ''): Use | null {
+  if (/^(toilets|shelter|parking|clock|bicycle_parking)$/.test(s)) return null;
+  if (/^(roof|greenhouse|grandstand|parking|construction|hut|toilets|garage|shed|service)$/.test(k)) return null;
+  if (/圖書館|郵局|銀行|區公所|里辦公處|活動中心/.test(n)) return 'office';
+  const SCH = /^(school|kindergarten|college|university)$/;
+  if (SCH.test(k) || SCH.test(s) || /國小|國中|高中|高職|小學|中學|學校|幼兒園|大學|學院/.test(n)) return 'school';
+  if (/^(hospital|clinic)$/.test(k) || /^(hospital|clinic|doctors|dentist)$/.test(s) || /醫院|診所|衛生所|院區/.test(n))
+    return 'clinic';
+  if (/^(police|fire_station)$/.test(s) || /派出所|分局|警察|消防/.test(n)) return 'police';
+  if (/^(temple|shrine|church|chapel)$/.test(k) || s === 'place_of_worship' || /宮|寺|廟|壇|祠|教會|禮拜堂/.test(n))
+    return 'temple';
+  if (s === 'marketplace' || /市場/.test(n)) return 'market';
+  if (
+    /^(office|commercial|government|public|hotel|train_station)$/.test(k) ||
+    /^(townhall|bank|post_office|library|community_centre|social_facility|courthouse)$/.test(s)
+  )
+    return 'office';
+  return null;
+}
 /** one box in piece-local space: size, colour, offset, rotation */
 type Part = [
   w: number,
@@ -249,6 +275,181 @@ const laundry = (r: () => number): Part[] => {
   P.push([0.35, 0.3, 0.35, 0x7a4a30, 0.9, 0.15, 0.1], [0.25, 0.4, 0.25, 0x3a7a3a, 0.9, 0.5, 0.1]); // potted plant
   return P;
 };
+// ---------- v23.6 public-building pieces ----------
+const studentDesk = (r: () => number, over: boolean): Part[] => [
+  // desk facing the board (+z); its chair on the door side (-z), sometimes knocked over
+  [0.6, 0.03, 0.42, 0xc8a878, 0, 0.72, 0],
+  [0.56, 0.12, 0.36, 0x7a8a8c, 0, 0.64, 0.02],
+  ...(
+    [
+      [-1, -1],
+      [1, -1],
+      [-1, 1],
+      [1, 1],
+    ] as const
+  ).map(([a, c]) => [0.03, 0.7, 0.03, 0x8a9294, a * 0.27, 0.35, c * 0.18] as Part),
+  ...(over
+    ? ([
+        [0.38, 0.03, 0.36, 0x6a8ab0, 0, 0.2, -0.5, 0, Math.PI / 2],
+        [0.38, 0.4, 0.03, 0x6a8ab0, 0, 0.02, -0.32, 0, Math.PI / 2],
+      ] as Part[])
+    : ([
+        [0.38, 0.03, 0.36, 0x6a8ab0, 0, 0.42, -0.45],
+        [0.38, 0.4, 0.03, 0x6a8ab0, 0, 0.64, -0.62],
+        [0.03, 0.42, 0.03, 0x8a9294, -0.17, 0.21, -0.3],
+        [0.03, 0.42, 0.03, 0x8a9294, 0.17, 0.21, -0.3],
+      ] as Part[])),
+  ...(r() < 0.35 ? ([[0.22, 0.04, 0.3, PLASTIC[Math.floor(r() * 4)], 0.1, 0.76, 0.02, r()]] as Part[]) : []), // book
+];
+const blackboard = (w: number): Part[] => [
+  [w, 1.1, 0.04, 0x1f3a2c, 0, 1.45, 0.2],
+  [w + 0.1, 0.06, 0.06, 0x8a6a40, 0, 0.88, 0.18], // chalk ledge
+  [w * 0.4, 0.02, 0.02, 0xe8e8e0, -w * 0.15, 1.6, 0.17], // chalk writing
+  [w * 0.25, 0.02, 0.02, 0xe8e8e0, w * 0.1, 1.4, 0.17],
+];
+const teacherDesk = (): Part[] => [...table(1.4, 0.7, 0x8a6a40), [1.36, 0.6, 0.04, 0x7a5a34, 0, 0.45, 0.33]];
+const locker = (c: number): Part[] => [
+  [0.9, 1.8, 0.45, c, 0, 0.9, 0],
+  ...[-0.3, 0, 0.3].map(x => [0.01, 1.7, 0.01, 0x3a3a3a, x + 0.15, 0.9, -0.23] as Part),
+  ...[-0.3, 0, 0.3].map(x => [0.04, 0.06, 0.01, 0xd0d0d0, x, 1.0, -0.23] as Part),
+];
+const hospitalBed = (r: () => number): Part[] => [
+  [0.95, 0.08, 2.0, 0xd8dcdc, 0, 0.5, 0], // frame
+  [0.9, 0.14, 1.9, 0xb8d0e0, 0, 0.6, 0], // mattress
+  [0.6, 0.1, 0.35, 0xf0f0f0, 0, 0.71, 0.75], // pillow
+  [0.95, 0.5, 0.05, 0xc8ccd0, 0, 0.75, 1.0], // headboard
+  ...(r() < 0.6 ? ([[0.92, 0.04, 1.1, 0x9ab8a8, 0, 0.69, -0.35, r() * 0.3]] as Part[]) : []), // blanket
+  ...(
+    [
+      [-1, -1],
+      [1, -1],
+      [-1, 1],
+      [1, 1],
+    ] as const
+  ).map(([a, c]) => [0.04, 0.46, 0.04, 0xa0a4a8, a * 0.43, 0.23, c * 0.95] as Part),
+  [0.03, 1.8, 0.03, 0xa0a4a8, -0.62, 0.9, 0.7], // IV stand
+  [0.12, 0.18, 0.04, 0xd8eef0, -0.62, 1.65, 0.7],
+  [1.9, 1.9, 0.02, 0xa8c8b8, 0.6, 0.95, 0, Math.PI / 2], // privacy curtain along the bed
+];
+const medCabinet = (): Part[] => [
+  [0.9, 1.8, 0.42, 0xe8ecec, 0, 0.9, 0],
+  [0.84, 0.9, 0.01, 0x9fc8d8, 0, 1.3, -0.21], // glass doors
+  ...[0.55, 1.0, 1.45].map(y => [0.84, 0.02, 0.38, 0xd0d4d4, 0, y, 0] as Part),
+  ...[0.6, 1.05, 1.5].map(
+    (y, i) => [0.1, 0.12, 0.1, [0xe05a4a, 0x4a8ae0, 0xf0c040][i], -0.2 + i * 0.2, y + 0.07, 0] as Part,
+  ),
+];
+const wheelchair = (): Part[] => [
+  [0.5, 0.05, 0.45, 0x3a3a3a, 0, 0.48, 0],
+  [0.5, 0.45, 0.04, 0x3a3a3a, 0, 0.72, 0.22],
+  [0.04, 0.6, 0.6, 0x555555, -0.28, 0.3, 0.05],
+  [0.04, 0.6, 0.6, 0x555555, 0.28, 0.3, 0.05],
+];
+const templeAltar = (w: number): Part[] => [
+  [w, 0.95, 0.9, 0x8a1c14, 0, 0.475, 0.2], // carved red base
+  [w + 0.1, 0.06, 0.95, 0xc8a040, 0, 0.98, 0.2], // gilded top
+  [w * 0.8, 1.0, 0.5, 0x6a1410, 0, 1.5, 0.35], // shrine cabinet
+  [w * 0.8 + 0.1, 0.12, 0.6, 0xd8b040, 0, 2.06, 0.35], // gilded crown
+  ...[-0.33, 0, 0.33].map(
+    (x, i) => [0.28, i === 1 ? 0.62 : 0.5, 0.2, [0x2a2a2a, 0xc89040, 0x3a2a20][i], x * w, 1.35, 0.2] as Part,
+  ), // deities
+  ...[-0.5, 0.5].map(x => [0.14, 0.22, 0.14, 0xe02a20, x * w, 1.12, -0.15] as Part), // red lamps
+  [w * 0.6, 0.08, 0.3, 0xe8b040, 0, 1.05, -0.12], // offerings
+];
+const templeLamps = (w: number): Part[] => [-0.5, 0.5].map(x => [0.1, 0.12, 0.1, 0xff5a30, x * w, 1.26, -0.15]);
+const incenseBurner = (): Part[] => [
+  [0.75, 0.45, 0.6, 0x6a5a30, 0, 0.62, 0], // bronze body
+  [0.85, 0.06, 0.7, 0x8a7a40, 0, 0.86, 0], // rim
+  [0.12, 0.25, 0.12, 0x5a4a28, -0.28, 1.0, 0], // ears
+  [0.12, 0.25, 0.12, 0x5a4a28, 0.28, 1.0, 0],
+  ...(
+    [
+      [-1, -1],
+      [1, -1],
+      [-1, 1],
+      [1, 1],
+    ] as const
+  ).map(([a, c]) => [0.08, 0.4, 0.08, 0x5a4a28, a * 0.3, 0.2, c * 0.22] as Part),
+  [0.6, 0.04, 0.45, 0x9a9a90, 0, 0.88, 0], // ash
+];
+const incenseGlow = (): Part[] =>
+  [-0.12, 0, 0.12].map((x, i) => [0.012, 0.3, 0.012, 0xff6a20, x, 1.05, (i - 1) * 0.06] as Part);
+const cushion = (c: number): Part[] => [[0.5, 0.14, 0.45, c, 0, 0.07, 0]];
+const pillar = (): Part[] => [
+  [0.38, 3.6, 0.38, 0xa82a1e, 0, 1.8, 0],
+  [0.5, 0.25, 0.5, 0x5a5a52, 0, 0.125, 0], // stone base
+];
+const lanternGlow = (): Part[] => [[0.32, 0.4, 0.32, 0xff3a20, 0, 2.5, 0]];
+const donationBox = (): Part[] => [
+  [0.5, 0.6, 0.4, 0xa82018, 0, 0.3, 0],
+  [0.54, 0.05, 0.44, 0xd8b040, 0, 0.62, 0],
+  [0.3, 0.02, 0.04, 0x1a1a1a, 0, 0.65, 0],
+];
+const STALL_GOODS = [
+  [0x5a9a3a, 0xe8902a, 0xc8302a, 0x9ac040], // produce
+  [0xd88a8a, 0xb84a4a, 0xf0d0c0], // meat / fish
+  [0xc8b088, 0xa88a5a, 0xe8e0c8], // dry goods
+];
+const marketStall = (r: () => number): Part[] => {
+  const g = STALL_GOODS[Math.floor(r() * STALL_GOODS.length)];
+  const P: Part[] = [
+    [1.6, 0.8, 0.8, 0x8a8a84, 0, 0.4, 0], // steel counter
+    [1.65, 0.04, 0.85, 0xb0b4b4, 0, 0.82, 0],
+  ];
+  for (let i = 0; i < 6; i++)
+    P.push([
+      0.42,
+      0.14 + r() * 0.12,
+      0.32,
+      g[Math.floor(r() * g.length)],
+      -0.55 + (i % 3) * 0.55,
+      0.92,
+      -0.18 + Math.floor(i / 3) * 0.38,
+    ]);
+  if (r() < 0.6) P.push([0.25, 0.08, 0.25, 0xd8d8d8, 0.6, 0.88, 0.3]); // scale
+  P.push([0.04, 1.4, 0.04, 0x6a6a6a, -0.78, 1.5, 0.38], [0.04, 1.4, 0.04, 0x6a6a6a, 0.78, 1.5, 0.38]); // lamp poles
+  return P;
+};
+const crates = (r: () => number): Part[] => {
+  const P: Part[] = [];
+  for (let i = 0; i < 2 + Math.floor(r() * 3); i++)
+    P.push([
+      0.5,
+      0.28,
+      0.36,
+      [0x3a6aa8, 0xc84a3a, 0x4a9a5a][Math.floor(r() * 3)],
+      (r() - 0.5) * 0.2,
+      0.14 + i * 0.28,
+      (r() - 0.5) * 0.2,
+    ]);
+  return P;
+};
+const officeDesk = (r: () => number): Part[] => [
+  ...table(1.2, 0.65, 0xb8b0a0),
+  [0.42, 0.62, 0.55, 0x8a8a84, 0.36, 0.33, 0], // drawer pedestal
+  [0.46, 0.3, 0.04, 0x1a1a1a, -0.2, 0.95, 0.15], // monitor
+  [0.06, 0.18, 0.06, 0x2a2a2a, -0.2, 0.84, 0.18],
+  [0.4, 0.02, 0.14, 0x2a2a2a, -0.2, 0.76, -0.12], // keyboard
+  ...(r() < 0.5 ? ([[0.3, 0.06, 0.22, 0xf0f0e8, 0.25, 0.79, -0.05, r()]] as Part[]) : []), // papers
+  ...chair(0x2a2a3a, r() < 0.2).map(p => {
+    const q = [...p] as Part;
+    q[6] -= 0.55;
+    return q;
+  }),
+];
+const filingCabinet = (): Part[] => [
+  [0.5, 1.3, 0.6, 0x8a9094, 0, 0.65, 0],
+  ...[0.25, 0.55, 0.85, 1.15].map(y => [0.2, 0.03, 0.01, 0xd0d0d0, 0, y, -0.3] as Part),
+];
+const cellBars = (w: number): Part[] => {
+  const P: Part[] = [
+    [w, 0.06, 0.06, 0x4a4e52, 0, 2.2, 0],
+    [w, 0.06, 0.06, 0x4a4e52, 0, 0.05, 0],
+  ];
+  for (let x = -w / 2; x <= w / 2 + 1e-6; x += 0.14) P.push([0.025, 2.2, 0.025, 0x4a4e52, x, 1.1, 0]);
+  P.push([0.6, 0.4, 1.8, 0x7a7a72, 0, 0.2, 0.95]); // bench inside
+  return P;
+};
 // ---------- plan ----------
 type Ctx = { pip: (p: V2, pts: V2[]) => boolean; onRoad: (x: number, z: number) => boolean };
 /** v23.3 streamed district buildings pass their own seed and per-tile container ids */
@@ -262,6 +463,7 @@ export type PlanOpt = {
 };
 const seedOf = (b: any, o?: PlanOpt) => o?.seed ?? (b.id + 1) * 2654435761;
 function pickUse(b: any, street: boolean, r: () => number): Use {
+  if (b.kind && SPECIAL.has(b.kind)) return b.kind;
   return b.type && b.type !== 'home'
     ? 'grocery'
     : street && r() < 0.55
@@ -390,8 +592,142 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
       P.decals.push([s, 0.012, s * (0.5 + r() * 0.6), c, u, 0.012 + i * 0.0004, v, r() * 6]);
     }
   };
+  // ---- v23.6 public buildings: their own fit-out, scaled to the floor (big halls get more of it) ----
+  const special = SPECIAL.has(use);
+  const W2 = umax - umin;
+  const many = Math.max(8, Math.min(150, Math.floor((W2 * D) / 6)));
+  /** rows of pieces across the floor from v0, spacing du × dv, up to cap; f returns whether it placed one */
+  const rows = (
+    du: number,
+    dv: number,
+    v0: number,
+    v1: number,
+    cap: number,
+    f: (u: number, v: number, i: number) => boolean,
+  ) => {
+    let n = 0;
+    for (let v = v0; v < v1 && n < cap; v += dv)
+      for (let u = umin + 0.9; u < umax - 0.7 && n < cap; u += du) if (f(u, v, n)) n++;
+    return n;
+  };
+  if (use === 'school') {
+    // classroom: board and teacher's desk on the back wall, desks in rows facing it, lockers by the door
+    put(blackboard(Math.min(4, W2 - 1.2)), mid, back - 0.05, 0, Math.min(4, W2 - 1.2), 0.15, 0);
+    put(teacherDesk(), mid, back - 1.2, 0, 1.4, 0.7, 0.8, { cont: { label: '講桌抽屜', loot: 'home' } });
+    put(medCabinet(), uR - 0.3, back - 0.3, 0, 0.9, 0.45, 1.8, { cont: { label: '保健室藥櫃', loot: 'medshelf' } });
+    rows(1.3, 1.4, 2.4, back - 2.1, many, (u, v, i) =>
+      put(
+        studentDesk(r, r() < 0.15),
+        u + (r() - 0.5) * 0.12,
+        v,
+        0,
+        0.62,
+        1.05,
+        0.75,
+        i % 7 === 3 ? { cont: { label: '書包', loot: 'grocery' } } : {},
+      ),
+    );
+    for (let u = uL + 0.5, i = 0; u < uR - 0.4; u += 0.95, i++)
+      if (Math.abs(u) > 1.9)
+        put(locker(0x6a7a8a), u, 0.3, 2, 0.9, 0.45, 1.8, i % 2 ? {} : { cont: { label: '置物櫃', loot: 'wardrobe' } });
+    scatter(Math.min(30, Math.floor((W2 * D) / 10)), ['paper', 'paper', 'cloth']);
+  } else if (use === 'clinic') {
+    // ward: nurses' station by the door, medicine cabinets on the back wall, beds with curtains in rows
+    put(counter(2.2), uL + 1.6, 1.9, 0, 2.2, 0.6, 1.0, { cont: { label: '護理站', loot: 'pharmacy' } });
+    for (let u = uL + 0.6, i = 0; u < uR - 0.4 && i < 6; u += 1.0, i++)
+      put(medCabinet(), u, back - 0.3, 0, 0.9, 0.45, 1.8, i < 3 ? { cont: { label: '藥品櫃', loot: 'medshelf' } } : {});
+    rows(1.9, 2.8, 3.2, back - 1.6, many, (u, v) => put(hospitalBed(r), u, v, 0, 1.3, 2.1, 0.6));
+    for (let i = 0; i < 2 + Math.floor(r() * 3); i++)
+      put(wheelchair(), umin + 1 + r() * (W2 - 2), 2.2 + r() * (D - 3), Math.floor(r() * 4), 0.6, 0.6, 0.8);
+    scatter(Math.min(24, Math.floor((W2 * D) / 12)), ['paper', 'glass', 'cloth']);
+  } else if (use === 'temple') {
+    // main hall: deity altar on the back wall, offering table, bronze incense burner, red pillars, kneelers
+    const aw = Math.min(3.6, W2 - 1.4);
+    put(templeAltar(aw), mid, back - 0.55, 0, aw, 1.1, 1.3, {
+      glow: templeLamps(aw),
+      cont: { label: '供桌', loot: 'altar' },
+    });
+    put(
+      [...table(Math.min(2.4, aw), 0.8, 0x8a1c14, 0.85), [Math.min(2, aw - 0.3), 0.12, 0.3, 0xe8b040, 0, 0.92, 0]],
+      mid,
+      back - 1.9,
+      0,
+      Math.min(2.4, aw),
+      0.8,
+      0.9,
+      {
+        cont: { label: '供桌', loot: 'altar' },
+      },
+    );
+    put(incenseBurner(), mid, Math.min(back - 3.4, Math.max(2.8, D * 0.45)), 0, 0.9, 0.8, 1.1, { glow: incenseGlow() });
+    put(donationBox(), mid + 1.5, 2.3, 0, 0.5, 0.4, 0.7, { cont: { label: '功德箱', loot: 'altar' } });
+    for (const fu of [-0.3, 0.3])
+      for (const fv of [0.32, 0.68]) put(pillar(), mid + fu * W2, D * fv, 0, 0.4, 0.4, 3.6, { glow: lanternGlow() });
+    rows(0.75, 0.9, back - 3.0 > 3 ? 3.0 : 2.4, back - 2.6, Math.min(40, many), (u, v) =>
+      Math.abs(u - mid) < aw / 2 + 0.3 ? put(cushion(r() < 0.5 ? 0xc83a2a : 0xd8a830), u, v, 0, 0.5, 0.45, 0) : false,
+    );
+    scatter(Math.min(16, Math.floor((W2 * D) / 14)), ['paper']);
+  } else if (use === 'market') {
+    // traditional market: rows of steel stalls with produce / meat / dry goods, crates along the walls
+    const loots = ['stall', 'grocery', 'breakfast', 'kitchen'];
+    rows(2.3, 2.7, 2.3, back - 0.6, many, (u, v, i) =>
+      put(
+        marketStall(r),
+        u,
+        v,
+        Math.floor(r() * 2) * 2,
+        1.65,
+        0.85,
+        1.0,
+        r() < 0.5 ? { cont: { label: '攤位', loot: loots[i % 4] } } : {},
+      ),
+    );
+    for (let i = 0; i < 4 + Math.floor(W2 / 3); i++)
+      put(crates(r), umin + 0.6 + r() * (W2 - 1.2), back - 0.4 - r() * 1.5, 0, 0.55, 0.45, 1.0);
+    scatter(Math.min(30, Math.floor((W2 * D) / 8)), ['paper', 'cloth', 'glass']);
+  } else if (use === 'police') {
+    // station: front counter, desks with monitors, a holding cell and lockers at the back
+    put(counter(2.4), mid, 2.2, 0, 2.4, 0.6, 1.0);
+    if (W2 > 6) put(cellBars(2.2), uL + 1.4, back - 1.0, 0, 2.3, 2.0, 2.2);
+    for (let u = uR - 0.5, i = 0; u > mid && i < 4; u -= 0.95, i++)
+      put(
+        locker(0x4a5a6a),
+        u,
+        back - 0.25,
+        0,
+        0.9,
+        0.45,
+        1.8,
+        i < 2 ? { cont: { label: '警用置物櫃', loot: 'police' } } : {},
+      );
+    rows(1.9, 2.1, 3.6, back - 2.2, Math.min(24, many), (u, v, i) =>
+      put(officeDesk(r), u, v, 2, 1.25, 1.3, 0.8, i % 3 === 1 ? { cont: { label: '辦公桌抽屜', loot: 'home' } } : {}),
+    );
+    put(filingCabinet(), uL + 0.3, D * 0.5, 1, 0.5, 0.6, 1.3, { cont: { label: '檔案櫃', loot: 'home' } });
+    scatter(Math.min(24, Math.floor((W2 * D) / 10)), ['paper', 'paper', 'glass']);
+  } else if (use === 'office') {
+    // offices / bank / post office / library: counter by the door, desks in rows, filing cabinets on the walls
+    put(counter(2.4), mid, 2.0, 0, 2.4, 0.6, 1.0);
+    rows(1.9, 2.1, 3.4, back - 0.9, many, (u, v, i) =>
+      put(officeDesk(r), u, v, 2, 1.25, 1.3, 0.8, i % 4 === 2 ? { cont: { label: '辦公桌抽屜', loot: 'store' } } : {}),
+    );
+    for (let i = 0; i < 2 + Math.floor(W2 / 4); i++)
+      put(
+        filingCabinet(),
+        umin + 0.6 + r() * (W2 - 1.2),
+        back - 0.3,
+        0,
+        0.5,
+        0.6,
+        1.3,
+        i < 2 ? { cont: { label: '檔案櫃', loot: 'home' } } : {},
+      );
+    scatter(Math.min(30, Math.floor((W2 * D) / 8)), ['paper', 'paper', 'paper', 'glass']);
+  }
   // ---- ground-floor use ----
-  if (use === 'home') {
+  if (special) {
+    // furnished above
+  } else if (use === 'home') {
     put(altar(r), mid, back - 0.3, 0, 1.6, 1.2, 1.1, {});
     const sc = [0x5a4a3a, 0x7a6a50, 0x3a4a5a][Math.floor(r() * 3)];
     put(sofa(sc), uL + 1.0, D * 0.45, 1, 1.8, 0.8, 0.8);
@@ -476,7 +812,7 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     scatter(8, ['paper', 'glass', 'paper']);
   }
   // fill the rest of large floors cell by cell (deep blocks are several rooms / units on the ground floor)
-  let cap = 46;
+  let cap = special ? 0 : 46;
   for (let v = 2.2; v < D - 0.8 && cap > 0; v += 2.6)
     for (let u = umin + 1.1; u < umax - 0.8 && cap > 0; u += 2.6) {
       if (r() < 0.28) continue;
@@ -536,7 +872,7 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     use === 'home' ? ['cloth', 'cloth', 'paper', 'glass'] : ['paper', 'glass'],
   );
   // rolling shutter, half pulled down over the doorway (corrugated: 6 thin slats), shop uses only
-  if (use !== 'home') {
+  if (use === 'eatery' || use === 'scooter' || use === 'grocery' || use === 'market') {
     const dw = el * 0.95;
     for (let i = 0; i < 6; i++) P.decals.push([dw, 0.09, 0.03, 0x9aa0a0 - (i % 2) * 0x080808, 0, 2.35 - i * 0.1, 0.06]);
   }
