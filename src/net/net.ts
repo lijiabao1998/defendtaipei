@@ -170,11 +170,11 @@ export class Net {
     this.lastEquipAt = now;
   }
   /** called every frame: send own (predicted) position at the server tick rate */
-  update(dt: number, x: number, z: number, veh: boolean) {
+  update(dt: number, x: number, z: number, veh: boolean, sh?: [number, number, number, number]) {
     this.sendT -= dt;
     if (this.sendT <= 0) {
       this.sendT = 1 / TICK_HZ;
-      this.cmd({ t: 'move', x, z, veh } as any);
+      this.cmd({ t: 'move', x, z, veh, ...(sh ? { sh } : {}) } as any);
     }
   }
   /** remote player position interpolated 100 ms in the past */

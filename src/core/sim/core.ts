@@ -25,7 +25,19 @@ export type PlayerS = {
   veh: boolean;
   weapon?: string;
   inv?: Record<string, number>;
+  /** shelter: footprint box [minx, minz, maxx, maxz] of the building the survivor is in with its door closed */
+  sh?: Shelter;
 };
+export type Shelter = [number, number, number, number];
+export const SHELTER_MAX = 80; // largest accepted footprint side (m)
+/** a valid shelter box contains the survivor and is a plausible building size */
+export function validShelter(sh: unknown, x: number, z: number): Shelter | undefined {
+  if (!Array.isArray(sh) || sh.length !== 4 || !sh.every(v => typeof v === 'number' && Number.isFinite(v))) return;
+  const [a, b, c, d] = sh as Shelter;
+  if (c <= a || d <= b || c - a > SHELTER_MAX || d - b > SHELTER_MAX) return;
+  if (x <= a || x >= c || z <= b || z >= d) return;
+  return [mm(a), mm(b), mm(c), mm(d)];
+}
 export type EnemyS = { id: number; x: number; z: number; hp: number; hx: number; hz: number; tgt: string };
 export type LootS = { x: number; z: number; items: Record<string, number> };
 export type State = {
@@ -41,7 +53,7 @@ export type State = {
   log: string[];
 };
 export type Cmd =
-  | { t: 'move'; seq: number; x: number; z: number; veh?: boolean } // client-claimed position, validated by speed
+  | { t: 'move'; seq: number; x: number; z: number; veh?: boolean; sh?: Shelter } // client-claimed position, validated by speed
   | { t: 'use'; seq: number; item: string }
   | { t: 'equip'; seq: number; weapon: string }
   | { t: 'attack'; seq: number; target: number }
@@ -149,14 +161,19 @@ export function applyCmd(s: State, pid: string, c: Cmd): string {
       dz = c.z - p.z,
       d = Math.hypot(dx, dz);
     p.veh = !!c.veh;
+    let r = '';
     if (d <= lim) {
       p.x = mm(c.x);
       p.z = mm(c.z);
-      return '';
+    } else {
+      p.x = mm(p.x + (dx / d) * lim);
+      p.z = mm(p.z + (dz / d) * lim);
+      r = 'speed';
     }
-    p.x = mm(p.x + (dx / d) * lim);
-    p.z = mm(p.z + (dz / d) * lim);
-    return 'speed';
+    const sh = validShelter(c.sh, p.x, p.z);
+    if (sh) p.sh = sh;
+    else delete p.sh;
+    return r;
   }
   if (c.t === 'attack') {
     const e = s.enemies.find(e => e.id === c.target);
@@ -207,8 +224,11 @@ export function step(s: State, combat = true) {
   s.tick++;
   for (const p of Object.values(s.players)) if (p.cd > 0) p.cd--;
   if (!combat) return;
+  const shelters = Object.values(s.players)
+    .filter(p => p.on && p.sh)
+    .map(p => p.sh!);
   const alive = Object.values(s.players)
-    .filter(p => p.on && p.hp > 0)
+    .filter(p => p.on && p.hp > 0 && !p.sh) // closed walls and door: sentries cannot reach sheltered survivors
     .sort((a, b) => (a.id < b.id ? -1 : 1));
   for (const e of s.enemies) {
     if (e.hp <= 0) continue;
@@ -240,12 +260,22 @@ export function step(s: State, combat = true) {
       const m = Math.min(d - 1.0, sp * DT);
       e.x = mm(e.x + (dx / d) * m);
       e.z = mm(e.z + (dz / d) * m);
+      for (const b of shelters) pushOut(e, b);
     } else if (tgt && s.tick % 15 === e.id % 15) {
       tgt.hp = Math.max(0, tgt.hp - 6);
       if (tgt.hp === 0) s.log.push(`${tgt.name} 倒下了`);
     }
   }
   if (s.log.length > 20) s.log.splice(0, s.log.length - 20);
+}
+/** a sentry may not stand inside a closed shelter footprint: push it out through the nearest wall */
+function pushOut(e: EnemyS, [a, b, c, d]: Shelter) {
+  if (e.x <= a || e.x >= c || e.z <= b || e.z >= d) return;
+  const m = Math.min(e.x - a, c - e.x, e.z - b, d - e.z);
+  if (m === e.x - a) e.x = mm(a - 0.01);
+  else if (m === c - e.x) e.x = mm(c + 0.01);
+  else if (m === e.z - b) e.z = mm(b - 0.01);
+  else e.z = mm(d + 0.01);
 }
 export function clone(s: State): State {
   return JSON.parse(JSON.stringify(s));
