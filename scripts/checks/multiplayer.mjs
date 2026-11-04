@@ -160,78 +160,7 @@ try {
   await Promise.all(pages.map(p => p.waitForFunction(id => window.__game.net.s.looted['supply:0'] === id, gameIds[1])));
   await pages[1].waitForFunction(() => window.__game.player.inv.a9 === 36);
   console.log('PASS: real phone context button claims shared supply and authoritative inventory updates');
-  // Office survivors start behind a closed home door: co-op loot routing must not trap them.
-  if (doorFixture) {
-    const door = await pages[1].evaluate(() => window.__game.autoState().door);
-    assert.deepEqual(door, [78, 41.5], 'Fixture must match the real deterministic home door');
-  }
-  for (const p of pages)
-    await p.evaluate(() => (window.__frameSample = { frames: 0, started: performance.now(), maxGap: 0 }));
-  // The door check validates routing and the touch control, not combat. Software-GL CI renders at ~1 fps, so
-  // the walk can take minutes while server sentries (no building/door awareness) defeat the survivor indoors.
-  // Use the real pause rule: the desktop client leaves, shared combat freezes, then it rejoins durably.
-  const desktopHello = await pages[0].evaluate(() => {
-    const n = window.__game.net;
-    const keep = { code: n.code, hello: n.hello };
-    n.leave();
-    return keep;
-  });
-  await pages[1].waitForFunction(id => window.__game.net.s && !window.__game.net.s.players[id]?.on, gameIds[0]);
-  const approach = await pages[1].evaluate(() => ({
-    path: window.__game.autoState().cd ? 1 : window.__game.autoWalk(),
-    state: window.__game.autoState(),
-  }));
-  console.log('Phone door approach', approach);
-  assert.ok(approach.path > 0, 'Office spawn must have a walkable route to its home door');
-  // ~0.5 fps software GL: the 144-step route has taken 215 s in CI.
-  await pages[1].waitForFunction(() => window.__game.autoState().cd, null, { timeout: 480000 });
-  await pages[1].evaluate(() => window.__game.autoStop());
-  await pages[1].waitForFunction(() => /開門|Open door/.test(document.getElementById('prompt').textContent));
-  await pages[1].locator('#pbact').tap();
-  await pages[1].waitForFunction(() => !window.__game.autoState().cd);
-  await pages[0].evaluate(({ code, hello }) => window.__game.net.join(code, hello), desktopHello);
-  for (const p of pages)
-    await p.waitForFunction(
-      () => window.__game.net.s && Object.values(window.__game.net.s.players).filter(p => p.on).length === 2,
-      null,
-      { timeout: 120000 },
-    );
-  console.log(
-    'Frame samples',
-    await Promise.all(
-      pages.map(p =>
-        p.evaluate(() => ({ ...window.__frameSample, elapsedMs: performance.now() - window.__frameSample.started })),
-      ),
-    ),
-  );
-  console.log('PASS: phone co-op survivor opens the real closed home door through the touch control');
-
-  if (doorFixture) {
-    const before = await pages[0].evaluate(id => window.__game.net.s.players[id], gameIds[1]);
-    const joy = await pages[1].locator('#joy').boundingBox();
-    assert.ok(joy, 'phone joystick visible');
-    const touch = await contexts[1].newCDPSession(pages[1]);
-    const x = joy.x + joy.width / 2,
-      y = joy.y + joy.height / 2;
-    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
-    await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + 35, y }] });
-    try {
-      await pages[0].waitForFunction(
-        ({ id, before }) => {
-          const p = window.__game.net.s.players[id];
-          return Math.hypot(p.x - before.x, p.z - before.z) > 0.05;
-        },
-        { id: gameIds[1], before },
-      );
-    } finally {
-      await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-      await touch.detach();
-    }
-    console.log(
-      'PASS: short real touch-joystick displacement is authoritative on the other full client (diagnostic, not full route)',
-    );
-  }
-
+  // Equipment/health QA runs before the minutes-long door route, while sentries are still far away.
   const waitWeapons = weapon =>
     Promise.all(
       pages.map((p, i) =>
@@ -280,6 +209,79 @@ try {
   );
   await waitWeapons('hammer');
   console.log('PASS: both full game clients switch hammer/pipe, and local health reconciles to server');
+  // Office survivors start behind a closed home door: co-op loot routing must not trap them.
+  if (doorFixture) {
+    const door = await pages[1].evaluate(() => window.__game.autoState().door);
+    assert.deepEqual(door, [78, 41.5], 'Fixture must match the real deterministic home door');
+  }
+  for (const p of pages)
+    await p.evaluate(() => (window.__frameSample = { frames: 0, started: performance.now(), maxGap: 0 }));
+  // The door check validates routing and the touch control, not combat. Software-GL CI renders at ~1 fps, so
+  // the walk can take minutes while server sentries (no building/door awareness) defeat the survivor indoors.
+  // Use the real pause rule: the desktop client leaves, shared combat freezes, then it rejoins durably.
+  const desktopHello = await pages[0].evaluate(() => {
+    const n = window.__game.net;
+    const keep = { code: n.code, hello: n.hello };
+    n.leave();
+    return keep;
+  });
+  await pages[1].waitForFunction(id => window.__game.net.s && !window.__game.net.s.players[id]?.on, gameIds[0]);
+  const approach = await pages[1].evaluate(() => ({
+    path: window.__game.autoState().cd ? 1 : window.__game.autoWalk(),
+    state: window.__game.autoState(),
+  }));
+  console.log('Phone door approach', approach);
+  assert.ok(approach.path > 0, 'Office spawn must have a walkable route to its home door');
+  // ~0.5 fps software GL: the 144-step route has taken 215 s in CI.
+  await pages[1].waitForFunction(() => window.__game.autoState().cd, null, { timeout: 480000 });
+  await pages[1].evaluate(() => window.__game.autoStop());
+  await pages[1].waitForFunction(() => /開門|Open door/.test(document.getElementById('prompt').textContent));
+  await pages[1].locator('#pbact').tap();
+  await pages[1].waitForFunction(() => !window.__game.autoState().cd);
+  if (doorFixture) await pages[0].evaluate(({ code, hello }) => window.__game.net.join(code, hello), desktopHello);
+  if (doorFixture)
+    for (const p of pages)
+      await p.waitForFunction(
+        () => window.__game.net.s && Object.values(window.__game.net.s.players).filter(p => p.on).length === 2,
+        null,
+        { timeout: 120000 },
+      );
+  console.log(
+    'Frame samples',
+    await Promise.all(
+      pages.map(p =>
+        p.evaluate(() => ({ ...window.__frameSample, elapsedMs: performance.now() - window.__frameSample.started })),
+      ),
+    ),
+  );
+  console.log('PASS: phone co-op survivor opens the real closed home door through the touch control');
+
+  if (doorFixture) {
+    const before = await pages[0].evaluate(id => window.__game.net.s.players[id], gameIds[1]);
+    const joy = await pages[1].locator('#joy').boundingBox();
+    assert.ok(joy, 'phone joystick visible');
+    const touch = await contexts[1].newCDPSession(pages[1]);
+    const x = joy.x + joy.width / 2,
+      y = joy.y + joy.height / 2;
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + 35, y }] });
+    try {
+      await pages[0].waitForFunction(
+        ({ id, before }) => {
+          const p = window.__game.net.s.players[id];
+          return Math.hypot(p.x - before.x, p.z - before.z) > 0.05;
+        },
+        { id: gameIds[1], before },
+      );
+    } finally {
+      await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await touch.detach();
+    }
+    console.log(
+      'PASS: short real touch-joystick displacement is authoritative on the other full client (diagnostic, not full route)',
+    );
+  }
+
   await Promise.all([
     pages[0].screenshot({ path: shot('multiplayer-desktop.png') }),
     pages[1].screenshot({ path: shot('multiplayer-phone.png') }),
