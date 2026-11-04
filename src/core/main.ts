@@ -27,10 +27,24 @@ import { makeLampBatches } from './lamps';
 import { ITEMS, LOOT } from '../systems/items';
 import { iconURL, iconMat } from '../ui/icons';
 import { GF, FH, ARC, arcadeFits, buildArcade, flushArcades, setArcadeDeps, arcadeAudit } from '../map/arcade';
-import { makeRig, animate, setWeapon, setLodFocus, Rig, AnimState, startMelee, meleeQ, hitStop } from '../npc/human';
+import {
+  makeRig,
+  animate,
+  setWeapon,
+  setLodFocus,
+  Rig,
+  AnimState,
+  startMelee,
+  meleeQ,
+  hitStop,
+  fireShot,
+} from '../npc/human';
+import { RECOIL } from '../npc/firearms';
+import { Casings } from '../systems/casings';
 import { SwingTrail } from '../systems/trail';
 import * as SQ from '../npc/squadai';
 import * as CL from '../map/clutter';
+import * as UP from '../map/upstairs';
 import * as BC from '../story/broadcasts/broadcast';
 import { Nav, smooth } from '../systems/nav';
 import { RoadTiles } from '../map/roads';
@@ -75,10 +89,10 @@ import { VehicleSystem, VehicleKind } from '../systems/vehicles';
 import { furnish, nightMarket, setPower } from '../map/interiors';
 import { buildDecay } from '../map/decay';
 import { buildAlley } from '../map/alley';
-import { updateOcclusion, OCC } from '../map/occlusion';
+import { updateOcclusion, OCC, CUT, setBuildingCut } from '../map/occlusion';
 import { lotTex } from '../map/paving';
 import { walkH } from '../map/roads';
-import { dressWalkup, District, type TileInfo } from '../map/district';
+import { dressWalkup, District, type TileInfo, type DEnter } from '../map/district';
 import { buildDoorDeco, DoorView, doorSound, isHomeDoor, type LiveDoor } from '../map/doors';
 import { SniperSys, findPosts, sniperActive, type Sniper } from '../systems/sniper';
 import { Scope, SCOPED, ballistic } from '../systems/scope';
@@ -568,6 +582,9 @@ function collide(pos: THREE.Vector3, r: number) {
         pos.z = cz + (oz / d) * r;
       }
     }
+  // v23.4 the off-map spaces (metro at z < -6000, upstairs floors east of the district) have their own walls;
+  // clamping them to the map bounds snapped the player out of the station on the first step
+  if (offMap(pos.x, pos.z)) return;
   pos.x = clamp(pos.x, WORLD.minx, WORLD.maxx);
   pos.z = clamp(pos.z, WORLD.minz, WORLD.maxz);
 }
@@ -623,7 +640,7 @@ function escapePath(px: number, pz: number, R = 70): V2[] | null {
     const [i, j, d] = qu[qh++];
     const x = px + i * S,
       z = pz + j * S;
-    if (d > 12 && !bldAt(x, z) && roadDist(x, z) < 2.5) {
+    if (d > 12 && !placeAt(x, z) && roadDist(x, z) < 2.5) {
       const out: V2[] = [];
       for (let k = key(i, j); k !== -1; k = par.get(k)!) {
         const a = Math.floor(k / 8192) - N,
@@ -675,9 +692,34 @@ const bounds = { minx: -500, maxx: 500, minz: -500, maxz: 500 };
 /** whole-district clamp (set from the district index; falls back to the core bounds) */
 const WORLD = { minx: -500, maxx: 500, minz: -500, maxz: 500 };
 const WORLD_B = { ...WORLD };
+/** v23.4 metro (below) or upstairs floor (east): spaces outside the map with their own walls */
+const offMap = (x: number, z: number) => z < -6000 || UP.isUp(x);
+/** v23.4 the 2F the player is on (one at a time, off-map), with the ground point it is anchored to */
+type UpState = {
+  b: Bld | DEnter;
+  dist: DEnter | null;
+  P: CL.Plan;
+  room: UP.UpRoom;
+  furn: THREE.Group;
+  segs: Seg[];
+  conts: Cont[];
+  /** ground-floor point at the foot of the stairs: map streaming, saving and the HUD use it while upstairs */
+  anchor: V2;
+};
+let up: UpState | null = null;
+/** where the player is on the map (the stairwell while upstairs) */
+const mapPos = (): V2 => (up ? up.anchor : [player.pos.x, player.pos.z]);
 function bldAt(x: number, z: number) {
   for (const b of blds) if (x > b.minx && x < b.maxx && z > b.minz && z < b.maxz && pip([x, z], b.pts)) return b;
   return null;
+}
+/** v23.3 core building or enterable district building at (x, z): stable identity for same-room comparisons */
+function placeAt(x: number, z: number): Bld | DEnter | null {
+  return bldAt(x, z) ?? district.enterAt(x, z);
+}
+/** v23.3 indoors for player-facing checks (sleep, shelter, drones, muffled sound): core or district building */
+function indoorAt(x: number, z: number) {
+  return UP.isUp(x) || !!placeAt(x, z);
 }
 
 // ---------- sectors ----------
@@ -788,7 +830,7 @@ setBoomFx((p, big) => {
   const d = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
   blastFx.explode(p, big);
   blastFx.kick(d, big);
-  AU.shellBoom(d, !!bldAt(player.pos.x, player.pos.z), big);
+  AU.shellBoom(d, indoorAt(player.pos.x, player.pos.z), big);
 });
 /** shell damage factor at distance d: full lethal core, then quadratic falloff to the wounding radius */
 function shellDmg(d: number) {
@@ -848,7 +890,7 @@ function setupRecon(c: V2) {
       hidden: () => {
         const P = player.pos;
         return (
-          !!bldAt(P.x, P.z) ||
+          indoorAt(P.x, P.z) ||
           [
             [1.6, 0],
             [-1.6, 0],
@@ -912,7 +954,7 @@ function updateShells(dt: number) {
     let dmg = shellDmg(dp);
     if (dmg <= 0) continue;
     // indoors the walls stop almost all fragments; low walls / arcade pillars (cover) halve them
-    if (bldAt(player.pos.x, player.pos.z)) dmg *= 0.15;
+    if (indoorAt(player.pos.x, player.pos.z)) dmg *= 0.15;
     else if (findCover(player.pos.x, player.pos.z, 1.4)) dmg *= 0.5;
     lastShellHit = Math.round(dmg);
     player.hp -= dmg;
@@ -1188,7 +1230,7 @@ function rocCineStep(dt: number) {
 let armor: ArmorSystem | null = null;
 function setupArmor(c: V2) {
   armor = new ArmorSystem(scene, {
-    canSee: (ax, az, bx, bz) => !bldAt(bx, bz) && los([ax, az], [bx, bz]),
+    canSee: (ax, az, bx, bz) => !indoorAt(bx, bz) && los([ax, az], [bx, bz]),
     hurt: dmg => {
       if (player.sleeping) player.sleeping = false;
       AU.gunshot('mg', 30, false);
@@ -1401,6 +1443,9 @@ function buildMap(data: any) {
       minz: Math.min(...zs),
       maxz: Math.max(...zs),
     };
+    // v23.6 schools, hospitals, temples, markets, stations, offices get their own fit-out (clutter.ts)
+    const kind = CL.specialKind('', ob.s, ob.n);
+    if (kind) (b as any).kind = kind;
     // door: longest edge
     let di = 0,
       dl = 0;
@@ -1832,7 +1877,7 @@ function spawnSoldiers(dead: Set<number>) {
     const route = r.p.slice(Math.max(0, s0 - 3), s0 + 4) as V2[];
     const night = i >= 48;
     const rig = spawnRig(SOLDIER_OPTS);
-    setWeapon(rig, 'rifle');
+    setWeapon(rig, i % 4 === 1 ? 'qbz95' : 'rifle'); // v23.5 a mix of QBZ-191 and bullpup QBZ-95-1 silhouettes
     const mesh = rig.root;
     const cone = new THREE.Mesh(
       coneGeo,
@@ -1937,7 +1982,7 @@ function sandbags(x: number, z: number, ang: number, n = 4) {
 const sandGeo = new THREE.BoxGeometry(0.6, 0.3, 0.45);
 function dSoldier(key: string, tid: number, route: V2[], sector: number, post?: V2) {
   const rig = spawnRig(SOLDIER_OPTS);
-  setWeapon(rig, 'rifle');
+  setWeapon(rig, tid % 4 === 1 ? 'qbz95' : 'rifle');
   const cone = new THREE.Mesh(
     coneGeo,
     new THREE.MeshBasicMaterial({ color: 0xffee88, transparent: true, opacity: 0.12, depthWrite: false }),
@@ -1988,13 +2033,7 @@ function onTileLoad(t: TileInfo) {
       }),
     );
   }
-  // v21.5 enterable ground-floor rooms: a cabinet / fridge / shelf inside each (ids 100+, saved per tile)
-  (t.rooms || []).forEach((rm, j) => {
-    const i = 100 + j;
-    const ty = rm.kind === 'shop' ? 'store' : 'home';
-    const preset = sv.c?.[i] ?? rollLoot(ty, r);
-    rec.conts.push(makeCont(`t${t.key}:${i}`, [rm.x - rm.nx * 1.2, rm.z - rm.nz * 1.2], ty, undefined, { ...preset }));
-  });
+  // v23.3 enterable buildings are furnished lazily near the player (clutterTick → districtClutter)
   const big = t.roads.filter(q => q.p.length >= 2 && !/foot|path|steps|cycle|service/.test(q.t));
   // garrison outpost for the area this tile anchors
   const gs = SECTORS.findIndex((_, i) => outerSector(i) && garrisonKey(i) === t.key);
@@ -2048,6 +2087,7 @@ function onTileLoad(t: TileInfo) {
 function onTileUnload(key: string) {
   const rec = dTile.get(key);
   if (!rec) return;
+  for (const [e, live] of dClut) if (e.key === key) dropDClut(e, live);
   for (const q of rec.sols) {
     scene.remove(q.rig.root);
     scene.remove(q.cone);
@@ -3278,7 +3318,7 @@ function updateGrenades(dt: number, night: boolean) {
     const p = new THREE.Vector3(g.p[0], 0.3, g.p[1]);
     blastFx.explode(p, 0.55);
     const dp = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
-    AU.shellBoom(dp, !!bldAt(player.pos.x, player.pos.z), 0.5);
+    AU.shellBoom(dp, indoorAt(player.pos.x, player.pos.z), 0.5);
     blastFx.kick(dp, 0.5);
     noise(p.x, p.z, 40);
     for (const o of sols)
@@ -3288,7 +3328,7 @@ function updateGrenades(dt: number, night: boolean) {
       }
     let dmg = SQ.grenadeDmg(dp);
     if (dmg <= 0) continue;
-    if (bldAt(p.x, p.z) !== bldAt(player.pos.x, player.pos.z)) dmg *= 0.2;
+    if (placeAt(p.x, p.z) !== placeAt(player.pos.x, player.pos.z)) dmg *= 0.2;
     else if (findCover(player.pos.x, player.pos.z, 1.2) && dp > 1.5) dmg *= 0.6;
     aiStats.grenHit++;
     player.hp -= dmg;
@@ -3324,7 +3364,8 @@ function clutterTick(dt: number) {
   clutT -= dt;
   if (clutT > 0) return;
   clutT = 0.3;
-  const P = player.pos;
+  const [px, pz] = mapPos(); // v23.4 upstairs: keep the ground floor below furnished
+  const P = { x: px, z: pz };
   let budget = 2;
   const cand: [Bld, number][] = [];
   for (const b of blds) {
@@ -3362,7 +3403,210 @@ function clutterTick(dt: number) {
       }
     }
   }
-  CL.clutterStats.live = clutLive.size;
+  districtClutter(budget);
+  CL.clutterStats.live = clutLive.size + dClutLive();
+}
+// v23.3 enterable district buildings: the same planner furnishes them; furniture, its cover segments and the
+// containers exist only near the player. Container ids t<tile>:<1000 + 64·building + n> are saved with the tile.
+type DClut = { g?: THREE.Group; segs: Seg[]; plan?: CL.Plan };
+const dClut = new Map<DEnter, DClut>();
+const dContId = (e: DEnter, n: number) => `t${e.key}:${1000 + e.bi * 64 + n}`;
+function dPlan(e: DEnter) {
+  return CL.plan(e, { pip, onRoad: () => e.street }, { seed: e.id, contId: n => dContId(e, n) });
+}
+const dClutLive = () => {
+  let n = 0;
+  for (const v of dClut.values()) if (v.g) n++;
+  return n;
+};
+function dropDClut(e: DEnter, live: DClut) {
+  if (live.g) CL.dispose(live.g);
+  for (const sg of live.segs) removeSeg(sg);
+  dClut.delete(e);
+}
+function districtClutter(budget: number) {
+  const [px, pz] = mapPos();
+  const P = { x: px, z: pz };
+  const cand: [DEnter, number][] = [];
+  for (const e of district.enterables()) {
+    const d = Math.max(e.minx - P.x, P.x - e.maxx, e.minz - P.z, P.z - e.maxz, 0);
+    const live = dClut.get(e);
+    if (live) {
+      if (live.g) live.g.visible = d < 40;
+      if (d > 70) dropDClut(e, live);
+    } else if (d < 28) cand.push([e, d]);
+  }
+  cand.sort((a, b) => a[1] - b[1]);
+  for (const [e] of cand) {
+    if (budget-- <= 0) break;
+    const C = dPlan(e);
+    const live: DClut = { segs: [] };
+    dClut.set(e, live);
+    if (!C) continue;
+    live.plan = C;
+    live.g = CL.build(C);
+    scene.add(live.g);
+    for (const sg of C.segs) {
+      const q = { a: sg.a, b: sg.b, h: sg.h } as Seg;
+      addSeg(q, sg.h < 1.3);
+      live.segs.push(q);
+    }
+    const rec = dTile.get(e.key);
+    if (!rec) continue;
+    const sv = district.saved[e.key]?.c || {};
+    for (const k of C.conts) {
+      if (conts.some(c => c.id === k.id)) continue;
+      let x = k.seed >>> 0;
+      const r = () => (x = (x * 1664525 + 1013904223) >>> 0) / 4294967296;
+      const items = sv[+k.id.split(':')[1]] ?? rollLoot(k.loot, r);
+      const c = makeCont(k.id, k.p, 'crate', undefined, { ...items });
+      c.label = k.label;
+      c.mesh.visible = false; // the furniture itself is the container
+      rec.conts.push(c);
+    }
+  }
+}
+// ---------- v23.4 upstairs: 2F of blocks whose ground floor has a stairwell (core and district alike) ----------
+/** world point of a plan-frame (u, v) */
+const planW = (P: CL.Plan, u: number, v: number): V2 => [
+  P.O[0] + P.U[0] * u + P.N[0] * v,
+  P.O[1] + P.U[1] * u + P.N[1] * v,
+];
+const isDEnter = (b: Bld | DEnter): b is DEnter => 'bi' in b;
+const groundPlan = (b: Bld | DEnter): CL.Plan | undefined =>
+  isDEnter(b) ? dClut.get(b)?.plan : ((b as any).clut as CL.Plan | undefined);
+/** the stairwell the player stands at the foot of (ground floor), if any */
+function stairAt(): { b: Bld | DEnter; P: CL.Plan } | null {
+  if (up || drive.cur || roofB || offMap(player.pos.x, player.pos.z)) return null;
+  const b = placeAt(player.pos.x, player.pos.z);
+  const P = b && groundPlan(b);
+  if (!b || !P?.stair) return null;
+  const q = planW(P, P.stair.u, P.stair.v - 1.15);
+  return Math.hypot(q[0] - player.pos.x, q[1] - player.pos.z) < 1.6 ? { b, P } : null;
+}
+/** standing at the top of the stairs (2F) */
+const upLanding = () => !!up && Math.hypot(up.room.land[0] - player.pos.x, up.room.land[1] - player.pos.z) < 1.6;
+/** a free ground-floor spot beside the stairwell (the planner keeps the doorway clear as the fallback) */
+function stairFoot(b: Bld | DEnter, P: CL.Plan): V2 {
+  const { u, v } = P.stair!;
+  for (const [du, dv] of [
+    [0, -1.75],
+    [-0.95, -1.75],
+    [0.95, -1.75],
+    [0, -2.4],
+    [-1.25, -1.0],
+    [1.25, -1.0],
+    [-1.25, 0],
+    [1.25, 0],
+  ]) {
+    const q = planW(P, u + du, v + dv);
+    if (pip(q, b.pts) && walkable(q[0], q[1])) return q;
+  }
+  return planW(P, 0, 1.0);
+}
+function goUp(b: Bld | DEnter, P: CL.Plan) {
+  const dist = isDEnter(b) ? b : null;
+  const off: V2 = [UP.UP_O[0] - b.c[0], UP.UP_O[1] - b.c[1]];
+  const T = (q: V2): V2 => [q[0] + off[0], q[1] + off[1]];
+  const door = b.door!;
+  const bUp = {
+    id: b.id,
+    pts: b.pts.map(T),
+    door: { p: T(door.p), a: T(door.a), c: T(door.c) },
+    type: 'home',
+    kind: (b as any).kind, // v23.6 the floor above a school is classrooms too
+    h: b.h,
+    minx: b.minx + off[0],
+    maxx: b.maxx + off[0],
+    minz: b.minz + off[1],
+    maxz: b.maxz + off[1],
+  };
+  const st = P.stair!;
+  const seed = ((dist ? dist.id : (b.id + 1) * 2654435761) ^ 0x5bd1e995) >>> 0;
+  const contId = (n: number) => (dist ? `t${dist.key}:${20000 + dist.bi * 64 + n}` : `u${b.id}_${n}`);
+  // same frame as the ground plan (same door), furniture kept off the stair opening and its landing
+  const P2 = CL.plan(
+    bUp,
+    { pip, onRoad: () => false },
+    { seed, contId, reserve: [[st.u - 0.8, st.v - 2.5, st.u + 0.8, st.v + 1.3]], noStair: true },
+  );
+  if (!P2) return false;
+  const street = (i: number) => {
+    const a = b.pts[i],
+      c = b.pts[(i + 1) % b.pts.length];
+    const L = Math.hypot(c[0] - a[0], c[1] - a[1]) || 1;
+    let nx = (c[1] - a[1]) / L,
+      nz = -(c[0] - a[0]) / L;
+    const mx = (a[0] + c[0]) / 2,
+      mz = (a[1] + c[1]) / 2;
+    if (pip([mx + nx * 0.3, mz + nz * 0.3], b.pts)) ((nx = -nx), (nz = -nz));
+    return roadDist(mx + nx * 3, mz + nz * 3) < 4;
+  };
+  const room = UP.buildUpstairs({ pts: bUp.pts, F: { O: P2.O, U: P2.U, N: P2.N }, stair: st, street, seed });
+  scene.add(room.g);
+  const furn = CL.build(P2);
+  scene.add(furn);
+  const segs: Seg[] = [];
+  for (const q of room.segs) {
+    const sg = { a: q.a, b: q.b } as Seg;
+    addSeg(sg);
+    segs.push(sg);
+  }
+  for (const q of P2.segs) {
+    const sg = { a: q.a, b: q.b, h: q.h } as Seg;
+    addSeg(sg, q.h < 1.3);
+    segs.push(sg);
+  }
+  const sv = dist ? district.saved[dist.key]?.c || {} : null;
+  const cs: Cont[] = [];
+  for (const k of P2.conts) {
+    let x = k.seed >>> 0;
+    const r = () => (x = (x * 1664525 + 1013904223) >>> 0) / 4294967296;
+    const items = (sv ? sv[+k.id.split(':')[1]] : savedF.get(k.id)) ?? rollLoot(k.loot, r);
+    const c = makeCont(k.id, k.p, 'crate', undefined, { ...items });
+    c.label = k.label;
+    c.mesh.visible = false;
+    cs.push(c);
+  }
+  up = { b, dist, P, room, furn, segs, conts: cs, anchor: stairFoot(b, P) };
+  player.pos.set(room.land[0], 0, room.land[1]);
+  player.vel.set(0, 0, 0);
+  player.cover = null;
+  log(tr('你走上二樓。', 'You go up to the second floor.'), '#fd9');
+  return true;
+}
+function goDown() {
+  const u = up!;
+  UP.disposeUpstairs(u.room);
+  CL.dispose(u.furn);
+  for (const sg of u.segs) removeSeg(sg);
+  // keep what was taken: district containers per tile, core ones with the other furniture containers
+  if (u.dist && u.conts.length) {
+    const c: Record<number, Record<string, number>> = { ...(district.saved[u.dist.key]?.c || {}) };
+    for (const q of u.conts) c[+q.id.split(':')[1]] = q.items;
+    district.save(u.dist.key, 'c', c);
+  }
+  for (const q of u.conts) {
+    if (!u.dist) savedF.set(q.id, q.items);
+    q.mesh.parent?.remove(q.mesh);
+    const i = conts.indexOf(q);
+    if (i >= 0) conts.splice(i, 1);
+  }
+  up = null;
+  const q = stairFoot(u.b, u.P);
+  player.pos.set(q[0], 0, q[1]);
+  player.vel.set(0, 0, 0);
+  log(tr('你走下樓梯，回到一樓。', 'You go back down to the ground floor.'), '#fd9');
+}
+/** [E] at the foot of the stairs / at the top: change floor */
+function upToggle() {
+  if (up) {
+    if (!upLanding()) return false;
+    goDown();
+    return true;
+  }
+  const s = stairAt();
+  return !!s && goUp(s.b, s.P);
 }
 function noise(x: number, z: number, r: number) {
   if (started && r >= 10) {
@@ -3390,6 +3634,54 @@ function log(msg: string, col = '#e8e2d0', cls = '') {
 }
 
 // ---------- effects ----------
+// v23.5 every shot: recoil on the rig (fireShot), a muzzle flash light, a spent case out of the port, and for the
+// player a small screen jolt (shake offset only, camera unchanged). Effects only within 30 m of the player.
+const muzzleLight = new THREE.PointLight(0xffc070, 0, 11, 2);
+scene.add(muzzleLight);
+let muzzleT = 0;
+const casings = new Casings(scene);
+const _mp = new THREE.Vector3(),
+  _ep = new THREE.Vector3(),
+  _wq = new THREE.Quaternion(),
+  _rt = new THREE.Vector3(),
+  _bk = new THREE.Vector3();
+const gunStats = { shots: 0, cases: 0, flashes: 0 };
+function gunFx(r: Rig, isPlayer: boolean) {
+  const fam = fireShot(r);
+  gunStats.shots++;
+  if (!r.muzzle || !r.eject) return;
+  if (!isPlayer && r.root.position.distanceTo(player.mesh.position) > 30) return;
+  r.root.updateMatrixWorld(true);
+  r.muzzle.getWorldPosition(_mp);
+  if (fam !== 'smg') {
+    muzzleLight.position.copy(_mp);
+    muzzleLight.intensity = fam === 'launcher' ? 16 : fam === 'pistol' ? 5 : 9;
+    muzzleT = 0.06;
+    gunStats.flashes++;
+  }
+  if (fam !== 'launcher') {
+    r.eject.getWorldPosition(_ep);
+    r.weapon.getWorldQuaternion(_wq);
+    _rt.set(-1, 0, 0).applyQuaternion(_wq).setY(0).normalize(); // the gun's right side (firearms.ts)
+    _bk.set(0, 0, -1).applyQuaternion(_wq).setY(0).normalize();
+    casings.eject(
+      _ep,
+      _rt,
+      _bk,
+      r.root.position.y,
+      fam === 'shotgun' ? 'shell' : fam === 'pistol' ? 'pistol' : 'rifle',
+    );
+    gunStats.cases++;
+  }
+  if (isPlayer) blastFx.kick(0, RECOIL[fam].shake);
+}
+function gunFxTick(dt: number) {
+  if (muzzleT > 0) {
+    muzzleT -= dt;
+    muzzleLight.intensity = muzzleT > 0 ? muzzleLight.intensity * 0.6 : 0;
+  }
+  casings.update(dt);
+}
 const tracerMat = new THREE.LineBasicMaterial({ color: 0xffdd88, transparent: true });
 const fx: { o: THREE.Object3D; t: number }[] = [];
 function tracer(a: THREE.Vector3, b: THREE.Vector3) {
@@ -3589,8 +3881,11 @@ BC.unlockBroadcast();
 const pDist = (x: number, z: number) => Math.hypot(player.pos.x - x, player.pos.z - z);
 function surfaceAt(x: number, z: number): AU.Surface {
   if (z < -6000) return 'metro';
+  if (UP.isUp(x)) return 'wood';
   const b = bldAt(x, z);
   if (b) return b.type === 'home' || b.type === 'house' || b.type === 'residential' ? 'wood' : 'tile';
+  const e = district.enterAt(x, z);
+  if (e) return e.use === 'home' ? 'wood' : 'tile';
   return walkH(x, z) > 0.02 ? 'tile' : 'asphalt';
 }
 let stepA = 0,
@@ -3607,7 +3902,7 @@ function audioTick(dt: number) {
   }
   if (player.hp < auHp - 3 && !dead) AU.hurt(0);
   auHp = player.hp;
-  const inside = !!bldAt(player.pos.x, player.pos.z);
+  const inside = indoorAt(player.pos.x, player.pos.z);
   AU.ambience(dt, {
     rain: WX.amt,
     indoor: inside || player.pos.z < -6000,
@@ -3677,7 +3972,7 @@ function setupSnipers() {
         if (roofB === s.b) return true;
         if (roofB) return false;
         const P: V2 = [player.pos.x, player.pos.z];
-        if (bldAt(P[0], P[1])) return false; // indoors / under the arcade
+        if (indoorAt(P[0], P[1])) return false; // indoors / under the arcade
         if (vehicles.list.some(v => Math.hypot(v.pos.x - P[0], v.pos.z - P[1]) < 1.8)) return false; // behind a car
         return los(snpEye(s), P);
       },
@@ -3788,8 +4083,8 @@ function scopeFire() {
   if (!player.inv[d.ammo!]) return log(tr('沒有子彈了', 'Out of ammunition'), '#f99');
   if (--player.inv[d.ammo!] <= 0) delete player.inv[d.ammo!];
   player.cd = d.cd;
-  player.rig.shootT = 0.14;
-  AU.gunshot(AU.gunKind(k, d), 0, !!bldAt(player.pos.x, player.pos.z));
+  gunFx(player.rig, true);
+  AU.gunshot(AU.gunKind(k, d), 0, indoorAt(player.pos.x, player.pos.z));
   noise(player.pos.x, player.pos.z, 80); // a rifle crack: soldiers come to search
   const o = new THREE.Vector3(player.pos.x, eyeY(), player.pos.z);
   let hit: { s?: Sniper; sol?: Sol; head: boolean } | null = null;
@@ -3901,7 +4196,7 @@ function snpUpdate(dt: number) {
       gameMin > 1440 + 9 * 60 &&
       !surv.moral &&
       !snp.inZone(player.pos.x, player.pos.z) &&
-      !bldAt(player.pos.x, player.pos.z)
+      !indoorAt(player.pos.x, player.pos.z)
     )
       moralStart();
   }
@@ -3987,7 +4282,7 @@ function useItem(k: string) {
     callSupport();
     closePanel();
   } else if (k === 'fpv') {
-    if (bldAt(player.pos.x, player.pos.z)) {
+    if (indoorAt(player.pos.x, player.pos.z)) {
       log(tr('在室內無法起飛，先到戶外', 'Cannot launch indoors. Go outside first.'), '#f99');
       return;
     }
@@ -4029,7 +4324,7 @@ function useItem(k: string) {
     log(getLanguage() === 'en' ? `Used ${d.name}` : `使用了 ${d.name}`);
     if (--player.inv[k] <= 0) delete player.inv[k];
   } else if (k === 'bucket') {
-    if (bldAt(player.pos.x, player.pos.z)) {
+    if (indoorAt(player.pos.x, player.pos.z)) {
       log(
         tr(
           '水桶要放在戶外（沒有屋頂遮的地方）才接得到雨',
@@ -4691,6 +4986,7 @@ function interact() {
     return;
   }
   if (npcInteract()) return;
+  if (upToggle()) return; // v23.4 stairs between the ground floor and 2F
   if (roofB || roofDoor()) {
     if (roofToggle()) return;
   }
@@ -4867,7 +5163,7 @@ function barricade() {
   log(tr('門封好了（敲打聲可能引來巡邏）', 'Door barricaded (hammering may attract patrols).'), '#9f9');
 }
 function sleep() {
-  if (!bldAt(player.pos.x, player.pos.z)) {
+  if (!indoorAt(player.pos.x, player.pos.z)) {
     log(tr('只能在室內睡覺', 'You can only sleep indoors.'), '#f99');
     return;
   }
@@ -4907,7 +5203,7 @@ function tryVault() {
   const to = new THREE.Vector3(player.pos.x + fwd.x * 1.5, 0, player.pos.z + fwd.z * 1.5);
   const chk = to.clone();
   collide(chk, 0.35);
-  if (chk.distanceTo(to) > 0.2 || bldAt(to.x, to.z) !== bldAt(player.pos.x, player.pos.z))
+  if (chk.distanceTo(to) > 0.2 || placeAt(to.x, to.z) !== placeAt(player.pos.x, player.pos.z))
     return log(tr('另一側沒有空間', 'No room on the other side'));
   player.vFrom.copy(player.pos);
   player.vTo.copy(to);
@@ -4951,8 +5247,7 @@ function playerAttack() {
     return; // Server owns hits, ammo, deaths and drops; never run the solo damage path.
   }
   player.cd = d.cd;
-  if (d.kind === 'gun') player.rig.shootT = 0.14;
-  else startMelee(player.rig, Math.max(0.42, (d.cd || 0.5) * 0.85));
+  if (d.kind !== 'gun') startMelee(player.rig, Math.max(0.42, (d.cd || 0.5) * 0.85));
   const dir = new THREE.Vector3(aimPt.x - player.pos.x, 0, aimPt.z - player.pos.z).normalize();
   if (d.kind === 'gun') {
     if (!player.inv[d.ammo]) {
@@ -4961,7 +5256,8 @@ function playerAttack() {
       return;
     }
     if (--player.inv[d.ammo] <= 0) delete player.inv[d.ammo];
-    AU.gunshot(AU.gunKind(k, d), 0, !!bldAt(player.pos.x, player.pos.z));
+    gunFx(player.rig, true);
+    AU.gunshot(AU.gunKind(k, d), 0, indoorAt(player.pos.x, player.pos.z));
     noise(player.pos.x, player.pos.z, d.noise);
     if (d.at) {
       fireAT(k, d, dir);
@@ -5063,7 +5359,7 @@ function meleeResolve(d: any, dir: THREE.Vector3): Sol | null {
     // flinch + knockback away from the blow, paused for the same hit-stop beat
     hitStop(s.rig, 0.07);
     const kb = s.pos.clone().addScaledVector(dir, s.hp > 0 ? 0.45 : 0.25);
-    if (!bldAt(kb.x, kb.z) || bldAt(kb.x, kb.z) === bldAt(s.pos.x, s.pos.z)) {
+    if (!placeAt(kb.x, kb.z) || placeAt(kb.x, kb.z) === placeAt(s.pos.x, s.pos.z)) {
       s.pos.copy(kb);
       collide(s.pos, 0.35);
     }
@@ -5407,7 +5703,7 @@ function save() {
     r: ROLE.id,
     surv,
     g: player.gender,
-    p: [player.pos.x, player.pos.z],
+    p: mapPos(), // v23.4 saved upstairs → resume at the foot of the stairs
     hp: player.hp,
     hu: player.hunger,
     th: player.thirst,
@@ -5422,7 +5718,11 @@ function save() {
     ex: UT.ev.ex || 0,
     inf: INF,
     ut: UT,
-    conts: conts.map(c => [c.id, c.items, c.p]),
+    conts: [
+      ...conts.map(c => [c.id, c.items, c.p]),
+      // v23.4 furniture containers restored from the save but not built again yet: keep them (were dropped)
+      ...[...savedF].filter(([id]) => !conts.some(c => c.id === id)).map(([id, items]) => [id, items, [0, 0]]),
+    ],
     dead: sols.filter(s => s.state === 'dead').map(s => s.id),
     bar: doors.map((d, i) => (d.barricaded ? i : -1)).filter(i => i >= 0),
     radio: radioLog,
@@ -5486,7 +5786,7 @@ function update(dt: number) {
     gmap?.update();
     updatePrologue(dt);
   }
-  pumpRoofs(player.pos.x, player.pos.z, started ? 3 : 8);
+  pumpRoofs(...mapPos(), started ? 3 : 8);
   if (!started || dead || paused) return;
   updateInformant(dt);
   if (evac && evacOpen() && Math.hypot(player.pos.x - evac.pos[0], player.pos.z - evac.pos[1]) < 5) doEvac();
@@ -5529,7 +5829,7 @@ function update(dt: number) {
   player.fatigue = clamp(player.fatigue, 0, 100);
   if (player.hunger <= 0 || player.thirst <= 0) player.hp -= gm * 8;
   if (player.bleed) player.hp -= dt * 0.6;
-  if (player.hunger > 50 && player.thirst > 50 && !player.bleed) player.hp = Math.min(100, player.hp + gm * 6);
+  player.hp = Math.min(100, player.hp + gm * regenRate());
   if (MP) syncServerVitals();
   else if (player.hp <= 0) return die();
   if (dead) return;
@@ -5543,6 +5843,7 @@ function update(dt: number) {
   updateShells(dt);
   player.cd -= dt;
   meleeTick(dt);
+  gunFxTick(dt);
   clutterTick(dt);
   // movement
   if (drive.cur) {
@@ -5566,8 +5867,11 @@ function update(dt: number) {
       player.vel.set(0, 0, 0);
     }
   } else drive.update(dt, new THREE.Vector3(), UT.power);
-  roadT.update(player.pos.x, player.pos.z, dt);
-  district.update(player.pos.x, player.pos.z);
+  {
+    const [mx, mz] = mapPos(); // v23.4 upstairs: keep streaming around the building
+    roadT.update(mx, mz, dt);
+    district.update(mx, mz);
+  }
   traffic.update(dt);
   if (drive.cur) {
     const v = drive.cur;
@@ -5737,6 +6041,10 @@ function update(dt: number) {
   }
   // v21.2 shader cutaway around the camera→player line (see occlusion.ts); camera itself unchanged
   updateOcclusion(player.pos.x, player.pos.y, player.pos.z);
+  // v23.3 inside an enterable district building: cut its upper floors and roof away (core blocks lower their walls)
+  setBuildingCut(
+    up ? up.room.box : player.pos.z < -6000 || roofB ? null : district.enterAt(player.pos.x, player.pos.z),
+  );
   // buildings cutaway
   const inside = bldAt(player.pos.x, player.pos.z);
   for (const b of blds) {
@@ -5877,7 +6185,7 @@ function update(dt: number) {
               const kb = player.pos.clone();
               kb.x += ((player.pos.x - s.pos.x) / Math.max(0.3, dist)) * 0.6;
               kb.z += ((player.pos.z - s.pos.z) / Math.max(0.3, dist)) * 0.6;
-              if (bldAt(kb.x, kb.z) === bldAt(player.pos.x, player.pos.z)) {
+              if (placeAt(kb.x, kb.z) === placeAt(player.pos.x, player.pos.z)) {
                 collide(kb, 0.35);
                 player.pos.copy(kb);
               }
@@ -5901,9 +6209,9 @@ function update(dt: number) {
           !s.crouch &&
           (!s.cov || atCov || dist < 8)
         ) {
-          s.rig.shootT = 0.14;
+          gunFx(s.rig, false);
           s.cd = (1.1 + rnd() * 0.6) * (s.role === 'suppress' ? 0.6 : flanking ? 1.6 : 1);
-          AU.gunshot('rifle', dist, !!bldAt(s.pos.x, s.pos.z) || !!bldAt(player.pos.x, player.pos.z));
+          AU.gunshot('rifle', dist, !!bldAt(s.pos.x, s.pos.z) || indoorAt(player.pos.x, player.pos.z));
           noise(s.pos.x, s.pos.z, 40);
           // v21.4 ray against walls / cover first, then the hit roll (lower vs a covered target)
           const clear = shotRay([s.pos.x, s.pos.z], pp, 1.4, playerAimH(), 1.0);
@@ -6157,6 +6465,7 @@ function flashRed() {
   setTimeout(() => (renderer.domElement.style.filter = ''), 150);
 }
 function updateStreet() {
+  const [qx, qz] = mapPos();
   let best = '',
     bd = 25;
   for (const r of roads) {
@@ -6167,19 +6476,27 @@ function updateStreet() {
       const dx = bx - ax,
         dz = bz - az;
       const l2 = dx * dx + dz * dz || 1;
-      const t = clamp(((player.pos.x - ax) * dx + (player.pos.z - az) * dz) / l2, 0, 1);
-      const d = Math.hypot(player.pos.x - ax - dx * t, player.pos.z - az - dz * t);
+      const t = clamp(((qx - ax) * dx + (qz - az) * dz) / l2, 0, 1);
+      const d = Math.hypot(qx - ax - dx * t, qz - az - dz * t);
       if (d < bd) {
         bd = d;
         best = r.n;
       }
     }
   }
-  const sec = sectorOf(player.pos.x, player.pos.z);
+  const sec = sectorOf(qx, qz);
   $('street').textContent =
     getLanguage() === 'en'
       ? `📍 ${translateLabel(best) || 'Alley'}・${SECTOR_LABEL(sec)} district ${liberated.has(sec) ? '(reclaimed)' : '(occupied)'}`
       : `📍 ${translateLabel(best) || '巷弄'}・${SECTOR_LABEL(sec)}區 ${liberated.has(sec) ? '（已奪回）' : '（佔領中）'}`;
+}
+/**
+ * v23.5 natural healing in HP per game hour: 6 when fed and watered (> 50, as before), 18 when both are nearly
+ * full (≥ 80); none while bleeding.
+ */
+function regenRate() {
+  if (player.bleed || player.hunger <= 50 || player.thirst <= 50) return 0;
+  return player.hunger >= 80 && player.thirst >= 80 ? 18 : 6;
 }
 function bar(name: string, v: number, col: string) {
   return `<div class="bar"><div class="t"><span>${name}</span><span>${Math.round(v)}</span></div><div class="b"><i style="width:${clamp(v, 0, 100)}%;background:${col}"></i></div></div>`;
@@ -6192,6 +6509,7 @@ function drawHud(inside: Bld | null) {
   if (player.fatigue > 75) m.push(tr('疲憊', 'Exhausted'));
   if (player.bleed) m.push(tr('流血', 'Bleeding'));
   if (player.hp < 30) m.push(tr('重傷', 'Severely injured'));
+  if (player.hp < 100 && regenRate() >= 18) m.push(tr('飽足・回血中', 'Well fed · Healing'));
   if (player.sneak) m.push(tr('潛行中', 'Sneaking'));
   if (player.sleeping) m.push(tr('睡眠中', 'Sleeping'));
   if (sols.some(s => s.state === 'combat' && s.mesh.visible)) m.push(tr('被追捕', 'Being pursued'));
@@ -6240,7 +6558,13 @@ function drawHud(inside: Bld | null) {
     }
   }
   const rd = roofB ? null : roofDoor();
-  if (roofB && !panelOpen) {
+  if (up && upLanding() && !panelOpen) {
+    pr.style.display = 'block';
+    pr.textContent = tr('[E] 下樓（回一樓）', '[E] Go downstairs (ground floor)');
+  } else if (!up && !panelOpen && stairAt()) {
+    pr.style.display = 'block';
+    pr.textContent = tr('[E] 上樓（二樓）', '[E] Go upstairs (2nd floor)');
+  } else if (roofB && !panelOpen) {
     pr.style.display = 'block';
     pr.textContent = tr('[E] 走樓梯下到街上', '[E] Take the stairs down to the street');
   } else if (rd && !panelOpen) {
@@ -6403,8 +6727,8 @@ on('alert', e => siren(true, e?.kind ?? 'alert'));
 function siren(on: boolean, kind: 'alert' | 'clear' | 'test' = 'alert') {
   // v23.1 萬安-style street sirens (broadcast.ts); muffled indoors. v23.2.1: 'test' is a short quiet chime (audio.ts)
   if (!on) return;
-  if (kind === 'test') return AU.alertTest(!!bldAt(player.pos.x, player.pos.z));
-  BC.airRaid(kind, () => !!bldAt(player.pos.x, player.pos.z), AU.sfxCtx());
+  if (kind === 'test') return AU.alertTest(indoorAt(player.pos.x, player.pos.z));
+  BC.airRaid(kind, () => indoorAt(player.pos.x, player.pos.z), AU.sfxCtx());
 }
 function scrFlash(col: string, ms = 600) {
   const f = document.createElement('div');
@@ -6822,7 +7146,10 @@ async function boot() {
         more: async () => (await fetch(import.meta.env.BASE_URL + 'data/district/map.json')).json(),
       },
       liberated: () => liberated,
-      player: () => ({ x: player.pos.x, z: player.pos.z, rot: player.mesh ? player.mesh.rotation.y : 0 }),
+      player: () => {
+        const [x, z] = mapPos();
+        return { x, z, rot: player.mesh ? player.mesh.rotation.y : 0 };
+      },
       parks: (parks?.clusters || []) as V2[],
       outposts: () => checkpoints,
       evac: () => (evac ? (evac.pos as V2) : null),
@@ -7016,13 +7343,15 @@ async function boot() {
         if (s) c.items = s[1];
         map.delete(c.id);
       }
-      map.forEach(c =>
-        /^f\d+_/.test(String(c[0]))
-          ? savedF.set(c[0], c[1])
-          : String(c[0]).startsWith('pb')
-            ? makeBucket(c[0], c[2], c[1])
-            : makeCont(c[0], c[2], 'crate', undefined, c[1]),
-      );
+      map.forEach(c => {
+        const id = String(c[0]);
+        // core furniture (f…) and upstairs (u…) containers come back when their building is furnished again
+        if (/^[fu]\d+_/.test(id)) savedF.set(c[0], c[1]);
+        // v23.4 district containers are restored per tile from district.saved (making crates here duplicated them)
+        else if (/^t-?\d+_-?\d+:/.test(id)) return;
+        else if (id.startsWith('pb')) makeBucket(c[0], c[2], c[1]);
+        else makeCont(c[0], c[2], 'crate', undefined, c[1]);
+      });
       if (Array.isArray(sv.radio)) radioLog = sv.radio.slice(-200);
       (sv.bar || []).forEach((i: number) => doors[i] && setBarricade(doors[i]));
       checkSectors(true);
@@ -7438,6 +7767,66 @@ async function boot() {
       conts: conts.filter(c => c.id[0] === 'f').map(c => [c.id, c.label, Object.keys(c.items).length, c.mesh.visible]),
       plans: blds.filter(b => (b as any).clut).map(b => [b.id, (b as any).clut.use, b.c, b.door!.p, b.h]),
     }),
+    // v23.3 enterable district buildings of the loaded tiles (door centre, inward normal, use, furnished now?)
+    denter: () =>
+      [...district.enterables()].map(e => ({
+        key: e.key,
+        bi: e.bi,
+        use: e.use,
+        door: e.door.p,
+        n: [-e.U[1], e.U[0]],
+        c: e.c,
+        kind: e.kind ?? null,
+        live: !!dClut.get(e)?.g,
+        conts: conts.filter(
+          c =>
+            c.id.startsWith(`t${e.key}:`) &&
+            +c.id.split(':')[1] >= 1000 + e.bi * 64 &&
+            +c.id.split(':')[1] < 1064 + e.bi * 64,
+        ).length,
+      })),
+    indoor: () => indoorAt(player.pos.x, player.pos.z),
+    // v23.4 upstairs test hooks: a free spot at the foot of the stairs of the building the player is in
+    stairSpot: () => {
+      const b = placeAt(player.pos.x, player.pos.z);
+      const P = b && groundPlan(b);
+      return b && P?.stair ? stairFoot(b, P) : null;
+    },
+    stairs: () =>
+      [
+        ...blds.filter(b => (b as any).clut?.stair),
+        ...[...dClut.entries()].filter(([, v]) => v.plan?.stair).map(([e]) => e),
+      ].map(b => ({
+        id: b.id,
+        d: isDEnter(b) ? b.key + '#' + b.bi : 'core',
+        c: b.c,
+        foot: stairFoot(b, groundPlan(b)!),
+      })),
+    // v23.6 public buildings in the core: kind, a point just inside the door, furnished now?, its containers
+    coreKinds: () =>
+      blds
+        .filter(b => (b as any).kind && (b as any).clut)
+        .map(b => {
+          const P = (b as any).clut as CL.Plan;
+          return {
+            id: b.id,
+            kind: (b as any).kind,
+            inside: planW(P, 0, 1.3),
+            live: !!(b as any).clutG,
+            conts: P.conts.map(c => c.label),
+          };
+        }),
+    upToggle: () => upToggle(),
+    upState: () =>
+      up
+        ? {
+            up: true,
+            land: up.room.land,
+            anchor: up.anchor,
+            conts: up.conts.map(c => [c.id, c.label, Object.keys(c.items).length]),
+            pieces: up.furn.children.length,
+          }
+        : { up: false },
     ai: () => ({
       radio,
       stats: aiStats,
@@ -7450,6 +7839,7 @@ async function boot() {
       radioCd,
     }),
     OCC,
+    CUT,
     escapeCheck,
     unstuck,
     snp: () =>
@@ -7482,6 +7872,11 @@ async function boot() {
     audioFx: AU,
     autoStop: () => {
       AUTO.path = [];
+      AUTO.i = 0;
+    },
+    /** v23.3 follow explicit waypoints with the normal movement + collision */
+    autoPath: (pts: V2[]) => {
+      AUTO.path = pts;
       AUTO.i = 0;
     },
     autoWalk: () => {
@@ -7615,6 +8010,21 @@ async function boot() {
       fire: MB.fire,
     }),
     equipSet: (k: string) => (player.equip = k),
+    // v23.5 firing feedback and natural healing (test hooks)
+    gun: () => ({
+      ...gunStats,
+      live: casings.live,
+      heat: player.rig.heat,
+      fam: player.rig.gunFam,
+      model: !!player.rig.gunInner,
+      kind: player.rig.weaponKind,
+    }),
+    regen: () => regenRate(),
+    /** test close-ups only: zoom past the player's wheel range */
+    zoomTo: (z: number) => {
+      zoom = z;
+      resize();
+    },
     damageSol,
     toggleInv,
     addItem,
