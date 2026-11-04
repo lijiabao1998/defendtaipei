@@ -183,7 +183,8 @@ try {
   }));
   console.log('Phone door approach', approach);
   assert.ok(approach.path > 0, 'Office spawn must have a walkable route to its home door');
-  await pages[1].waitForFunction(() => window.__game.autoState().cd, null, { timeout: 180000 });
+  // ~0.5 fps software GL: the 144-step route has taken 215 s in CI.
+  await pages[1].waitForFunction(() => window.__game.autoState().cd, null, { timeout: 480000 });
   await pages[1].evaluate(() => window.__game.autoStop());
   await pages[1].waitForFunction(() => /開門|Open door/.test(document.getElementById('prompt').textContent));
   await pages[1].locator('#pbact').tap();
