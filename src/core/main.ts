@@ -2278,9 +2278,17 @@ async function startNet() {
     hud.textContent = tr('🌐 連線失敗：', '🌐 Connection failed: ') + (e as Error).message;
   }
 }
+/** co-op: the footprint box of the core building we stand in while its door is shut (server keeps sentries out) */
+function coopShelter(): [number, number, number, number] | undefined {
+  if (drive.cur || up) return;
+  const b = bldAt(player.pos.x, player.pos.z);
+  const d = b?.door as LiveDoor | undefined;
+  if (!b || !d || (d.open && !d.barricaded)) return;
+  return [b.minx, b.minz, b.maxx, b.maxz];
+}
 function netFrame(dt: number) {
   if (!net || !net.s) return;
-  net.update(dt, player.pos.x, player.pos.z, !!drive.cur);
+  net.update(dt, player.pos.x, player.pos.z, !!drive.cur, coopShelter());
   syncHeldWeapon();
   const s = net.s;
   for (const p of Object.values(s.players)) {

@@ -224,3 +224,28 @@ assert.match(renderSource, /antialias: SET\.quality !== 'low'/);
 assert.match(renderSource, /renderer\.shadowMap\.enabled = SET\.quality !== 'low'/);
 assert.match(settingsSource, /QPIX[^=]*= \{ low: 0\.75, med: 1\.25, high: 1\.5 \}/);
 console.log('PASS: low rendering budget wiring; medium/high pixel budgets retained (not a performance measurement)');
+{
+  // Shelter: survivors behind a closed door are unreachable; sentries cannot walk through the footprint.
+  const s = core.newState(7, 0, 0, 0);
+  assert.equal(core.addPlayer(s, 'in', 'In', 'office', 'm', 5, 5), null);
+  assert.equal(core.addPlayer(s, 'out', 'Out', 'office', 'm', 200, 200), null);
+  const box = [0, 0, 10, 10];
+  assert.equal(core.applyCmd(s, 'in', { t: 'move', seq: 1, x: 5, z: 5, sh: box }), '');
+  assert.deepEqual(s.players.in.sh, box);
+  assert.equal(core.validShelter([0, 0, 10, 10], 20, 20), undefined, 'box must contain the survivor');
+  assert.equal(core.validShelter([0, 0, 200, 10], 5, 5), undefined, 'box must be building-sized');
+  assert.equal(core.validShelter([0, 0, 'x', 10], 5, 5), undefined);
+  // Its patrol home is inside the footprint, so it keeps walking at the wall.
+  s.enemies.push({ id: 1, x: -3, z: 5, hp: 30, hx: 5, hz: 5, tgt: '' });
+  for (let i = 0; i < 600; i++) core.step(s, true);
+  assert.equal(s.players.in.hp, 100, 'sheltered survivor is never damaged');
+  const e = s.enemies[0];
+  assert.ok(e.x <= 0 || e.x >= 10 || e.z <= 0 || e.z >= 10, 'sentry stays outside the shelter footprint');
+  // Opening the door (no shelter in the next move) makes the survivor reachable again.
+  assert.equal(core.applyCmd(s, 'in', { t: 'move', seq: 2, x: 5, z: 5 }), '');
+  assert.equal(s.players.in.sh, undefined);
+  Object.assign(s.enemies[0], { x: -1, z: 5 });
+  for (let i = 0; i < 600; i++) core.step(s, true);
+  assert.ok(s.players.in.hp < 100, 'door open: sentries reach the survivor');
+  console.log('PASS: closed-door shelter blocks sentry targeting, damage and footprint entry');
+}
