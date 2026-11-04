@@ -167,6 +167,16 @@ try {
   }
   for (const p of pages)
     await p.evaluate(() => (window.__frameSample = { frames: 0, started: performance.now(), maxGap: 0 }));
+  // The door check validates routing and the touch control, not combat. Software-GL CI renders at ~1 fps, so
+  // the walk can take minutes while server sentries (no building/door awareness) defeat the survivor indoors.
+  // Use the real pause rule: the desktop client leaves, shared combat freezes, then it rejoins durably.
+  const desktopHello = await pages[0].evaluate(() => {
+    const n = window.__game.net;
+    const keep = { code: n.code, hello: n.hello };
+    n.leave();
+    return keep;
+  });
+  await pages[1].waitForFunction(id => window.__game.net.s && !window.__game.net.s.players[id]?.on, gameIds[0]);
   const approach = await pages[1].evaluate(() => ({
     path: window.__game.autoState().cd ? 1 : window.__game.autoWalk(),
     state: window.__game.autoState(),
@@ -178,6 +188,13 @@ try {
   await pages[1].waitForFunction(() => /開門|Open door/.test(document.getElementById('prompt').textContent));
   await pages[1].locator('#pbact').tap();
   await pages[1].waitForFunction(() => !window.__game.autoState().cd);
+  await pages[0].evaluate(({ code, hello }) => window.__game.net.join(code, hello), desktopHello);
+  for (const p of pages)
+    await p.waitForFunction(
+      () => window.__game.net.s && Object.values(window.__game.net.s.players).filter(p => p.on).length === 2,
+      null,
+      { timeout: 120000 },
+    );
   console.log(
     'Frame samples',
     await Promise.all(
