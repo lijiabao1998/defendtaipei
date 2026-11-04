@@ -75,7 +75,9 @@ function join(u, name, x = 0) {
   });
 }
 const cs = [];
-for (let i = 0; i < 4; i++) cs.push(await join(users[i], 'P' + i, i * 2));
+// Both claimants must be within the 2.2m range of the supply at x=1.
+// Cross-socket message order is intentionally unconstrained.
+for (let i = 0; i < 4; i++) cs.push(await join(users[i], 'P' + i, [0, 2, 2.5, 6][i]));
 const fifth = await join(users[4], 'P4');
 out.fifth = fifth.err || fifth.closed;
 await new Promise(r => setTimeout(r, 1500));
@@ -92,17 +94,22 @@ out.bidirectionalMovement = true;
 for (let i = 0; i < 180; i++) cs[0].ws.send(JSON.stringify({ k: 'ack', tick: 0 }));
 cmd(cs[0], { t: 'equip', weapon: 'hammer' });
 cmd(cs[1], { t: 'equip', weapon: 'pipe' });
+cmd(cs[2], { t: 'equip', weapon: 'hammer' });
 await waitUntil(
-  () => cs[1].s.players[users[0].uid]?.weapon === 'hammer' && cs[0].s.players[users[1].uid]?.weapon === 'pipe',
+  () =>
+    cs[1].s.players[users[0].uid]?.weapon === 'hammer' &&
+    cs[0].s.players[users[1].uid]?.weapon === 'pipe' &&
+    cs[0].s.players[users[2].uid]?.weapon === 'hammer',
   'bidirectional equipment',
 );
 assert.equal(cs[1].s.players[users[0].uid].weapon, 'hammer');
 assert.equal(cs[0].s.players[users[1].uid].weapon, 'pipe');
+assert.equal(cs[0].s.players[users[2].uid].weapon, 'hammer');
 out.weaponReplication = true;
 out.ackBacklogDoesNotDropEquipment = true;
 cmd(cs[0], { t: 'move', x: 80, z: 0 }); // speed hack
-cmd(cs[1], { t: 'loot', id: 'b12_0', x: 2, z: 0 });
-cmd(cs[2], { t: 'loot', id: 'b12_0', x: 4, z: 0 }); // both claimants are in range
+cmd(cs[1], { t: 'loot', id: 'supply:0', x: 2, z: 0 });
+cmd(cs[2], { t: 'loot', id: 'supply:0', x: 2.5, z: 0 }); // contested loot
 cmd(cs[3], { t: 'attack', target: 0 });
 await waitUntil(
   () => cs[0].rej.includes('speed') && (cs[1].rej.includes('taken') || cs[2].rej.includes('taken')),
@@ -119,12 +126,13 @@ out.reconnect = {
   sameId: !!re.s.players[users[1].uid],
   looted: re.s.looted,
 };
-// Wait for 200 authoritative ticks rather than relying on a fixed delay.
+// Wait for 200 authoritative ticks, bounded by wall-clock time.
 const tickDeadline = Date.now() + 30000;
 do {
   await new Promise(r => setTimeout(r, 250));
   out.info = await (await fetch(`${B}/api/rooms/${code}`)).json();
 } while (out.info.tick < 200 && Date.now() < tickDeadline);
+// Await every WebSocket close handshake before timing the server's grace period.
 await Promise.all([...cs, re].map(close));
 assert.equal(out.noauth, 401);
 assert.equal(out.badroom, 404);
@@ -134,11 +142,12 @@ assert.equal(out.rejects.filter(r => r.includes('taken')).length, 1);
 assert.ok(out.stream.every(c => c.deltas > 0));
 assert.equal(out.reconnect.sameId, true);
 assert.equal(out.reconnect.players, 4);
-const winner = out.reconnect.looted.b12_0;
+const winner = out.reconnect.looted['supply:0'];
 assert.ok([users[1].uid, users[2].uid].includes(winner));
-const loserIndex = winner === users[1].uid ? 2 : 1;
+const winnerIndex = users[1].uid === winner ? 1 : 2;
+const loserIndex = winnerIndex === 1 ? 2 : 1;
 assert.ok(out.rejects[loserIndex].includes('taken'));
-assert.ok(!out.rejects[loserIndex === 1 ? 2 : 1].includes('taken'));
+assert.ok(!out.rejects[winnerIndex].includes('taken'));
 assert.ok(out.info.tick >= 200);
 if (process.env.MP_TEST_IDLE_RECOVERY) {
   // Wait beyond the actual server grace period: tick stops and final D1 checkpoint is written.
@@ -146,8 +155,9 @@ if (process.env.MP_TEST_IDLE_RECOVERY) {
   const idle = await (await fetch(`${B}/api/rooms/${code}`)).json();
   assert.equal(idle.players, 0);
   assert.ok(idle.tick > out.info.tick);
-  // The idle alarm can persist one final tick after the timer stops. Require
-  // a continuous stable D1 snapshot longer than the normal checkpoint period.
+  // The idle alarm can write one last tick after the timer has stopped. Require
+  // a continuous 12 seconds without another D1 update, within a bounded window.
+  // This exceeds the normal 200-tick (10-second) checkpoint interval.
   let stopped = idle;
   let stableSince = Date.now();
   const stopDeadline = Date.now() + 25000;
@@ -160,8 +170,16 @@ if (process.env.MP_TEST_IDLE_RECOVERY) {
     stopped = current;
   }
   assert.ok(Date.now() - stableSince >= 12000, 'idle room did not reach a stable checkpoint');
-  const restored = await join(users[1], 'P1', 2);
-  assert.equal(restored.s.looted.b12_0, out.reconnect.looted.b12_0);
+  const restored = await join(users[winnerIndex], 'P' + winnerIndex, winnerIndex === 1 ? 2 : 2.5);
+  assert.equal(restored.s.looted['supply:0'], winner);
+  assert.equal(restored.s.players[users[1].uid].inv.a9, winner === users[1].uid ? 36 : 12);
+  assert.equal(restored.s.players[users[2].uid].inv.a9, winner === users[2].uid ? 36 : 12);
+  assert.equal(restored.s.players[users[1].uid].weapon, 'pipe');
+  assert.equal(restored.s.players[users[2].uid].weapon, 'hammer');
+  assert.ok(restored.s.players[users[1].uid].ack > 0);
+  assert.ok(restored.s.players[users[2].uid].ack > 0);
+  assert.ok(restored.s.players[winner].on);
+  out.durableSurvivorInventory = true;
   restored.ws.close();
   out.noR2IdleRecovery = true;
 }

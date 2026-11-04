@@ -36,7 +36,12 @@ export class Room {
       .first<{ state: string }>();
     if (row) {
       this.s = JSON.parse(row.state);
-      for (const p of Object.values(this.s!.players)) p.on = false;
+      this.s!.coop = 2;
+      this.s!.loot ||= {};
+      for (const p of Object.values(this.s!.players)) {
+        p.on = false;
+        p.inv ||= { hammer: 1, pipe: 1, pistol: 1, a9: 12, medkit: 2 };
+      }
     }
   }
   async save() {
@@ -104,7 +109,7 @@ export class Room {
     }
     if (!this.s) return;
     for (const [uid, p] of Object.entries(this.s.players)) {
-      if (!p.on) delete this.s.players[uid];
+      p.on = false; // Retain identity, health, inventory and position for durable reconnect.
     }
     this.leftAt.clear();
     await this.tick();
@@ -174,7 +179,7 @@ export class Room {
     const now = Date.now();
     for (const [uid, t] of this.leftAt)
       if (now - t > GRACE_MS) {
-        delete s.players[uid];
+        // Expire the live-session grace only; the persisted survivor remains resumable.
         this.leftAt.delete(uid);
       }
     this.hist.set(s.tick, clone(s));
