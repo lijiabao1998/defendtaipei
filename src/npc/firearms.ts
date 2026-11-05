@@ -29,6 +29,12 @@ export const GUN_FAM: Record<string, GunFam> = {
   kestrel: 'launcher',
   at4: 'launcher',
   jav: 'launcher',
+  // v24.4 Japanese airdrop weapons
+  type20: 'rifle',
+  type89: 'rifle',
+  minimi: 'lmg',
+  p220: 'pistol',
+  lmat: 'launcher',
 };
 export const gunFam = (id: string): GunFam | null => GUN_FAM[id] ?? null;
 /**
@@ -357,6 +363,17 @@ function spec(id: string): Spec | null {
     case 'at4':
     case 'jav':
       return launcher(id);
+    // v24.4 JSDF: Type 20 in coyote tan, Type 89 in black with a fixed stock, MINIMI, the 9 mm pistol, LMAT tube
+    case 'type20':
+      return arRifle(false, 0x6b5f47);
+    case 'type89':
+      return arRifle(true, 0x2e302c);
+    case 'minimi':
+      return lmg(false);
+    case 'p220':
+      return pistol(BLK, BLK);
+    case 'lmat':
+      return launcher('jav');
   }
   return null;
 }

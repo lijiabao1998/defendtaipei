@@ -5,6 +5,8 @@ const EN_LABELS: Readonly<Record<string, string>> = {
   國軍補給箱: 'ROC supply crate',
   // v24.3
   國軍殘部遺留裝備: 'Gear left by the ROC remnant',
+  // v24.4
+  日本空投物資箱: 'Japanese airdrop crate',
   受傷聯絡官的背包: 'Wounded liaison’s backpack',
   冷藏櫃: 'Refrigerated cabinet',
   // v23.6 public buildings

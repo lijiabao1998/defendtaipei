@@ -13,6 +13,13 @@
 | `src/net/` | `net.ts` 多人連線用戶端（即將開放） | Grok |
 | `src/debug/` | `flags.ts` 網址測試旗標（`?mpdebug=1` 等） | Grok |
 
+## v24 新增（Claude）
+
+| 檔案 | 內容 |
+| --- | --- |
+| `src/npc/remnant.ts` | v24.3 國軍殘部：四處固守的路口、英勇對話、每日補給、開火與陣地失守 |
+| `src/systems/japan.ts` | v24.4 日本支援：C-2 空投、F-2 轟炸、AH-64DJ 掩護（自衛隊野戰無線電，一次一顆電池） |
+
 ## 備註
 
 - 鏡頭仍在 `core/main.ts` 內（`player/` 只放操控與角色）；本次重整刻意不動鏡頭程式碼，以免改變行為。

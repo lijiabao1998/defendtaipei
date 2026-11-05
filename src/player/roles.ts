@@ -116,5 +116,29 @@ export const ROLES: Role[] = [
     ],
     look: { m: L(0x5a6a7a, 0x3a4048), f: L(0x6a7a8a, 0x3a4048) },
   },
+  // v24.4 a Japanese resident of Wanhua (fictional): knows where the JSDF liaison is hiding from the start
+  {
+    id: 'jp',
+    name: tr('日籍駐在員', 'Japanese expat engineer'),
+    age: [36, 33],
+    names: [tr('佐藤健太', 'Kenta Sato'), tr('高木美咲', 'Misaki Takagi')],
+    blurb: tr(
+      '日商公司派駐台北的工程師，在萬華住了五年，台語聽得懂一點',
+      'An engineer posted to Taipei by a Japanese company; five years in Wanhua, understands a little Taiwanese.',
+    ),
+    spawn: 'home',
+    dest: 'office',
+    destLabel: tr('公司（辦公大樓）', 'Workplace (office building)'),
+    skills: { carry: 1 },
+    inv: { cracker: 1, water: 1, battery: 1 },
+    perks: [
+      tr('會說日語：一開始就知道自衛隊連絡官在哪', 'Speaks Japanese: knows where the JSDF liaison is from the start'),
+      tr('多帶一顆電池', 'Carries a spare battery'),
+    ],
+    look: {
+      m: L(0xdfe4e8, 0x2b2f3a, { jacket: 0x4a5260, shoes: 0x1a1a1a }),
+      f: L(0xf0ece4, 0x4a4038, { jacket: 0x7a6a58, shoes: 0x2a2220 }),
+    },
+  },
 ];
 export const roleById = (id?: string) => ROLES.find(r => r.id === id) || ROLES[2];
