@@ -20,13 +20,14 @@ import { SPEC, DriveSystem, type DKind } from '../systems/drive';
 import { ROLES, roleById, type Role } from '../player/roles';
 import type { FPV } from '../systems/fpv';
 import type { GameMap } from '../map/map';
-import { RocSystem, ROC_NAME, type RocKind } from '../npc/roc';
+import { RocSystem, ROC_NAME, flagPole, type RocKind } from '../npc/roc';
 import { placeRooftop, dressRoof, pickRoofMat, setShackNight, roofClass, roofStats } from '../map/rooftin';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeLampBatches } from './lamps';
 import { ITEMS, LOOT } from '../systems/items';
 import { iconURL, iconMat } from '../ui/icons';
 import { GF, FH, ARC, arcadeFits, buildArcade, flushArcades, setArcadeDeps, arcadeAudit } from '../map/arcade';
+import { RemnantSystem, type RemSave } from '../npc/remnant';
 import {
   makeRig,
   animate,
@@ -2951,6 +2952,7 @@ function npcInteract() {
     talkElder();
     return true;
   }
+  if (rem?.talk()) return true; // v24.3 國軍殘部
   return false;
 }
 function npcPrompt() {
@@ -2961,7 +2963,94 @@ function npcPrompt() {
       : tr('[E] 和聯絡人交談', '[E] Talk to the contact');
   if (elderRig && Math.hypot(P.x - elderPos[0], P.z - elderPos[1]) < 2.4)
     return tr('[E] 和廟口阿伯聊天', '[E] Chat with the old man at the temple');
-  return '';
+  return rem?.prompt() || '';
+}
+// ---------- v24.3 國軍殘部: remnant squads holding street corners (src/npc/remnant.ts) ----------
+let rem: RemnantSystem | null = null;
+/** four street corners 110–420 m from the spawn, 160 m+ apart, on the open carriageway of a mid-size road */
+function remnantSites(c: V2) {
+  const out: { p: V2; ang: number }[] = [];
+  const cand: { p: V2; ang: number; d: number }[] = [];
+  for (const r of roads) {
+    if (!['tertiary', 'secondary', 'residential', 'unclassified'].includes(r.t) || r.p.length < 2) continue;
+    for (let i = 0; i < r.p.length - 1; i++) {
+      const [ax, az] = r.p[i],
+        [bx, bz] = r.p[i + 1];
+      const L = Math.hypot(bx - ax, bz - az);
+      if (L < 14) continue;
+      const p: V2 = [(ax + bx) / 2, (az + bz) / 2];
+      const d = Math.hypot(p[0] - c[0], p[1] - c[1]);
+      if (d < 110 || d > 420 || bldAt(p[0], p[1])) continue;
+      cand.push({ p, ang: Math.atan2(bz - az, bx - ax) + Math.PI / 2, d });
+    }
+  }
+  // deterministic: spread around the spawn by bearing, nearest first within each quarter
+  cand.sort((a, b) => a.d - b.d);
+  for (let qd = 0; qd < 4; qd++) {
+    const pick = cand.find(q => {
+      const b = Math.atan2(q.p[1] - c[1], q.p[0] - c[0]);
+      const quarter = Math.floor(((b + Math.PI) / (Math.PI * 2)) * 4) % 4;
+      return quarter === qd && out.every(o => Math.hypot(o.p[0] - q.p[0], o.p[1] - q.p[1]) > 160);
+    });
+    if (pick) out.push({ p: pick.p, ang: pick.ang });
+  }
+  return out;
+}
+function setupRemnants(c: V2) {
+  if (rem) return;
+  const st = surv as any;
+  st.rem ||= {};
+  rem = new RemnantSystem({
+    scene,
+    rig: (weapon, i) => {
+      // ROC digital camouflage greens (lighter than the PLA's), one in a darker shirt
+      const r = makeRig({
+        gender: i === 3 ? 'f' : 'm',
+        hair: 0x111111,
+        top: i === 2 ? 0x55603c : 0x68714a,
+        bottom: 0x4a5234,
+        shoes: 0x1a1a14,
+        soldier: true,
+      });
+      setWeapon(r, weapon);
+      return r;
+    },
+    animate: (r, a, dt) => animate(r, a as AnimState, 0, dt),
+    sandbags: (x, z, ang, n) => {
+      const g = sandbags(x, z, ang, n);
+      return g;
+    },
+    flag: () => flagPole(),
+    foes: () => sols,
+    // over the 1 m sandbags (theirs within 2.6 m are fired over), walls and buildings block
+    los: (p, q) => shotRay(p, q, 1.5, 1.4, 2.6) > 0.98,
+    hit: (f, dmg) => damageSol(f as Sol, dmg, false),
+    fire: (r, dist) => {
+      gunFx(r, false);
+      AU.gunshot('rifle', dist, indoorAt(player.pos.x, player.pos.z));
+    },
+    noise,
+    player: () => player.pos,
+    log,
+    dlg,
+    addItem,
+    has: k => player.inv[k] || 0,
+    take: k => {
+      if (--player.inv[k] <= 0) delete player.inv[k];
+    },
+    intel: () => {
+      mapIntelOutposts(tr('解放軍哨點（國軍殘部情資）', 'PLA checkpoint (ROC remnant intelligence)'));
+      gmap?.save();
+    },
+    leave: (id, p, items) => {
+      if (conts.some(q => q.id === id)) return;
+      const k = makeCont(id, p, 'crate', undefined, { ...items });
+      k.label = '國軍殘部遺留裝備';
+    },
+    day: () => surv.day,
+    store: () => st.rem as Record<string, RemSave>,
+  });
+  rem.init(remnantSites(c));
 }
 function infMark(p: V2, col: number, txt: string) {
   gmap?.intel('inf' + Math.round(p[0]) + ',' + Math.round(p[1]), p[0], p[1], 'dng', txt.slice(0, 14));
@@ -6070,6 +6159,7 @@ function update(dt: number) {
       });
       out.forEach(t => log(t, '#fd9'));
       spoilCarried();
+      rem?.dawn();
     }
   }
   player.hunger -= gm * 2.2;
@@ -6643,6 +6733,7 @@ function update(dt: number) {
   sun.target.position.copy(player.pos);
   if (!dayF) sun.position.set(player.pos.x - 30, 70, player.pos.z + 20);
   updateSmoke(dt);
+  if (started && !offMap(player.pos.x, player.pos.z)) rem?.update(dt);
   if (!plaFlash.length)
     for (let i = 0; i < 4; i++) {
       const L = new THREE.SpotLight(0xfff0d0, 0, 24, 0.32, 0.5, 1.2);
@@ -7306,6 +7397,7 @@ async function boot() {
   }
   if (bestR) nightMarket(bestR.p, bestR.t === 'tertiary' ? 9 : 6, fx, 'nm');
   setupArmor(start!.c as V2);
+  setupRemnants(start!.c as V2);
   spawnDrivables(start!.c as V2);
   buildJunctions();
   await roadT.init();
@@ -8377,6 +8469,21 @@ async function boot() {
     recon: () => recon,
     ROC,
     roc: () => roc,
+    // v24.3 國軍殘部 test hooks
+    rem: () =>
+      rem && {
+        stats: rem.stats,
+        squads: rem.squads.map(q => ({
+          id: q.id,
+          unit: q.unit,
+          leader: q.leader,
+          p: q.p,
+          alive: rem!.alive(q),
+          save: (surv as any).rem[q.id],
+        })),
+      },
+    remTalk: () => rem?.talk(),
+    remPrompt: () => rem?.prompt(),
     useItem,
     testAT: (k: string) => {
       const a = armor!.list.find(a => !a.dead)!;

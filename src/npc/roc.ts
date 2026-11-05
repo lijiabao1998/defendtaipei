@@ -47,6 +47,23 @@ function flagTex() {
   return t;
 }
 let FLAG: THREE.Texture | null = null;
+/** v24.3 a 國旗 on a steel pole (remnant positions): pole 3.2 m, flag 1.2 × 0.8 m, double-sided */
+export function flagPole() {
+  FLAG = FLAG || flagTex();
+  const g = new THREE.Group();
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, 3.2, 6), dark);
+  pole.position.y = 1.6;
+  pole.castShadow = true;
+  const fl = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.2, 0.8),
+    new THREE.MeshStandardMaterial({ map: FLAG, side: THREE.DoubleSide, roughness: 0.8 }),
+  );
+  fl.position.set(0.62, 2.75, 0);
+  fl.rotation.y = 0.35; // a little wind
+  fl.castShadow = true;
+  g.add(pole, fl);
+  return g;
+}
 const box = (w: number, h: number, d: number, m: THREE.Material, x = 0, y = 0, z = 0) => {
   const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
   b.position.set(x, y, z);

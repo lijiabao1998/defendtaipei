@@ -3,6 +3,8 @@ import { getLanguage } from './i18n';
 /** Display-only localization. Keep persisted labels and gameplay comparison keys unchanged. */
 const EN_LABELS: Readonly<Record<string, string>> = {
   國軍補給箱: 'ROC supply crate',
+  // v24.3
+  國軍殘部遺留裝備: 'Gear left by the ROC remnant',
   受傷聯絡官的背包: 'Wounded liaison’s backpack',
   冷藏櫃: 'Refrigerated cabinet',
   // v23.6 public buildings
