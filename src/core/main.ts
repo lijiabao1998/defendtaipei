@@ -3429,6 +3429,12 @@ const clutLive = new Set<Bld>();
 const savedF = new Map<string, Record<string, number>>();
 let clutT = 0;
 function clutterTick(dt: number) {
+  // v24.1 the building the player has just walked into is furnished at once (not on the 0.3 s round, which at a few
+  // frames a second — software WebGL, a busy phone — can lag several seconds behind the door)
+  if (!up && !offMap(player.pos.x, player.pos.z)) {
+    const e = district.enterAt(player.pos.x, player.pos.z);
+    if (e && !dClut.has(e) && dTile.get(e.key)) furnishD(e);
+  }
   clutT -= dt;
   if (clutT > 0) return;
   clutT = 0.3;
@@ -3506,11 +3512,19 @@ function districtClutter(budget: number) {
   }
   cand.sort((a, b) => a[1] - b[1]);
   for (const [e] of cand) {
+    // v24.1 not before the tile's record exists (onTileLoad): furnishing first would leave it without containers
+    if (!dTile.get(e.key)) continue;
     if (budget-- <= 0) break;
+    furnishD(e);
+  }
+}
+/** v24.1 furnish one enterable district building now: plan, furniture, cover, containers (saved per tile) */
+function furnishD(e: DEnter) {
+  {
     const C = dPlan(e);
     const live: DClut = { segs: [] };
     dClut.set(e, live);
-    if (!C) continue;
+    if (!C) return;
     live.plan = C;
     live.g = CL.build(C);
     scene.add(live.g);
@@ -3520,7 +3534,7 @@ function districtClutter(budget: number) {
       live.segs.push(q);
     }
     const rec = dTile.get(e.key);
-    if (!rec) continue;
+    if (!rec) return;
     const sv = district.saved[e.key]?.c || {};
     for (const k of C.conts) {
       if (conts.some(c => c.id === k.id)) continue;
@@ -7950,6 +7964,7 @@ async function boot() {
         c: e.c,
         kind: e.kind ?? null,
         live: !!dClut.get(e)?.g,
+        planned: dClut.has(e) ? !!dClut.get(e)!.plan : null,
         conts: conts.filter(
           c =>
             c.id.startsWith(`t${e.key}:`) &&
@@ -7958,6 +7973,20 @@ async function boot() {
         ).length,
       })),
     indoor: () => indoorAt(player.pos.x, player.pos.z),
+    dtiles: () => [...dTile.keys()],
+    // v24.1 lazy district furnishing: the nearest candidates (distance to footprint box, in dClut?, planned?)
+    dclut: () => {
+      const [px, pz] = mapPos();
+      return [...district.enterables()]
+        .map(e => ({
+          k: e.key + '#' + e.bi,
+          d: Math.max(e.minx - px, px - e.maxx, e.minz - pz, pz - e.maxz, 0),
+          has: dClut.has(e),
+          plan: !!dClut.get(e)?.plan,
+        }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 8);
+    },
     // v23.4 upstairs test hooks: a free spot at the foot of the stairs of the building the player is in
     stairSpot: () => {
       const b = placeAt(player.pos.x, player.pos.z);
