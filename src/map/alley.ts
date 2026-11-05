@@ -425,6 +425,8 @@ export function buildAlley(c: ACtx) {
     if (!near(b.c[0], b.c[1]) || b.h < 3) continue;
     const pts: V2[] = b.pts;
     for (let i = 0; i < pts.length; i++) {
+      // v23.9 infill row houses open onto the street front only (edge 0)
+      if (b.fill && i !== 0) continue;
       const a = pts[i],
         e = pts[(i + 1) % pts.length];
       const L = Math.hypot(e[0] - a[0], e[1] - a[1]);

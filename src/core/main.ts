@@ -50,6 +50,7 @@ import { Nav, smooth } from '../systems/nav';
 import { RoadTiles } from '../map/roads';
 import { Traffic } from '../systems/traffic';
 import { rolePortrait } from '../ui/portrait';
+import { frontageInfill } from '../map/infill';
 import { type V2, type Seg, type Door, type Bld, type Cont, ROADW } from './world';
 import { clamp, pip, area, segInter, segX } from './geom';
 import {
@@ -709,8 +710,23 @@ type UpState = {
 let up: UpState | null = null;
 /** where the player is on the map (the stairwell while upstairs) */
 const mapPos = (): V2 => (up ? up.anchor : [player.pos.x, player.pos.z]);
+// v23.9 20 m bucket grid over the core footprints (rebuilt when blds grows), bldAt is called a lot at boot
+const BG = 20;
+let bgN = -1;
+const bGrid = new Map<number, Bld[]>();
 function bldAt(x: number, z: number) {
-  for (const b of blds) if (x > b.minx && x < b.maxx && z > b.minz && z < b.maxz && pip([x, z], b.pts)) return b;
+  if (bgN !== blds.length) {
+    bGrid.clear();
+    for (const b of blds)
+      for (let i = Math.floor(b.minx / BG); i <= Math.floor(b.maxx / BG); i++)
+        for (let j = Math.floor(b.minz / BG); j <= Math.floor(b.maxz / BG); j++) {
+          const k = i * 4096 + j;
+          (bGrid.get(k) || bGrid.set(k, []).get(k)!).push(b);
+        }
+    bgN = blds.length;
+  }
+  const L = bGrid.get(Math.floor(x / BG) * 4096 + Math.floor(z / BG));
+  if (L) for (const b of L) if (x > b.minx && x < b.maxx && z > b.minz && z < b.maxz && pip([x, z], b.pts)) return b;
   return null;
 }
 /** v23.3 core building or enterable district building at (x, z): stable identity for same-room comparisons */
@@ -1403,7 +1419,11 @@ function buildMap(data: any) {
     );
   // buildings
   setArcadeDeps({ roadDist, pip: pip as any, addSeg });
+  let seed0: number | null = null;
+  const fillFloors: THREE.BufferGeometry[] = [];
   data.buildings.forEach((ob: any, id: number) => {
+    // v23.9 infill lots come last and use their own RNG stream, so OSM buildings, loot and soldiers stay put
+    if (ob.fill && seed0 === null) ((seed0 = seed), (seed = 0x5f11));
     const pts: V2[] = ob.p;
     const A = area(pts);
     if (A < 12 || A > 6000) return;
@@ -1444,6 +1464,7 @@ function buildMap(data: any) {
       maxz: Math.max(...zs),
     };
     // v23.6 schools, hospitals, temples, markets, stations, offices get their own fit-out (clutter.ts)
+    if (ob.fill) (b as any).fill = 1;
     const kind = CL.specialKind('', ob.s, ob.n);
     if (kind) (b as any).kind = kind;
     // door: longest edge
@@ -1458,6 +1479,8 @@ function buildMap(data: any) {
         di = i;
       }
     }
+    // v23.9 infill lots: the street front is edge 0 (lots are often deeper than wide)
+    if (ob.fill) ((di = 0), (dl = Math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])));
     const wg: THREE.BufferGeometry[] = [];
     const wins: { x: number; z: number; y: number; ry: number; f: number }[] = [];
     (b as any).wins = wins;
@@ -1472,7 +1495,7 @@ function buildMap(data: any) {
       g.translate((a[0] + c[0]) / 2, (y0 + y1) / 2, (a[1] + c[1]) / 2);
       wg.push(g);
       /* window slots matching the painted wall-texture windows (for 3D window units near the player) */
-      if (win && h > GF + 1) {
+      if (win && h > GF + 1 && (!ob.fill || edge === di)) {
         const ux = (c[0] - a[0]) / l,
           uz = (c[1] - a[1]) / l;
         let nx = -uz,
@@ -1499,7 +1522,9 @@ function buildMap(data: any) {
         }
       }
     };
+    let edge = -1;
     for (let i = 0; i < pts.length; i++) {
+      edge = i;
       const a = pts[i],
         c = pts[(i + 1) % pts.length];
       if (i === di && dl > 2.6 && A > 20) {
@@ -1545,7 +1570,8 @@ function buildMap(data: any) {
         // v19.3 騎樓: built inside the footprint — columns on the street edge under the upper floors,
         // shopfront recessed ARC m behind them, continuous ceiling; only on edges facing a road
         if (arcOk) buildArcade(arcOk, b.roof);
-        if ((h > 6 && rnd() < 0.6) || type !== 'home') {
+        // v23.9 infill: no per-house fascia sign (decay.ts hangs vertical signs on the street fronts)
+        if ((h > 6 && rnd() < 0.6 && !ob.fill) || type !== 'home') {
           const tex = type !== 'home' ? signTex[type] : pick(shopSignTex);
           const sg = new THREE.Mesh(
             new THREE.PlaneGeometry(Math.min(dl * 0.8, 5), 1.1),
@@ -1572,7 +1598,7 @@ function buildMap(data: any) {
     const mi = id % wallMats.length;
     (b as any).mi = mi;
     b.walls = new THREE.Mesh(mergeGeometries(wg), wallMats[mi]);
-    b.walls.castShadow = true;
+    b.walls.castShadow = !ob.fill; // v23.9 infill row-houses don't cast (shadow-pass cost on phones/CI)
     b.walls.receiveShadow = true;
     group.add(b.walls);
     const shape = new THREE.Shape(pts.map(p => new THREE.Vector2(p[0], p[1])));
@@ -1583,13 +1609,17 @@ function buildMap(data: any) {
       pickRoofMat(() => hh(9)),
     );
     roof.position.y = h;
-    roof.castShadow = true;
+    roof.castShadow = !ob.fill;
     b.roof.add(roof);
-    const fl = new THREE.Mesh(rgeo, floorMat);
-    fl.position.y = 0.03;
-    fl.receiveShadow = true;
-    group.add(fl);
-    b.floor = fl;
+    if (ob.fill)
+      fillFloors.push(rgeo.clone().translate(0, 0.03, 0)); // v23.9 one merged floor mesh for all infill
+    else {
+      const fl = new THREE.Mesh(rgeo, floorMat);
+      fl.position.y = 0.03;
+      fl.receiveShadow = true;
+      group.add(fl);
+      b.floor = fl;
+    }
     // rooftop additions 頂樓加蓋 + water tanks
     {
       const rcls = roofClass(pts as any, lv, type + ' ' + (ob.n || ''));
@@ -1615,13 +1645,13 @@ function buildMap(data: any) {
           if (A < 600) {
             let sd = s8 ^ 0x5bd1;
             const pr = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
-            dressWalkup(pts as any, h, roadDist, pr, roofG);
+            if (!ob.fill) dressWalkup(pts as any, h, roadDist, pr, roofG);
           }
         },
       });
     }
     const tq = rnd();
-    if (tq < 0.5 || hh(4) < (lv <= 3 ? 0.5 : 0)) {
+    if (!ob.fill && (tq < 0.5 || hh(4) < (lv <= 3 ? 0.5 : 0))) {
       const st = lv <= 3 ? 1.6 : 0;
       const t = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 1.4, 10), tankMat);
       const tp: V2 =
@@ -1660,6 +1690,12 @@ function buildMap(data: any) {
       }
     }
   });
+  if (seed0 !== null) seed = seed0;
+  if (fillFloors.length) {
+    const fl = new THREE.Mesh(mergeGeometries(fillFloors), floorMat);
+    fl.receiveShadow = true;
+    scene.add(fl);
+  }
   flushArcades(scene);
   // parked vehicles (scooters on sidewalks, cars/taxis on bigger roads, occupation trucks) + street lamps
   const spots: { x: number; z: number; ang: number; kind: VehicleKind }[] = [];
@@ -6884,6 +6920,14 @@ function updatePrologue(dt: number) {
 }
 
 // ---------- boot ----------
+/** v23.9 spawn-area frontage infill (src/map/infill.ts): centre near the default spawn, radius, lot cap */
+const INFILL = {
+  cx: 70,
+  cz: 40,
+  r: 220,
+  // ?infill=N caps the lot count (0 = OSM only), for before/after perf checks
+  max: Math.max(0, +(new URLSearchParams(location.search).get('infill') ?? 200) || 0),
+};
 const prog = async (f: number, msg: string) => {
   const i = document.querySelector('#loadbar i') as HTMLElement | null;
   if (i) i.style.width = Math.round(f * 100) + '%';
@@ -6919,6 +6963,8 @@ async function boot() {
       const c = b.p.reduce((a: V2, q: V2) => [a[0] + q[0] / b.p.length, a[1] + q[1] / b.p.length], [0, 0]);
       return !R.some(r => c[0] > r[0] && c[0] < r[2] && c[1] > r[1] && c[1] < r[3]);
     });
+    // v23.9 OSM maps few footprints here: fill empty street frontage around the spawn with row-house lots
+    data.buildings.push(...frontageInfill(data.buildings, data.roads, { ...INFILL, roadW: ROADW, avoid: R as any }));
   }
   await prog(0.45, tr('建造街區…', 'Building neighborhoods...'));
   buildMap(data);
@@ -6926,7 +6972,9 @@ async function boot() {
   await prog(0.65, tr('佈置出生點附近的室內與巷弄…', 'Furnishing interiors and alleys near the spawn point...'));
   const sv = readSave();
   // ---- detailed blocks around spawn (剝皮寮 / 康定路 / 西門町 edge) ----
-  const homes = blds.filter(b => b.door && b.type === 'home' && Math.abs(b.c[0]) < 167 && Math.abs(b.c[1]) < 167);
+  const homes = blds.filter(
+    b => !(b as any).fill && b.door && b.type === 'home' && Math.abs(b.c[0]) < 167 && Math.abs(b.c[1]) < 167,
+  );
   const fx = {
     rnd,
     pip,
@@ -6963,7 +7011,14 @@ async function boot() {
   }
   if (!start) start = homes[0] || blds.find(b => b.door)!;
   const near = blds
-    .filter(b => b !== start && b.door && !b.detailed && Math.hypot(b.c[0] - start!.c[0], b.c[1] - start!.c[1]) < 130)
+    .filter(
+      b =>
+        b !== start &&
+        !(b as any).fill &&
+        b.door &&
+        !b.detailed &&
+        Math.hypot(b.c[0] - start!.c[0], b.c[1] - start!.c[1]) < 130,
+    )
     .sort(
       (a, b) =>
         Math.hypot(a.c[0] - start!.c[0], a.c[1] - start!.c[1]) - Math.hypot(b.c[0] - start!.c[0], b.c[1] - start!.c[1]),
@@ -7232,7 +7287,7 @@ async function boot() {
   };
   const nearestBy = (f: (b: Bld) => boolean, from: V2, minD = 0, maxD = 1e9) =>
     blds
-      .filter(b => b.door && f(b))
+      .filter(b => b.door && !(b as any).fill && f(b)) // v23.9 role spawns stay on OSM buildings
       .map(b => [b, Math.hypot(b.c[0] - from[0], b.c[1] - from[1])] as const)
       .filter(([, d]) => d >= minD && d <= maxD)
       .sort((a, b) => a[1] - b[1])[0]?.[0];
@@ -7763,6 +7818,13 @@ async function boot() {
         }
       : {}),
     roofStats,
+    // v23.9 draw calls / triangles of the last frame + core building counts (density checks)
+    rinfo: () => ({
+      calls: renderer.info.render.calls,
+      tris: renderer.info.render.triangles,
+      blds: blds.length,
+      fill: blds.filter(b => (b as any).fill).length,
+    }),
     melee: () => ({ attack: playerAttack, sols, trail: swingTrail, rig: player.rig }),
     phone: (w: string, m: string) => phone(w, m),
     save: () => save(),
