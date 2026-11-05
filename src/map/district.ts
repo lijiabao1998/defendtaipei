@@ -5,6 +5,9 @@
 // walls + roofs (LOD); far tiles are disposed. Each tile has a deterministic seed so content is identical on
 // every client (multiplayer-ready) and player changes are stored per tile key. Data © OpenStreetMap (ODbL).
 import * as THREE from 'three';
+import { chunkify } from '../core/chunk';
+/** v24.6 ?chunk=0 turns the tile chunking off (before / after comparisons) */
+const CHUNK = typeof location === 'undefined' || new URLSearchParams(location.search).get('chunk') !== '0';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { canvasTex, roadMat } from './textures';
 import { lotTex, ARCADE_MATS, worldUV } from './paving';
@@ -325,8 +328,10 @@ export class District {
   tiles = new Map<string, Tile>();
   data = new Map<string, TileData>();
   pending = new Set<string>();
-  stats = { loads: 0, unloads: 0, maxLoaded: 0, builtMs: 0 };
+  stats = { loads: 0, unloads: 0, maxLoaded: 0, builtMs: 0, chunked: 0 };
   saved: Record<string, any> = {};
+  /** v24.6 extra footprints per tile key (core block interiors), appended to the tile data when it is fetched */
+  extra: ((key: string) => DBld[]) | null = null;
   private rgrid = new Map<string, [V2, V2, number][]>();
   /** v23.3 enterable buildings of loaded tiles, bucketed in EG m cells */
   private egrid = new Map<string, DEnter[]>();
@@ -469,8 +474,8 @@ export class District {
         if (L > bl) ((bl = L), (best = i));
         continue;
       }
-      // v24.1 back door: an edge whose outside (1 m and 1.8 m out) is open ground, not a neighbour's footprint
-      if (free && free(mx + nx * 1.0, mz + nz * 1.0) && free(mx + nx * 1.8, mz + nz * 1.8) && L > backL)
+      // v24.1 back door: an edge whose outside (0.8 m and 1.4 m out — a 1.6 m 防火巷 is enough) is open ground
+      if (free && free(mx + nx * 0.8, mz + nz * 0.8) && free(mx + nx * 1.4, mz + nz * 1.4) && L > backL)
         ((backL = L), (back = i));
     }
     if (best < 0 && back >= 0) ((best = back), (bl = backL));
@@ -546,10 +551,12 @@ export class District {
   private async fetchTile(k: string) {
     if (this.data.has(k)) return this.data.get(k)!;
     if (!this.ix.tiles[k]) {
-      this.data.set(k, { b: [], r: [] });
+      this.data.set(k, { b: this.extra?.(k) ?? [], r: [] });
       return this.data.get(k)!;
     }
     const td: TileData = await (await fetch(this.d.base + `data/district/${k}.json`)).json();
+    const ex = this.extra?.(k);
+    if (ex?.length) td.b = td.b.concat(ex);
     this.data.set(k, td);
     const G = 20;
     for (const r of td.r) {
@@ -601,7 +608,12 @@ export class District {
     await Promise.all([-1, 0, 1].flatMap(i => [-1, 0, 1].map(j => this.fetchTile(tx + i + '_' + (tz + j)))));
     const t0 = performance.now();
     const T = this.ix.T;
-    const tile = this.build(k, this.data.get(k)!, (tx + 0.5) * T, (tz + 0.5) * T);
+    const tile = await this.build(k, this.data.get(k)!, (tx + 0.5) * T, (tz + 0.5) * T);
+    // v24.6 split the tile's merged meshes (200 m across) into 50 m pieces so off-screen parts are culled
+    if (CHUNK) {
+      const cs = chunkify(tile.g, { minTris: 6000, minSpan: 70, cell: 50, instanced: true });
+      this.stats.chunked += cs.meshes;
+    }
     this.stats.builtMs = Math.max(this.stats.builtMs, performance.now() - t0);
     this.tiles.set(k, tile);
     for (const e of tile.info.enter)
@@ -630,7 +642,16 @@ export class District {
     this.stats.unloads++;
     this.d.onUnload?.(k);
   }
-  private build(key: string, td: TileData, cx: number, cz: number): Tile {
+  private async build(key: string, td: TileData, cx: number, cz: number): Promise<Tile> {
+    // v24.6 tiles with the core block interiors hold 60–100 walk-ups: give the browser a chance to draw after every
+    // ~200 ms of building work, so a heavy tile never blocks the page for seconds on a slow CPU (software WebGL,
+    // phones). Ordinary tiles build in well under that and never yield (each yield may cost a whole frame there).
+    let tY = performance.now();
+    const breathe = async () => {
+      if (performance.now() - tY < 200) return;
+      await new Promise(r => setTimeout(r, 0));
+      tY = performance.now();
+    };
     const rnd = seeded('dt21:' + key);
     const g = new THREE.Group(),
       detail = new THREE.Group();
@@ -779,6 +800,7 @@ export class District {
       return paint(pg, hex, jitter);
     };
     for (let bi = 0; bi < td.b.length; bi++) {
+      await breathe();
       const b = td.b[bi];
       const pts = b.p;
       if (pts.length < 3) continue;
@@ -862,8 +884,11 @@ export class District {
           segs.push(seg);
           this.d.addSeg(seg);
         }
-        // rear light-well / back alley side: stairs, lean-tos, ACs, coloured cages, peeled brick
-        if (rdE > 3 && L >= 3.5) {
+        // rear light-well / back alley side: stairs, lean-tos, ACs, coloured cages, peeled brick.
+        // v24.6 not on a wall that faces a neighbour across a 防火巷 (a footprint within 2.2 m): nobody sees it from
+        // the street or from above, and dense blocks would otherwise pay for thousands of hidden cages
+        const facing = !inB(mx + nx * 1.2, mz + nz * 1.2) && !inB(mx + nx * 2.2, mz + nz * 2.2);
+        if (rdE > 3 && L >= 3.5 && facing) {
           const M0 = place(mx, 0, mz, angE, 1, 1, 1);
           const free = (lz: number) => !inB(mx + nx * lz, mz + nz * lz);
           if (lv >= 3 && stairs < 8 && L >= 4.5 && rnd() < 0.18 && free(1.5) && free(3)) {

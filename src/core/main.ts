@@ -30,6 +30,7 @@ import { GF, FH, ARC, arcadeFits, buildArcade, flushArcades, setArcadeDeps, arca
 import { RemnantSystem, type RemSave } from '../npc/remnant';
 import { JapanSupport, JP_LABEL, type JpKind } from '../systems/japan';
 import { buildWreckage, wreckStats } from '../map/wreckage';
+import { chunkify, type ChunkStats } from './chunk';
 import {
   makeRig,
   animate,
@@ -54,6 +55,7 @@ import { RoadTiles } from '../map/roads';
 import { Traffic } from '../systems/traffic';
 import { rolePortrait } from '../ui/portrait';
 import { frontageInfill } from '../map/infill';
+import { blockInfill } from '../map/blocks';
 import { type V2, type Seg, type Door, type Bld, type Cont, ROADW } from './world';
 import { clamp, pip, area, segInter, segX } from './geom';
 import {
@@ -96,7 +98,7 @@ import { buildAlley } from '../map/alley';
 import { updateOcclusion, OCC, CUT, setBuildingCut } from '../map/occlusion';
 import { lotTex } from '../map/paving';
 import { walkH } from '../map/roads';
-import { dressWalkup, District, type TileInfo, type DEnter } from '../map/district';
+import { dressWalkup, District, type TileInfo, type DEnter, type DBld } from '../map/district';
 import { buildDoorDeco, DoorView, doorSound, isHomeDoor, type LiveDoor } from '../map/doors';
 import { SniperSys, findPosts, sniperActive, type Sniper } from '../systems/sniper';
 import { Scope, SCOPED, ballistic } from '../systems/scope';
@@ -2974,6 +2976,7 @@ function npcPrompt() {
 }
 // ---------- v24.5 the stopped traffic of the occupied city (src/map/wreckage.ts) ----------
 let wreck: THREE.Group | null = null;
+let chunkStats: ChunkStats | null = null;
 const wreckSegs: Seg[] = [];
 let wreckLive = false;
 function setupWreckage(sc: V2) {
@@ -7481,6 +7484,14 @@ function updatePrologue(dt: number) {
 }
 
 // ---------- boot ----------
+/** v24.6 block-interior infill of the core (src/map/infill.ts blockInfill); ?blocks=0 turns it off for comparison */
+const BLOCKS = {
+  on: new URLSearchParams(location.search).get('blocks') !== '0',
+  max: Math.max(0, +(new URLSearchParams(location.search).get('blocksmax') ?? 2400) || 0),
+  n: 0,
+  ms: 0,
+};
+const coreBlocks = new Map<string, DBld[]>();
 /** v23.9 spawn-area frontage infill (src/map/infill.ts): centre near the default spawn, radius, lot cap */
 const INFILL = {
   cx: 70,
@@ -7526,6 +7537,33 @@ async function boot() {
     });
     // v23.9 OSM maps few footprints here: fill empty street frontage around the spawn with row-house lots
     data.buildings.push(...frontageInfill(data.buildings, data.roads, { ...INFILL, roadW: ROADW, avoid: R as any }));
+    // v24.6 and the empty block interiors of the whole core: rows of walk-ups across 防火巷, cut by 巷. They are
+    // built by the district streamer (merged per tile, enterable, every floor) — appended to the core-area tiles
+    if (BLOCKS.on) {
+      const t0 = performance.now();
+      const ix = district.ix;
+      const open = [
+        ...ix.park.map(q => q.p),
+        ...ix.water,
+        ...ix.landuse.filter(q => /grass|park|recreation|cemetery|playground/.test(q.t)).map(q => q.p),
+      ];
+      const bl = blockInfill(data.buildings, data.roads, {
+        bbox: [CORE.minx + 4, CORE.minz + 4, CORE.maxx - 4, CORE.maxz - 4],
+        roadW: ROADW,
+        avoid: R as any,
+        open,
+        max: BLOCKS.max,
+      });
+      const T = ix.T;
+      for (const b of bl) {
+        const c = b.p.reduce((a: V2, q: V2) => [a[0] + q[0] / 4, a[1] + q[1] / 4], [0, 0]);
+        const k = Math.floor(c[0] / T) + '_' + Math.floor(c[1] / T);
+        (coreBlocks.get(k) || coreBlocks.set(k, []).get(k)!).push(b);
+      }
+      district.extra = k => coreBlocks.get(k) ?? [];
+      BLOCKS.n = bl.length;
+      BLOCKS.ms = Math.round(performance.now() - t0);
+    }
   }
   await prog(0.45, tr('建造街區…', 'Building neighborhoods...'));
   buildMap(data);
@@ -7822,6 +7860,9 @@ async function boot() {
     }
     (window as any).__game && ((window as any).__game.map = gmap);
   });
+  // v24.6 split the big core-wide merged meshes into 60 m pieces so off-screen parts are culled (src/core/chunk.ts)
+  if (new URLSearchParams(location.search).get('chunk') !== '0')
+    chunkStats = chunkify(scene, { instanced: true, icell: 80, iminTris: 20000 });
   await prog(1, tr('完成', 'Done'));
   // v22.7.1 watchdog: if the title menu has not appeared shortly after loading, offer a clean reload
   setTimeout(() => {
@@ -8738,6 +8779,9 @@ async function boot() {
     jp: () => jp && { stats: jp.stats, cd: jp.cd, crafts: jp.crafts.length, liaison: liaison?.p ?? null },
     jpCall: (k: JpKind) => jpCall(k),
     jpTalk: () => talkLiaison(),
+    chunks: () => chunkStats,
+    dstats: () => district.stats,
+    blocks: () => ({ ...BLOCKS, tiles: coreBlocks.size }),
     // v24.5 street wreckage stats
     wreck: () => ({ ...wreckStats, visible: !!wreck?.visible, live: wreckLive, segs: wreckSegs.length }),
     jpRadio: () => useJpRadio(),
@@ -8781,6 +8825,37 @@ async function boot() {
         update(dt);
         if (fpv?.active) fpv.update(dt);
       }
+    },
+    // v24.6 how many meshes / materials a building's group holds (fill vs OSM), for the merge work
+    bldMeshes: () => {
+      const acc = {
+        fill: { n: 0, meshes: 0, mats: new Set<string>() },
+        osm: { n: 0, meshes: 0, mats: new Set<string>() },
+      };
+      for (const b of blds) {
+        const k = (b as any).fill ? acc.fill : acc.osm;
+        k.n++;
+        b.group.traverse(o => {
+          if ((o as THREE.Mesh).isMesh) {
+            k.meshes++;
+            const m = (o as THREE.Mesh).material as THREE.Material;
+            k.mats.add(m.uuid);
+          }
+        });
+      }
+      return {
+        fill: {
+          n: acc.fill.n,
+          perBld: +(acc.fill.meshes / Math.max(1, acc.fill.n)).toFixed(1),
+          mats: acc.fill.mats.size,
+        },
+        osm: { n: acc.osm.n, perBld: +(acc.osm.meshes / Math.max(1, acc.osm.n)).toFixed(1), mats: acc.osm.mats.size },
+        sceneMeshes: (() => {
+          let n = 0;
+          scene.traverse(o => (n += (o as THREE.Mesh).isMesh ? 1 : 0));
+          return n;
+        })(),
+      };
     },
     // v24.5 the road segments within r m: type, width, name, distance
     roadsNear: (r = 60) =>
