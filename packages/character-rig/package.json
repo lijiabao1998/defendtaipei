@@ -1,0 +1,11 @@
+{
+  "name": "@lijiabao/character-rig",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared 白面人 mannequin kit (fabric materials, merged per-joint geometry, joint/primitive helpers). Baseline: DefendTaipei-Lab.",
+  "main": "src/index.ts",
+  "peerDependencies": {
+    "three": ">=0.170.0"
+  }
+}
