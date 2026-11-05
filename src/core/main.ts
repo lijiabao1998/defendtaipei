@@ -2961,6 +2961,10 @@ function npcInteract() {
     talkLiaison(); // v24.4 自衛隊連絡官
     return true;
   }
+  if (rescueNear()) {
+    rescueTalk(); // v24.8 someone trapped upstairs
+    return true;
+  }
   return false;
 }
 function npcPrompt() {
@@ -2972,6 +2976,7 @@ function npcPrompt() {
   if (elderRig && Math.hypot(P.x - elderPos[0], P.z - elderPos[1]) < 2.4)
     return tr('[E] 和廟口阿伯聊天', '[E] Chat with the old man at the temple');
   if (liaisonNear()) return tr('[E] 和自衛隊連絡官高橋一尉交談', '[E] Talk to JSDF liaison Captain Takahashi');
+  if (rescueNear()) return tr('[E] 「我們來救你了」', '[E] “We are here to get you out”');
   return rem?.prompt() || '';
 }
 // ---------- v24.5 the stopped traffic of the occupied city (src/map/wreckage.ts) ----------
@@ -3014,6 +3019,183 @@ function wreckTick() {
   if (on && !wreckLive) {
     wreckLive = true;
     for (const q of wreckSegs) addSeg(q, (q.h ?? 9) < 1.6);
+  }
+}
+// ---------- v24.8 樓上有人在求救: every morning a text message from someone trapped on an upper floor ----------
+type Rescue = { bid: number; f: number; day: number; x: number; z: number; street: string; done?: 1; failed?: 1 };
+let rescueRig: { rig: Rig; p: V2 } | null = null;
+const rescueState = () => (surv as any).resc as Rescue | undefined;
+/** 09:00 each day: a new call for help (and the old one goes quiet if nobody came) */
+function rescueTick() {
+  const hr = (gameMin / 60) % 24,
+    day = Math.floor(gameMin / 1440);
+  const R = rescueState();
+  if (hr < 9 || hr > 9.5 || (R && R.day === day)) return;
+  if (R && !R.done && !R.failed) {
+    R.failed = 1;
+    log(
+      tr(`📱 ${R.street}那則求救簡訊，再也沒有回覆了。`, `📱 The message from near ${R.street} never answered again.`),
+      '#c9a',
+    );
+    surv.group.forEach(g => (g.mood = Math.max(0, g.mood - 4)));
+  }
+  const P: V2 = mapPos(); // upstairs: the stairwell's spot on the map
+  const home = bldAt(surv.home?.[0] ?? P[0], surv.home?.[1] ?? P[1]);
+  const cand = blds.filter(b => {
+    const pl = (b as any).clut as CL.Plan | undefined;
+    if (!pl?.stair || b === home || storeys(b) < 3) return false;
+    const d = Math.hypot(b.c[0] - P[0], b.c[1] - P[1]);
+    return d > 80 && d < 320;
+  });
+  if (!cand.length) return;
+  let rs = (Math.imul(day + 1, 2654435761) ^ Math.imul((surv.karma | 0) + 7, 40503)) >>> 0;
+  const r = () => (rs = (Math.imul(rs, 1664525) + 1013904223) >>> 0) / 4294967296;
+  const b = cand[Math.floor(r() * cand.length)];
+  const f = 2 + Math.floor(r() * (storeys(b) - 1));
+  let street = tr('附近', 'nearby'),
+    bd = 1e9;
+  for (const q of roads)
+    if (q.n)
+      for (const a of q.p) {
+        const d = Math.hypot(a[0] - b.c[0], a[1] - b.c[1]);
+        if (d < bd) ((bd = d), (street = q.n));
+      }
+  const x = b.c[0] + (r() - 0.5) * 30,
+    z = b.c[1] + (r() - 0.5) * 30;
+  (surv as any).resc = { bid: b.id, f, day, x, z, street } as Rescue;
+  gmap?.intel('resc', x, z, 'dng', tr('求救（附近公寓）', 'Call for help (a walk-up nearby)'));
+  gmap?.save();
+  phone(
+    tr('📱 求救簡訊', '📱 Text message: call for help'),
+    getLanguage() === 'en'
+      ? `“We are on floor ${f} of a walk-up near ${street}. Mum hurt her leg and we cannot get down the stairs. Please…” (rough spot marked on your map)`
+      : `「我們在${street}附近一棟公寓的${floorZh(f)}，媽媽腳受傷下不了樓梯……拜託。」（大概位置已標上地圖）`,
+  );
+}
+function rescueFloor(b: Bld | DEnter, P2: CL.Plan, f: number, pts: V2[]) {
+  const R = rescueState();
+  if (!R || R.done || R.failed || isDEnter(b) || b.id !== R.bid || f !== R.f) return;
+  // somewhere in the room away from the stairs: try a few spots along the middle of the floor
+  let at: V2 | null = null;
+  for (const v of [3, 5, 2, 7, 1.5])
+    for (const u of [0, 1.5, -1.5]) {
+      const q = planW(P2, u, v);
+      if (!at && pip(q, pts) && walkable(q[0], q[1])) at = q;
+    }
+  at ||= [up!.room.land[0] + 1.2, up!.room.land[1]];
+  const rig = makeRig({ gender: 'f', hair: 0x2a2420, top: 0x9a6a8a, bottom: 0x3a3f4a, shoes: 0x222222 });
+  rig.root.position.set(at[0], 0, at[1]);
+  scene.add(rig.root);
+  rescueRig = { rig, p: at };
+  log(
+    tr(
+      '樓上有人：「是誰？……拜託，是來救我們的嗎？」',
+      'Someone up here: “Who is it?… Please, have you come to help us?”',
+    ),
+    '#ffd27a',
+  );
+}
+function rescueLeave() {
+  if (!rescueRig) return;
+  scene.remove(rescueRig.rig.root);
+  rescueRig = null;
+}
+const rescueNear = () => !!rescueRig && Math.hypot(player.pos.x - rescueRig.p[0], player.pos.z - rescueRig.p[1]) < 2.4;
+function rescueTalk() {
+  const R = rescueState();
+  if (!R || R.done) return;
+  R.done = 1;
+  const away = surv.group.find(g => !g.here && !g.dead);
+  if (away) away.here = true;
+  surv.karma += 1;
+  surv.group.forEach(g => (g.mood = Math.min(100, g.mood + 6)));
+  addItem('can', 2);
+  addItem('bandage', 1);
+  gmap?.intel('resc', R.x, R.z, 'safe', tr('已救出', 'Rescued'));
+  dlg(
+    tr('🙏 被困在樓上的一家人', '🙏 A family trapped upstairs'),
+    away
+      ? getLanguage() === 'en'
+        ? `They will make their way to your shelter tonight. With them comes ${SV.survivorName(away)} — “${SV.survivorRole(away)}”. Before you leave they press two cans and a bandage into your hands.`
+        : `她們今晚會自己摸黑到你的避難所。一起躲在這裡的還有${SV.survivorName(away)}——${SV.survivorRole(away)}。臨走前，她們塞給你兩個罐頭和一卷繃帶。`
+      : tr(
+          '「謝謝……我們知道避難所在哪，晚上自己過去。」臨走前，她們塞給你兩個罐頭和一卷繃帶。',
+          '“Thank you… We know where the shelter is; we will get there tonight.” Before you leave they press two cans and a bandage into your hands.',
+        ),
+    [],
+  );
+  log(
+    tr('🙏 救出了一家人（避難所大家的心情好了一點）', '🙏 You got a family out (spirits lift at the shelter)'),
+    '#9f9',
+  );
+}
+// ---------- v24.7 the sounds of a Taipei evening: the garbage truck's 《給愛麗絲》 (until the blackout), temples,
+// thunder in a downpour ----------
+const SND = { truckT: 0, truckDay: -1, quietDay: -1, templeT: 4, thunderT: 8, templeD: 1e9, tScan: 0, last: 0 };
+let templeSpots: V2[] | null = null;
+function taipeiSounds(_dt: number) {
+  // ambience runs on real seconds (what you hear), not on the capped simulation step
+  const now = performance.now() / 1000;
+  const dt = SND.last ? Math.min(1, now - SND.last) : 0;
+  SND.last = now;
+  const hr = (gameMin / 60) % 24,
+    day = Math.floor(gameMin / 1440);
+  const indoor = indoorAt(player.pos.x, player.pos.z);
+  // 垃圾車: 19:00–19:12, every evening while the city still runs; afterwards the silence is the story
+  if (hr >= 19 && hr < 19.2) {
+    if (gameMin < POWER_OFF) {
+      if (SND.truckDay !== day) {
+        SND.truckDay = day;
+        log(
+          day === 0
+            ? tr(
+                '🎵 19:00，垃圾車的《給愛麗絲》從巷口傳來——就像什麼事都沒發生過。',
+                '🎵 19:00: the garbage truck’s “Für Elise” drifts in from the end of the lane — as if nothing had happened.',
+              )
+            : tr(
+                '🎵 垃圾車還是來了。鄰居提著垃圾袋跑出巷口，誰也不說話。',
+                '🎵 The garbage truck still came. Neighbours run out with their bags; nobody says a word.',
+              ),
+          '#cde',
+        );
+      }
+      if ((SND.truckT -= dt) <= 0) {
+        const p = (hr - 19) / 0.2; // the truck comes up the street and goes on
+        const dist = 20 + Math.abs(p - 0.5) * 360;
+        SND.truckT = AU.garbageTruck(dist, indoor) || 6;
+      }
+    } else if (SND.quietDay !== day) {
+      SND.quietDay = day;
+      log(
+        tr(
+          '19:00 了。巷口一片安靜——垃圾車沒有來，也不會再來了。',
+          'It is 19:00. The end of the lane is silent — the garbage truck did not come, and it will not come again.',
+        ),
+        '#9aa',
+      );
+    }
+  }
+  // temples: bell, 木魚 and chanting when one is within 70 m (scan the list every 2 s)
+  if (!templeSpots) {
+    templeSpots = blds.filter(b => (b as any).kind === 'temple').map(b => b.c as V2);
+    for (const l of district.ix?.landmarks || []) if (l.kind === 'temple') templeSpots.push([l.x, l.z]);
+  }
+  if ((SND.tScan -= dt) <= 0) {
+    SND.tScan = 2;
+    let best = 1e9;
+    for (const q of templeSpots) best = Math.min(best, Math.hypot(q[0] - player.pos.x, q[1] - player.pos.z));
+    for (const e of district.enterables())
+      if (e.kind === 'temple') best = Math.min(best, Math.hypot(e.c[0] - player.pos.x, e.c[1] - player.pos.z));
+    SND.templeD = best;
+  }
+  if (SND.templeD < 70 && (SND.templeT -= dt) <= 0) {
+    SND.templeT = 18 + Math.random() * 14;
+    AU.temple(SND.templeD);
+  }
+  // thunder in a downpour
+  if (WX.amt > 0.6 && (SND.thunderT -= dt) <= 0) {
+    SND.thunderT = 20 + Math.random() * 25;
+    AU.thunder(indoor);
   }
 }
 // ---------- v24.4 日本支援: a JSDF liaison (fictional) with a field radio; airdrops, F-2 strikes, AH-64DJ cover ----------
@@ -4039,6 +4221,23 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
     upFlight: fl,
   });
   scene.add(room.g);
+  // v24.9 the neighbours around this floor (nearest first), at their heights relative to it
+  {
+    const near: { pts: V2[]; h: number; d: number }[] = [];
+    for (const q of blds)
+      if (q !== b) {
+        const d = Math.hypot(q.c[0] - b.c[0], q.c[1] - b.c[1]);
+        if (d < 45) near.push({ pts: q.pts, h: q.h, d });
+      }
+    for (const e of district.enterables())
+      if (e !== b) {
+        const d = Math.hypot(e.c[0] - b.c[0], e.c[1] - b.c[1]);
+        if (d < 45) near.push({ pts: e.pts, h: e.h, d });
+      }
+    near.sort((x, y) => x.d - y.d);
+    const nb = UP.buildNeighbours({ list: near, off, floorH: GF + (f - 2) * FH, seed, centre: UP.UP_O });
+    if (nb) room.g.add(nb);
+  }
   const furn = CL.build(P2);
   scene.add(furn);
   const segs: Seg[] = [];
@@ -4064,6 +4263,7 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
     cs.push(c);
   }
   up = { b, dist, P, room, furn, segs, conts: cs, anchor: stairFoot(b, P), f, top };
+  rescueFloor(b, P2, f, bUp.pts);
   const at = fromAbove && room.upFoot ? room.upFoot : room.land;
   player.pos.set(at[0], 0, at[1]);
   player.vel.set(0, 0, 0);
@@ -4079,6 +4279,7 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
 /** v24.1 leave the current upper floor: keep what was taken, drop its meshes, collision and containers */
 function leaveFloor() {
   const u = up!;
+  rescueLeave();
   UP.disposeUpstairs(u.room);
   CL.dispose(u.furn);
   for (const sg of u.segs) removeSeg(sg);
@@ -6976,6 +7177,9 @@ function update(dt: number) {
   if (started && !offMap(player.pos.x, player.pos.z)) rem?.update(dt);
   if (started) jp?.update(dt);
   if (started) wreckTick();
+  if (started && !PRO.on) taipeiSounds(dt);
+  if (started && !PRO.on && !MP) rescueTick();
+  if (rescueRig) animate(rescueRig.rig, 'idle', 0, dt);
   if (liaison) {
     const d = Math.hypot(player.pos.x - liaison.p[0], player.pos.z - liaison.p[1]);
     liaison.rig.root.visible = d < 90;
@@ -8782,6 +8986,18 @@ async function boot() {
     chunks: () => chunkStats,
     dstats: () => district.stats,
     blocks: () => ({ ...BLOCKS, tiles: coreBlocks.size }),
+    // v24.8 rescue test hooks
+    rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
+    rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.7 sound counters (garbage truck, temple, thunder)
+    sounds: () => ({
+      ...AU.auStats,
+      templeD: Math.round(SND.templeD),
+      temples: templeSpots?.length ?? 0,
+      truckDay: SND.truckDay,
+      quietDay: SND.quietDay,
+      amb: AU.ambState(),
+    }),
     // v24.5 street wreckage stats
     wreck: () => ({ ...wreckStats, visible: !!wreck?.visible, live: wreckLive, segs: wreckSegs.length }),
     jpRadio: () => useJpRadio(),
