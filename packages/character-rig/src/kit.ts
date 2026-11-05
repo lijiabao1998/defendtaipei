@@ -1,5 +1,5 @@
 // @lijiabao/character-rig — shared kit for the 白面人 (faceless mannequin) humanoid.
-// Baseline: DefendTaipei-Lab src/npc/human.ts (v23.9). Geometry accumulation (one merged mesh per
+// Baseline: DefendTaipei-Lab src/npc/human.ts (v24.0). Geometry accumulation (one merged mesh per
 // joint/material), joint + primitive helpers, the mannequin materials and the garment-fabric picker.
 // Game-specific wardrobe, gear and animation stay in each game.
 import * as THREE from 'three';
