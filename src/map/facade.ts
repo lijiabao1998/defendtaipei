@@ -88,6 +88,10 @@ export function buildFacade(c: FCtx) {
   def('paneDark', new THREE.PlaneGeometry(W - 0.1, H - 0.1).translate(0, 0, 0.022), std({ roughness: 1 }));
   const litMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
   def('paneLit', new THREE.PlaneGeometry(W - 0.1, H - 0.1).translate(0, 0, 0.022), litMat);
+  // v24.10 the windows where somebody is still living: lit like the others while the power is on, and after the
+  // blackout the only light left in the street — a warm, unsteady candle / camping-lamp glow
+  const candleMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  def('paneCandle', new THREE.PlaneGeometry(W - 0.1, H - 0.1).translate(0, 0, 0.022), candleMat);
   const blindT = ctex(32, 64, g => {
     g.fillStyle = '#e8e4d8';
     g.fillRect(0, 0, 32, 64);
@@ -250,7 +254,8 @@ export function buildFacade(c: FCtx) {
       const broken = r < 0.13;
       const lit = !broken && rnd() < 0.38;
       if (lit) {
-        put('paneLit', x, y, z, ry, LIT[Math.floor(rnd() * LIT.length)]);
+        if (rnd() < 0.16) put('paneCandle', x, y, z, ry, 0xffb060);
+        else put('paneLit', x, y, z, ry, LIT[Math.floor(rnd() * LIT.length)]);
         litW.push({ x: x + ox * 0.4, y, z: z + oz * 0.4 });
       } else put('paneDark', x, y, z, ry, [0x3a4048, 0x48443c, 0x40404a][Math.floor(rnd() * 3)]);
       const cr = rnd();
@@ -615,6 +620,7 @@ export function buildFacade(c: FCtx) {
       spots[k] = [x, z];
   };
   const stats = { sidewalk: 0, green: 0, red: 0, yellow: 0, none: 0 };
+  let candleNow = 0;
   c.roads.forEach((r, ri) => {
     const t = r.t.replace('_link', '');
     const w = c.RW[t] ?? 3;
@@ -810,7 +816,16 @@ export function buildFacade(c: FCtx) {
     stats: { windows: nWin, roofs: nRoof, ...stats },
     update(night: number, pw: number) {
       litMat.color.setScalar(pw ? 0.42 + 0.58 * Math.min(1, night * 1.3) : 0.18 * (1 - night) + 0.04);
+      if (pw) candleMat.color.copy(litMat.color);
+      else {
+        const t = performance.now() / 1000;
+        const fl = 0.82 + 0.1 * Math.sin(t * 7.3) + 0.08 * Math.sin(t * 13.1 + 1.7);
+        candleMat.color.setScalar(0.12 * (1 - night) + Math.min(1, night * 1.3) * 0.78 * fl);
+      }
+      candleNow = pw ? 0 : candleMat.color.r;
     },
+    /** v24.10 how bright the candle windows are right now (0 while the power is on) */
+    candle: () => candleNow,
   };
 }
 const roofVC = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8 });
