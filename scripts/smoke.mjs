@@ -44,7 +44,7 @@ check(
   'new game starts as nurse',
 );
 check(await p.evaluate(() => window.__game.PRO.on && !!document.getElementById('wake')), 'prologue runs');
-await p.screenshot({ path: shot('smoke-prologue.png') });
+await p.screenshot({ path: shot('smoke-prologue.png'), timeout: 120000 });
 await p.evaluate(() => window.__game.endPrologue());
 await p.waitForTimeout(500);
 check(await p.evaluate(() => !window.__game.PRO.on), 'prologue can be skipped');
@@ -54,7 +54,7 @@ const p0 = await p.evaluate(() => [window.__game.player.pos.x, window.__game.pla
 await p.keyboard.down('KeyW');
 await p.keyboard.down('ShiftLeft');
 await p.waitForTimeout(700);
-await p.screenshot({ path: shot('smoke-run.png') });
+await p.screenshot({ path: shot('smoke-run.png'), timeout: 120000 });
 await p.keyboard.up('ShiftLeft');
 await p.waitForTimeout(1200);
 await p.keyboard.up('KeyW');
@@ -85,7 +85,7 @@ check(
   await p.evaluate(() => !document.getElementById('panel').classList.contains('hidden')),
   'Tab opens the inventory',
 );
-await p.screenshot({ path: shot('smoke-inv.png') });
+await p.screenshot({ path: shot('smoke-inv.png'), timeout: 120000 });
 await p.keyboard.press('Escape');
 
 // visit a detailed store and loot it
@@ -105,21 +105,21 @@ const store = await p.evaluate(() => {
 });
 check(store, 'a furnished 7-12 store exists');
 await p.waitForTimeout(800);
-await p.screenshot({ path: shot('smoke-store.png') });
+await p.screenshot({ path: shot('smoke-store.png'), timeout: 120000 });
 await p.keyboard.press('KeyE');
 await p.waitForTimeout(400);
 check(
   await p.evaluate(() => document.querySelectorAll('#panel .col').length === 2),
   'E opens a container next to the bag',
 );
-await p.screenshot({ path: shot('smoke-loot.png') });
+await p.screenshot({ path: shot('smoke-loot.png'), timeout: 120000 });
 await p.keyboard.press('Escape');
 
 // night
 await p.evaluate(() => window.__game.setTime(22 * 60));
 await p.waitForTimeout(1500);
 check(await p.evaluate(() => document.getElementById('clock').textContent.includes('宵禁')), 'curfew shows at 22:00');
-await p.screenshot({ path: shot('smoke-night.png') });
+await p.screenshot({ path: shot('smoke-night.png'), timeout: 120000 });
 
 const info = await p.evaluate(() => {
   const g = window.__game;

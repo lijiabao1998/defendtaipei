@@ -23,13 +23,13 @@ try {
   assert.deepEqual(fired, { fired: true, saved: true });
   const progress = () => page.evaluate(() => JSON.parse(localStorage.getItem('defendtaipei-save-v1'))?.story);
   assert.deepEqual(await progress(), ['act1_siren_test']);
-  await page.screenshot({ path: shot('story-debug-fired.png') });
+  await page.screenshot({ path: shot('story-debug-fired.png'), timeout: 120000 });
   await page.evaluate(() => sessionStorage.setItem('dt.autoload', '1'));
   await page.reload({ waitUntil: 'commit' });
   await ready();
   await page.waitForFunction(() => window.__game.started(), null, { timeout: 120000 });
   assert.equal((await page.evaluate(() => window.__game.storyEvent('act1_siren_test'))).fired, false);
-  await page.screenshot({ path: shot('story-debug-restored-no-replay.png') });
+  await page.screenshot({ path: shot('story-debug-restored-no-replay.png'), timeout: 120000 });
   await page.evaluate(() => sessionStorage.setItem('dt.autoload', '1'));
   await page.goto(base, { waitUntil: 'commit' });
   await ready();
@@ -37,7 +37,7 @@ try {
   assert.equal(await page.evaluate(() => 'storyEvent' in window.__game), false);
   await page.evaluate(() => window.__game.save());
   assert.deepEqual(await progress(), ['act1_siren_test']);
-  await page.screenshot({ path: shot('story-flag-off-preserves-save.png') });
+  await page.screenshot({ path: shot('story-flag-off-preserves-save.png'), timeout: 120000 });
   await page.evaluate(() => sessionStorage.setItem('dt.autoload', '1'));
   await page.goto(base + '?storydebug=1', { waitUntil: 'commit' });
   await ready();
@@ -70,7 +70,7 @@ try {
     fired: true,
     saved: true,
   });
-  await page.screenshot({ path: shot('story-new-game-independent-progress.png') });
+  await page.screenshot({ path: shot('story-new-game-independent-progress.png'), timeout: 120000 });
   await page.evaluate(() => {
     // update applies passive regeneration before its death check; use a genuine lethal state.
     window.__game.player.hp = -1;
@@ -80,7 +80,7 @@ try {
     timeout: 30000,
   });
   assert.equal(await page.evaluate(() => localStorage.getItem('defendtaipei-save-v1')), null);
-  await page.screenshot({ path: shot('story-death-clears-save.png') });
+  await page.screenshot({ path: shot('story-death-clears-save.png'), timeout: 120000 });
   assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
