@@ -27,6 +27,8 @@ export function unlockAudio() {
   for (const ev of ['pointerdown', 'touchstart', 'keydown']) addEventListener(ev, go, { passive: true });
 }
 export const sfxCtx = () => ctx();
+/** v24.7 the ambience context's state ('running' once unlocked by a gesture), for checks */
+export const ambState = () => AMB?.state ?? 'none';
 /** how many of each sound were started (checks / debugging) */
 export const auStats: Record<string, number> = {};
 const cnt = (k: string) => (auStats[k] = (auStats[k] || 0) + 1);
@@ -592,4 +594,86 @@ function shelterLife(c: AudioContext) {
     tone(c, o, 'triangle', 900, 880, { d: 0.5, v: 0.12 });
     tone(c, o, 'triangle', 1210, 1190, { d: 0.4, v: 0.06 });
   }
+}
+
+// ---- v24.7 the sounds of a Taipei evening (all synthesised; the melody is Beethoven's public-domain 《給愛麗絲》) ----
+/** 垃圾車: Taipei's garbage trucks play 《給愛麗絲》 through a loudspeaker every evening — a thin square-ish tone,
+ * band-limited like a horn speaker, at a distance `dist` m (louder as it comes closer). One phrase per call. */
+const ELISE: [number, number][] = [
+  [659.25, 1],
+  [622.25, 1],
+  [659.25, 1],
+  [622.25, 1],
+  [659.25, 1],
+  [493.88, 1],
+  [587.33, 1],
+  [523.25, 1],
+  [440, 2],
+  [261.63, 1],
+  [329.63, 1],
+  [440, 1],
+  [493.88, 2],
+  [329.63, 1],
+  [415.3, 1],
+  [493.88, 1],
+  [523.25, 2],
+  [329.63, 1],
+  [659.25, 1],
+  [622.25, 1],
+  [659.25, 1],
+  [622.25, 1],
+  [659.25, 1],
+  [493.88, 1],
+  [587.33, 1],
+  [523.25, 1],
+  [440, 2],
+];
+export function garbageTruck(dist: number, indoor: boolean) {
+  const c = ctx(true);
+  if (!c || c.state !== 'running' || dist > 220) return 0;
+  cnt('garbage_truck');
+  const v = Math.max(0.02, 0.16 * (1 - dist / 220)) * (indoor ? 0.45 : 1);
+  const o = ambOut(c, v);
+  const bp = c.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = 1300;
+  bp.Q.value = 0.8;
+  bp.connect(o);
+  const beat = 0.19;
+  let t = 0;
+  for (const [f, n] of ELISE) {
+    tone(c, bp, 'square', f, f, { at: t, a: 0.01, d: beat * n * 0.9, v: 0.5 });
+    t += beat * n;
+  }
+  return t;
+}
+/** a temple in the evening: a struck bronze bell, the wooden fish (木魚) pulse, a low chanting drone */
+export function temple(dist: number) {
+  const c = ctx(true);
+  if (!c || c.state !== 'running' || dist > 70) return;
+  cnt('temple');
+  const v = 0.18 * (1 - dist / 70);
+  const o = ambOut(c, v);
+  // bell: inharmonic partials with a long decay
+  for (const [f, a] of [
+    [196, 0.6],
+    [523, 0.3],
+    [851, 0.18],
+    [1210, 0.1],
+  ] as [number, number][])
+    tone(c, o, 'sine', f, f * 0.995, { a: 0.004, d: 4.5, v: a });
+  // 木魚: dry knocks
+  for (let i = 0; i < 8; i++)
+    burst(c, o, { type: 'bandpass', hz: 900, q: 6 }, { at: 1.2 + i * 0.45, a: 0.002, d: 0.08, v: 0.5 });
+  // chanting drone (a fifth, slowly swelling)
+  for (const f of [110, 165]) tone(c, o, 'triangle', f, f, { at: 0.8, a: 1.5, d: 4.5, v: 0.12 });
+}
+/** thunder rolling across the city during a downpour */
+export function thunder(indoor: boolean) {
+  const c = ctx(true);
+  if (!c || c.state !== 'running') return;
+  cnt('thunder');
+  const o = ambOut(c, indoor ? 0.25 : 0.45);
+  burst(c, o, { type: 'lowpass', hz: 220 }, { a: 0.05, d: 3.2, v: 1 }, 0.35);
+  burst(c, o, { type: 'lowpass', hz: 90 }, { at: 0.4, a: 0.3, d: 3.8, v: 0.8 }, 0.25);
 }

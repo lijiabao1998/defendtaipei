@@ -221,3 +221,74 @@ function pipPts(pt: V2, poly: V2[]) {
   }
   return c;
 }
+
+// v24.9 the neighbours seen from upstairs: the off-map floor used to float alone above a paved plane. Now the
+// buildings within ~45 m are copied around it as plain extruded blocks (walls + roof), at their real heights
+// relative to this floor — lower roofs spread out below the windows, taller walk-ups rise beside you. One merged,
+// vertex-coloured mesh (one draw call), shadow-receiving only; the camera cutaway (occlusion.ts) applies as usual.
+const nbMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 });
+const ROOFS = [0x8a9a7a, 0x9a9a94, 0x7a8a9a, 0xa89a86, 0x6f8a6a, 0xb0a890];
+export function buildNeighbours(o: {
+  list: { pts: V2[]; h: number }[];
+  /** world → off-map translation (the same one applied to this building) */
+  off: V2;
+  /** height of this floor above the street */
+  floorH: number;
+  seed: number;
+  /** this building's centre (off-map coordinates): neighbours on the camera side are kept below the floor */
+  centre?: V2;
+}) {
+  const r = hash(o.seed ^ 0x2c1b3c6d);
+  const parts: THREE.BufferGeometry[] = [];
+  const y0 = -o.floorH - 0.02;
+  for (const b of o.list.slice(0, 70)) {
+    let y1 = b.h - o.floorH;
+    if (y1 < y0 + 0.5 || b.pts.length < 3) continue;
+    const pts = b.pts.map(([x, z]) => [x + o.off[0], z + o.off[1]] as V2);
+    // between the camera (it looks from +x +z) and this floor: keep it below the floor, like the street cutaway
+    if (o.centre) {
+      const cx = pts.reduce((a, q) => a + q[0], 0) / pts.length - o.centre[0],
+        cz = pts.reduce((a, q) => a + q[1], 0) / pts.length - o.centre[1];
+      if (cx + cz > 3 && Math.abs(cx - cz) < 30) y1 = Math.min(y1, -0.4);
+      if (y1 < y0 + 0.5) continue;
+    }
+    const wall = 0x8a8478 - Math.floor(r() * 3) * 0x080808;
+    const win = 0x3a4048; // window bands, one per storey
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i],
+        c = pts[(i + 1) % pts.length];
+      const L = Math.hypot(c[0] - a[0], c[1] - a[1]);
+      if (L < 0.05) continue;
+      let nx = (c[1] - a[1]) / L,
+        nz = -(c[0] - a[0]) / L;
+      if (pipPts([(a[0] + c[0]) / 2 + nx * 0.2, (a[1] + c[1]) / 2 + nz * 0.2], pts)) ((nx = -nx), (nz = -nz));
+      parts.push(quad(a, c, y0, y1, [nx, nz], wall));
+      // a dark window band on every storey (aluminium windows behind 鐵窗, seen from a distance)
+      if (L > 2.2)
+        for (let y = y0 + 3.8 + 0.9; y + 1.2 < y1; y += 3.2) {
+          const ins = 0.4 / L;
+          const p0: V2 = [a[0] + (c[0] - a[0]) * ins + nx * 0.03, a[1] + (c[1] - a[1]) * ins + nz * 0.03],
+            p1: V2 = [c[0] - (c[0] - a[0]) * ins + nx * 0.03, c[1] - (c[1] - a[1]) * ins + nz * 0.03];
+          parts.push(quad(p0, p1, y, y + 1.2, [nx, nz], win));
+        }
+    }
+    const sh = new THREE.Shape(pts.map(p => new THREE.Vector2(p[0], -p[1])));
+    const top = new THREE.ShapeGeometry(sh).rotateX(-Math.PI / 2).translate(0, y1, 0);
+    top.deleteAttribute('uv');
+    top.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(top.attributes.position.count * 2), 2));
+    parts.push(paint(top, ROOFS[Math.floor(r() * ROOFS.length)]));
+    // roof life: a water tank, often a 頂樓加蓋 tin shed
+    const cx = pts.reduce((a, q) => a + q[0], 0) / pts.length,
+      cz = pts.reduce((a, q) => a + q[1], 0) / pts.length;
+    const M = new THREE.Matrix4().makeTranslation(cx, 0, cz);
+    if (r() < 0.7)
+      parts.push(box(0.9, 1.0, 0.9, 1.2, y1 + 0.9, -0.8, [0x2a6ab8, 0xd8d8d0, 0x9aa0a4][Math.floor(r() * 3)], M));
+    if (r() < 0.45)
+      parts.push(box(3.2, 2.3, 3.6, -0.6, y1 + 1.15, 0.6, [0x6a8aa8, 0x7a9a7a, 0x9a9a94][Math.floor(r() * 3)], M));
+  }
+  if (!parts.length) return null;
+  const m = new THREE.Mesh(mergeGeometries(parts), nbMat);
+  m.receiveShadow = true;
+  parts.forEach(q => q.dispose());
+  return m;
+}
