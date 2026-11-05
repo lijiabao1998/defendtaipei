@@ -19,16 +19,35 @@ export type ItemDef = {
   roc?: boolean;
   cap?: number;
   mag?: number;
+  /** v24.2 cooks into this item on a 卡式爐 (one butane can each) */
+  cook?: string;
+  /** v24.2 cannot be eaten / drunk as it is: cook it first */
+  raw?: boolean;
+  /** v24.2 fresh food: goes bad in the humid heat once the power (refrigeration) has been out a day */
+  perish?: boolean;
+  /** v24.2 chance (0..1) of an upset stomach when consumed as it is */
+  risk?: number;
 };
 // All brand names are parodies / fictional.
 export const ITEMS: Record<string, ItemDef> = {
   can: { name: tr('肉醬罐頭', 'Canned meat sauce'), w: 0.4, kind: 'food', hunger: 30 },
-  noodle: { name: tr('紅燒牛肉泡麵', 'Braised beef instant noodles'), w: 0.15, kind: 'food', hunger: 20, thirst: -5 },
+  noodle: {
+    name: tr('紅燒牛肉泡麵', 'Braised beef instant noodles'),
+    w: 0.15,
+    kind: 'food',
+    hunger: 20,
+    thirst: -5,
+    cook: 'hotnoodle',
+    desc: tr(
+      '可以乾吃；用卡式爐煮更飽，也不會越吃越渴',
+      'Edible dry; cooked on a camping stove it fills you more and does not leave you thirsty.',
+    ),
+  },
   cupnoodle: { name: tr('好吃杯麵', 'Haochi cup noodles'), w: 0.12, kind: 'food', hunger: 16, thirst: -3 },
-  bento: { name: tr('排骨便當', 'Pork chop bento'), w: 0.5, kind: 'food', hunger: 45 },
+  bento: { name: tr('排骨便當', 'Pork chop bento'), w: 0.5, kind: 'food', hunger: 45, perish: true },
   ration: { name: tr('自熱軍用口糧', 'Self-heating field ration'), w: 0.4, kind: 'food', hunger: 40 },
-  rice: { name: tr('三角飯糰', 'Triangle rice ball'), w: 0.15, kind: 'food', hunger: 18 },
-  bread: { name: tr('菠蘿麵包', 'Pineapple bun'), w: 0.12, kind: 'food', hunger: 15 },
+  rice: { name: tr('三角飯糰', 'Triangle rice ball'), w: 0.15, kind: 'food', hunger: 18, perish: true },
+  bread: { name: tr('菠蘿麵包', 'Pineapple bun'), w: 0.12, kind: 'food', hunger: 15, perish: true },
   snack: {
     name: tr('怪怪點心餅', 'Guai-Guai snack crackers'),
     w: 0.1,
@@ -39,18 +58,25 @@ export const ITEMS: Record<string, ItemDef> = {
       'In a green bag. Said to keep machines running smoothly if placed on top.',
     ),
   },
-  egg: { name: tr('茶葉蛋', 'Tea egg'), w: 0.06, kind: 'food', hunger: 12 },
-  oden: { name: tr('關東煮', 'Oden'), w: 0.3, kind: 'food', hunger: 22, thirst: 5 },
-  danbing: { name: tr('蛋餅', 'Danbing (egg crepe)'), w: 0.2, kind: 'food', hunger: 28 },
-  chicken: { name: tr('大雞排', 'Giant fried chicken cutlet'), w: 0.35, kind: 'food', hunger: 38, thirst: -6 },
-  sausage: { name: tr('烤香腸', 'Grilled Taiwanese sausage'), w: 0.12, kind: 'food', hunger: 18 },
+  egg: { name: tr('茶葉蛋', 'Tea egg'), w: 0.06, kind: 'food', hunger: 12, perish: true },
+  oden: { name: tr('關東煮', 'Oden'), w: 0.3, kind: 'food', hunger: 22, thirst: 5, perish: true },
+  danbing: { name: tr('蛋餅', 'Danbing (egg crepe)'), w: 0.2, kind: 'food', hunger: 28, perish: true },
+  chicken: {
+    name: tr('大雞排', 'Giant fried chicken cutlet'),
+    w: 0.35,
+    kind: 'food',
+    hunger: 38,
+    thirst: -6,
+    perish: true,
+  },
+  sausage: { name: tr('烤香腸', 'Grilled Taiwanese sausage'), w: 0.12, kind: 'food', hunger: 18, perish: true },
   pineapple: { name: tr('鳳梨酥', 'Pineapple cake'), w: 0.1, kind: 'food', hunger: 14 },
   water: { name: tr('水源山礦泉水', 'Shuiyuanshan mineral water'), w: 0.6, kind: 'drink', thirst: 40 },
   tea: { name: tr('茶裡旺綠茶', 'Chaliwang green tea'), w: 0.6, kind: 'drink', thirst: 32, fatigue: -4 },
   sport: { name: tr('舒跳運動飲料', 'Shutiao sports drink'), w: 0.6, kind: 'drink', thirst: 34, fatigue: -5 },
-  milktea: { name: tr('珍珠奶茶', 'Bubble milk tea'), w: 0.7, kind: 'drink', thirst: 25, hunger: 12 },
+  milktea: { name: tr('珍珠奶茶', 'Bubble milk tea'), w: 0.7, kind: 'drink', thirst: 25, hunger: 12, perish: true },
   coffee: { name: tr('藍山罐裝咖啡', 'Canned Blue Mountain coffee'), w: 0.3, kind: 'drink', thirst: 10, fatigue: -25 },
-  soymilk: { name: tr('冰豆漿', 'Iced soy milk'), w: 0.5, kind: 'drink', thirst: 28, hunger: 6 },
+  soymilk: { name: tr('冰豆漿', 'Iced soy milk'), w: 0.5, kind: 'drink', thirst: 28, hunger: 6, perish: true },
   betel: {
     name: tr('檳榔', 'Betel nut'),
     w: 0.05,
@@ -603,9 +629,83 @@ export const ITEMS: Record<string, ItemDef> = {
     name: tr('雨水（寶特瓶裝）', 'Rainwater (plastic bottle)'),
     w: 0.6,
     kind: 'drink',
+    cook: 'boiled',
+    risk: 0.35,
     thirst: 30,
     desc: tr('接來的雨水，沒煮過，但總比沒有好', 'Collected rainwater. Not boiled, but better than nothing.'),
   },
+  // ---- v24.2 food you have to work for: Taipei pantry staples, a camping stove, and what it cooks ----
+  cstove: {
+    name: tr('卡式爐', 'Portable butane stove'),
+    w: 1.6,
+    kind: 'tool',
+    desc: tr(
+      '台灣家家戶戶吃火鍋用的那台。配卡式瓦斯罐：煮白米、生雞蛋、麵線、泡麵，把雨水煮成開水',
+      'The one every Taiwanese family keeps for hot pot. With a butane can: cook rice, eggs, vermicelli and noodles, or boil rainwater.',
+    ),
+  },
+  butane: {
+    name: tr('卡式瓦斯罐', 'Butane can'),
+    w: 0.35,
+    kind: 'tool',
+    desc: tr('卡式爐用，一罐煮一次', 'For the camping stove; one can per meal.'),
+  },
+  rawrice: {
+    name: tr('白米（一包）', 'Bag of rice'),
+    w: 1.0,
+    kind: 'food',
+    hunger: 0,
+    raw: true,
+    cook: 'cookedrice',
+    desc: tr(
+      '生米不能吃。用卡式爐煮成一鍋白飯，或帶回避難所讓阿嬤煮給大家',
+      'Inedible raw. Cook it on a camping stove, or bring it home for Grandma to cook for everyone.',
+    ),
+  },
+  cookedrice: {
+    name: tr('一鍋白飯', 'Pot of cooked rice'),
+    w: 0.9,
+    kind: 'food',
+    hunger: 50,
+    thirst: -2,
+    perish: true,
+  },
+  rawegg: {
+    name: tr('生雞蛋', 'Raw egg'),
+    w: 0.06,
+    kind: 'food',
+    hunger: 6,
+    risk: 0.3,
+    cook: 'friedegg',
+    desc: tr('生吃可能拉肚子，煎成荷包蛋比較安全', 'Raw eggs may upset your stomach; fry them first.'),
+  },
+  friedegg: { name: tr('荷包蛋', 'Fried egg'), w: 0.06, kind: 'food', hunger: 15, perish: true },
+  mianxian: {
+    name: tr('紅麵線（乾）', 'Dried red vermicelli'),
+    w: 0.3,
+    kind: 'food',
+    hunger: 0,
+    raw: true,
+    cook: 'mianxianhot',
+    desc: tr('萬華麵線攤用的那種，要煮過才能吃', 'The kind the vermicelli stalls of Wanhua use. Needs cooking.'),
+  },
+  mianxianhot: { name: tr('一碗煮麵線', 'Bowl of hot vermicelli'), w: 0.4, kind: 'food', hunger: 32, thirst: 8 },
+  hotnoodle: {
+    name: tr('煮好的泡麵', 'Cooked instant noodles'),
+    w: 0.35,
+    kind: 'food',
+    hunger: 30,
+    thirst: 6,
+    fatigue: -4,
+    desc: tr('熱的，有一點點家的味道', 'Hot. Tastes a little like home.'),
+  },
+  boiled: { name: tr('開水（寶特瓶裝）', 'Boiled water (plastic bottle)'), w: 0.6, kind: 'drink', thirst: 40 },
+  cracker: { name: tr('蘇打餅乾', 'Soda crackers'), w: 0.2, kind: 'food', hunger: 12, thirst: -4 },
+  roufong: { name: tr('肉鬆罐', 'Jar of pork floss'), w: 0.25, kind: 'food', hunger: 20, thirst: -3 },
+  peanutcan: { name: tr('花生麵筋罐頭', 'Canned gluten with peanuts'), w: 0.3, kind: 'food', hunger: 24 },
+  driedtofu: { name: tr('滷豆干', 'Braised dried tofu'), w: 0.15, kind: 'food', hunger: 12 },
+  mantou: { name: tr('山東饅頭', 'Shandong steamed bun'), w: 0.2, kind: 'food', hunger: 20, perish: true },
+  canfruit: { name: tr('鳳梨罐頭', 'Canned pineapple'), w: 0.45, kind: 'food', hunger: 10, thirst: 12 },
 };
 export const LOOT: Record<string, [string, number, number][]> = {
   store: [
@@ -620,6 +720,9 @@ export const LOOT: Record<string, [string, number, number][]> = {
     ['bento', 2, 1],
     ['pill', 1, 1],
     ['snack', 3, 2],
+    ['cracker', 2, 2],
+    ['driedtofu', 2, 2],
+    ['butane', 1, 2],
   ],
   pharmacy: [
     ['cig', 1, 1],
@@ -653,6 +756,12 @@ export const LOOT: Record<string, [string, number, number][]> = {
     ['lipo', 1, 1],
     ['vtx', 1, 1],
     ['frame', 1, 1],
+    ['rawrice', 2, 1],
+    ['rawegg', 1, 4],
+    ['cracker', 1, 1],
+    ['roufong', 1, 1],
+    ['butane', 1, 2],
+    ['cstove', 1, 1],
   ],
   police: [
     ['tmap', 2, 1],
@@ -677,6 +786,10 @@ export const LOOT: Record<string, [string, number, number][]> = {
     ['tissue', 2, 2],
     ['can', 2, 2],
     ['pineapple', 2, 2],
+    ['cracker', 2, 2],
+    ['peanutcan', 2, 2],
+    ['roufong', 1, 1],
+    ['canfruit', 1, 1],
   ],
   counter: [
     ['egg', 5, 4],
@@ -697,6 +810,11 @@ export const LOOT: Record<string, [string, number, number][]> = {
     ['tissue', 3, 2],
     ['water', 3, 2],
     ['tea', 2, 2],
+    ['rawrice', 3, 1],
+    ['mianxian', 2, 2],
+    ['peanutcan', 2, 2],
+    ['butane', 2, 3],
+    ['cstove', 1, 1],
   ],
   betelcase: [
     ['betel', 8, 6],
@@ -708,6 +826,8 @@ export const LOOT: Record<string, [string, number, number][]> = {
     ['soymilk', 5, 3],
     ['milktea', 2, 1],
     ['rice', 2, 2],
+    ['mantou', 3, 3],
+    ['rawegg', 2, 6],
   ],
   stall: [
     ['chicken', 4, 2],
@@ -721,6 +841,12 @@ export const LOOT: Record<string, [string, number, number][]> = {
     ['knife', 3, 1],
     ['soymilk', 1, 1],
     ['egg', 2, 3],
+    ['rawrice', 3, 1],
+    ['rawegg', 3, 6],
+    ['mianxian', 1, 1],
+    ['cstove', 2, 1],
+    ['butane', 3, 3],
+    ['roufong', 1, 1],
   ],
   wardrobe: [
     ['bandage', 2, 1],
@@ -744,10 +870,15 @@ export const LOOT: Record<string, [string, number, number][]> = {
     ['knife', 2, 1],
     ['bat', 1, 1],
     ['bandage', 1, 1],
+    ['cstove', 2, 1],
+    ['butane', 3, 4],
   ],
   altar: [
     ['pineapple', 4, 3],
     ['can', 2, 1],
     ['tea', 2, 2],
+    ['peanutcan', 2, 2],
+    ['canfruit', 2, 1],
+    ['cracker', 1, 1],
   ],
 };

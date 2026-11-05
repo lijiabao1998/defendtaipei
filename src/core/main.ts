@@ -2002,6 +2002,26 @@ function rollLoot(type: string, r: () => number) {
       }
     }
   }
+  return spoilRolled(items, r);
+}
+/**
+ * v24.2 once the power has been out a full day, fresh food found in fridges, counters and stalls has gone bad in
+ * the heat: most of it turns into 腐壞的食物, the rest was thrown away (deterministic: same stream as the roll)
+ */
+function spoilRolled(items: Record<string, number>, r: () => number) {
+  let late = false;
+  try {
+    late = gameMin >= POWER_OFF + 1440;
+  } catch {
+    return items; // rolled while the module is still booting: nothing has spoiled yet
+  }
+  if (!late) return items;
+  for (const k of Object.keys(items)) {
+    if (!ITEMS[k]?.perish) continue;
+    const n = items[k];
+    delete items[k];
+    if (r() < 0.75) items.rotten = (items.rotten || 0) + Math.min(2, n);
+  }
   return items;
 }
 const dTile = new Map<string, { sols: Sol[]; conts: Cont[]; marks: THREE.Object3D[]; cps: V2[] }>();
@@ -3233,6 +3253,28 @@ let NOSAVE = false;
 let surv: SV.SurvState = SV.newSurv();
 let survOpen = false;
 let survDay = -1; // v21.5.1 menu pause (local only)
+/** v24.2 06:00 after a day without power: half of each fresh food stack in the bag and the shelter stash spoils */
+function spoilCarried() {
+  if (gameMin < POWER_OFF + 1440) return;
+  let n = 0;
+  for (const bag of [player.inv, surv.stash])
+    for (const k of Object.keys(bag)) {
+      if (!ITEMS[k]?.perish || !bag[k]) continue;
+      const rot = Math.ceil(bag[k] / 2);
+      bag[k] -= rot;
+      if (bag[k] <= 0) delete bag[k];
+      bag.rotten = (bag.rotten || 0) + rot;
+      n += rot;
+    }
+  if (n)
+    log(
+      tr(
+        `🦟 沒電沒冰箱，天氣又濕熱：${n} 份新鮮食物壞掉了。罐頭、乾貨、白米放得久。`,
+        `🦟 No power, no fridge, and the humid heat: ${n} portions of fresh food spoiled. Cans, dry goods and rice keep.`,
+      ),
+      '#c9a',
+    );
+}
 const SPEEDS = [1, 3, 20];
 function dangerNear() {
   return sols.some(
@@ -4367,6 +4409,49 @@ const weight = () => Object.entries(player.inv).reduce((s, [k, n]) => s + ITEMS[
 function addItem(k: string, n = 1) {
   player.inv[k] = (player.inv[k] || 0) + n;
 }
+/** v24.2 a 卡式爐 and a butane can in the bag */
+const canCook = () => (player.inv.cstove || 0) > 0 && (player.inv.butane || 0) > 0;
+/**
+ * v24.2 cook one thing on the camping stove (one butane can): the item asked for, or the most needed one — boil
+ * rainwater when thirst is the problem, else rice, vermicelli, eggs, then instant noodles
+ */
+function cookOne(k?: string) {
+  if (!player.inv.cstove) {
+    log(tr('沒有卡式爐，沒辦法煮', 'You have no camping stove to cook with.'), '#f99');
+    return false;
+  }
+  if (!player.inv.butane) {
+    log(tr('卡式瓦斯罐用完了，找雜貨店或五金行', 'Out of butane cans. Try a grocery or hardware store.'), '#f99');
+    return false;
+  }
+  const order =
+    player.thirst < player.hunger
+      ? ['rainwater', 'rawrice', 'mianxian', 'rawegg', 'noodle']
+      : ['rawrice', 'mianxian', 'rawegg', 'noodle', 'rainwater'];
+  const what = k ?? order.find(q => (player.inv[q] || 0) > 0);
+  if (!what || !ITEMS[what]?.cook || !player.inv[what]) {
+    log(
+      tr(
+        '背包裡沒有要煮的東西（白米、麵線、生雞蛋、泡麵、雨水）',
+        'Nothing to cook (rice, vermicelli, raw eggs, instant noodles, rainwater).',
+      ),
+      '#f99',
+    );
+    return false;
+  }
+  const out = ITEMS[what].cook!;
+  if (--player.inv[what] <= 0) delete player.inv[what];
+  if (--player.inv.butane <= 0) delete player.inv.butane;
+  addItem(out, 1);
+  noise(player.pos.x, player.pos.z, 6); // the hiss of the burner and the clatter of the pot
+  log(
+    getLanguage() === 'en'
+      ? `🔥 You cook ${ITEMS[what].name} on the stove: ${ITEMS[out].name}.`
+      : `🔥 你用卡式爐煮了${ITEMS[what].name}：${ITEMS[out].name}好了。`,
+    '#ffb070',
+  );
+  return true;
+}
 function useItem(k: string) {
   const d = ITEMS[k];
   if (!player.inv[k]) return;
@@ -4412,6 +4497,9 @@ function useItem(k: string) {
       ),
       '#9f9',
     );
+  } else if (k === 'cstove') {
+    cookOne();
+    renderPanel();
   } else if (k === 'tmap') {
     if (--player.inv[k] <= 0) delete player.inv[k];
     const si = Math.floor(Math.random() * NSEC);
@@ -4465,6 +4553,17 @@ function useItem(k: string) {
         ? `Unloaded ${d.mag} rounds of ${ITEMS[d.ammo].name}`
         : `退出 ${d.mag} 發 ${ITEMS[d.ammo].name}`,
     );
+  } else if (d.raw) {
+    // v24.2 raw rice / dried vermicelli: cook first (with the stove in the bag, cooking is the action)
+    if (canCook()) cookOne(k);
+    else
+      log(
+        getLanguage() === 'en'
+          ? `${d.name} has to be cooked first: you need a camping stove and a butane can.`
+          : `${d.name}要煮過才能吃：需要卡式爐和卡式瓦斯罐。`,
+        '#f99',
+      );
+    renderPanel();
   } else if (d.kind === 'food' || d.kind === 'drink' || d.kind === 'med') {
     player.hunger = clamp(player.hunger + (d.hunger || 0), 0, 100);
     player.thirst = clamp(player.thirst + (d.thirst || 0), 0, 100);
@@ -4476,6 +4575,12 @@ function useItem(k: string) {
     }
     log(getLanguage() === 'en' ? `Used ${d.name}` : `使用了 ${d.name}`);
     if (--player.inv[k] <= 0) delete player.inv[k];
+    // v24.2 unboiled rainwater, raw eggs: maybe an upset stomach
+    if (d.risk && Math.random() < d.risk) {
+      player.hp = clamp(player.hp - 8, 0, 100);
+      player.thirst = clamp(player.thirst - 12, 0, 100);
+      log(tr('肚子一陣絞痛⋯⋯拉肚子了。下次煮過再吃。', 'Stomach cramps... diarrhoea. Cook it next time.'), '#f99');
+    }
   } else if (k === 'bucket') {
     if (indoorAt(player.pos.x, player.pos.z)) {
       log(
@@ -4592,7 +4697,8 @@ function renderPanel() {
       getLanguage() === 'en'
         ? { food: 'Eat', drink: 'Drink', med: 'Heal', melee: 'Equip', gun: 'Equip', ammo: 'Ammo', tool: 'Tool' }
         : { food: '食用', drink: '飲用', med: '治療', melee: '裝備', gun: '裝備', ammo: '彈藥', tool: '工具' };
-    item(inv, k, n, actions[ITEMS[k].kind], () => useItem(k), player.equip === k);
+    const act = ITEMS[k].raw ? tr('煮', 'Cook') : k === 'cstove' ? tr('開火煮', 'Cook') : actions[ITEMS[k].kind];
+    item(inv, k, n, act, () => useItem(k), player.equip === k);
   }
   if (!Object.keys(player.inv).length) empty(inv, tr('空的', 'Empty'));
   const footer = document.createElement('div');
@@ -5963,6 +6069,7 @@ function update(dt: number) {
         water: on => (UT.water = on),
       });
       out.forEach(t => log(t, '#fd9'));
+      spoilCarried();
     }
   }
   player.hunger -= gm * 2.2;
@@ -8257,6 +8364,14 @@ async function boot() {
     damageSol,
     toggleInv,
     addItem,
+    // v24.2 food loop test hooks
+    rollLoot: (t: string, seed: number) => {
+      let x = seed >>> 0;
+      return rollLoot(t, () => (x = (x * 1664525 + 1013904223) >>> 0) / 4294967296);
+    },
+    spoilCarried,
+    cookOne,
+    POWER_OFF,
     armor: () => armor,
     fpv: () => fpv,
     recon: () => recon,

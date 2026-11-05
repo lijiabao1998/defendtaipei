@@ -16,7 +16,7 @@ const G = s => p.evaluate(`(()=>{const g=window.__game;${s}})()`);
 const res = {};
 res.home = await G(`return g.surv().home`);
 await G(
-  `const h=g.surv().home;g.tp(h[0],h[1]);g.addItem('plank',6);g.addItem('cloth',2);g.addItem('scrap',3);g.addItem('gas',1);g.addItem('seeds',1);g.addItem('can',3);g.openSurv('home')`,
+  `const h=g.surv().home;g.tp(h[0],h[1]);g.addItem('plank',6);g.addItem('cloth',2);g.addItem('scrap',3);g.addItem('butane',2);g.addItem('seeds',1);g.addItem('can',3);g.openSurv('home')`,
 );
 await p.waitForTimeout(500);
 for (const a of ['u:boards', 'u:beds', 'u:stove', 'u:planter', 'dep', 'pray'])

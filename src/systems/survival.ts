@@ -35,8 +35,9 @@ export const UPG: Record<Upg, { name: string; cost: Record<string, number>; desc
   },
   stove: {
     name: tr('瓦斯爐', 'Gas stove'),
-    cost: { scrap: 3, gas: 1 },
-    desc: tr('一包米煮成全組的一餐', 'One bag of rice feeds the whole group'),
+    // v24.2 the stove runs on butane cans (was gasoline)
+    cost: { scrap: 2, butane: 2 },
+    desc: tr('一包白米（或麵線）煮成全組的一餐', 'One bag of rice (or vermicelli) feeds the whole group'),
   },
   rain: {
     name: tr('頂樓集雨桶', 'Rooftop rain barrel'),
@@ -69,6 +70,17 @@ export const VAL: Record<string, number> = {
   cloth: 1,
   seeds: 2,
   gas: 3,
+  // v24.2 pantry staples and the camping stove
+  rawrice: 4,
+  butane: 3,
+  cstove: 6,
+  mianxian: 2,
+  peanutcan: 3,
+  roufong: 2,
+  cracker: 1,
+  canfruit: 2,
+  driedtofu: 1,
+  boiled: 1,
 };
 export const TRADE_SPOTS: { name: string; x: number; z: number }[] = [
   { name: tr('龍山寺廟埕・以物易物', 'Longshan Temple courtyard · Barter'), x: -260, z: 392 },
@@ -233,8 +245,9 @@ export function dayTick(s: SurvState, raining: boolean, u: UtilFx) {
   const here = s.group.filter(g => g.here && !g.dead);
   // food: a stove turns one rice into a meal for everyone; otherwise one food item each
   let meals = 0;
-  if (s.upg.stove && (s.stash.rice || 0) > 0) {
-    s.stash.rice--;
+  const pot = ['rawrice', 'mianxian', 'rice'].find(k => (s.stash[k] || 0) > 0);
+  if (s.upg.stove && pot) {
+    s.stash[pot]--;
     meals = here.length;
     out.push(tr('阿嬤用瓦斯爐煮了一鍋稀飯。', 'Grandma cooked a pot of rice porridge on the gas stove.'));
   }
@@ -243,14 +256,28 @@ export function dayTick(s: SurvState, raining: boolean, u: UtilFx) {
       meals--;
       g.hunger = Math.min(100, g.hunger + 45);
     } else {
-      const f = ['can', 'noodle', 'rice', 'cupnoodle', 'snack', 'bento'].find(k => (s.stash[k] || 0) > 0);
+      const f = [
+        'can',
+        'peanutcan',
+        'cookedrice',
+        'noodle',
+        'rice',
+        'cupnoodle',
+        'roufong',
+        'mantou',
+        'cracker',
+        'canfruit',
+        'driedtofu',
+        'snack',
+        'bento',
+      ].find(k => (s.stash[k] || 0) > 0);
       if (f) {
         s.stash[f]--;
         g.hunger = Math.min(100, g.hunger + 35);
       } else g.hunger -= 25;
     }
     g.hunger -= 15;
-    const water = ['water', 'rainwater', 'tea'].find(k => (s.stash[k] || 0) > 0);
+    const water = ['water', 'boiled', 'rainwater', 'tea'].find(k => (s.stash[k] || 0) > 0);
     if (water) s.stash[water]--;
     else g.sick += 12;
     if (g.hunger < 20) ((g.sick += 10), (g.mood -= 10));
