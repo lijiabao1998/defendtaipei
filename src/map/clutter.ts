@@ -498,7 +498,7 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     umax = Math.max(umax, du);
     D = Math.max(D, dv);
   }
-  if (umax - umin < 3 || D < 3) return null;
+  if (umax - umin < 2.2 || D < 2.2) return null; // v24.1 kiosks and tiny lean-tos are searchable too (was 3 m)
   const W = (u: number, v: number): V2 => [O[0] + U[0] * u + N[0] * v, O[1] + U[1] * u + N[1] * v];
   const inside = (u: number, v: number) => ctx.pip(W(u, v), b.pts);
   const area = (b.maxx - b.minx) * (b.maxz - b.minz);
@@ -561,27 +561,29 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
   // stairs to the 2F fit (the furniture used to fill that corner first in almost every building)
   let stairUV: [number, number] | null = null;
   let stairRes: [number, number, number, number] | null = null;
-  if (!opt?.noStair && b.h > 6 && D > 5 && umax - umin > 5) {
-    const sv = back - 1.6;
-    for (const su of [uR - 0.6, uL + 0.6]) {
-      const fits = [
-        [0, 0],
-        [-0.55, -1.15],
-        [0.55, -1.15],
-        [-0.55, 1.15],
-        [0.55, 1.15],
-        [-0.55, -2.1],
-        [0.55, -2.1],
-      ].every(([du, dv]) => inside(su + du, sv + dv));
-      const res: [number, number, number, number] = [su - 0.6, sv - 2.1, su + 0.6, sv + 1.2];
-      const free = !rects.some(q => res[0] < q[2] && res[2] > q[0] && res[1] < q[3] && res[3] > q[1]);
-      if (fits && free && Math.hypot(su, sv) > 2.7) {
-        stairUV = [su, sv];
-        stairRes = res;
-        rects.push(res);
-        break;
+  // v24.1 also narrow 透天 (3.8 m+) and a second / middle depth, so (almost) every multi-storey block has stairs
+  if (!opt?.noStair && b.h > 6 && D > 5 && umax - umin > 3.8) {
+    stairs: for (const sv of [back - 1.6, back - 3.4, D * 0.5])
+      for (const su of [uR - 0.6, uL + 0.6]) {
+        if (sv - 2.1 < 0.8) continue;
+        const fits = [
+          [0, 0],
+          [-0.55, -1.15],
+          [0.55, -1.15],
+          [-0.55, 1.15],
+          [0.55, 1.15],
+          [-0.55, -2.1],
+          [0.55, -2.1],
+        ].every(([du, dv]) => inside(su + du, sv + dv));
+        const res: [number, number, number, number] = [su - 0.6, sv - 2.1, su + 0.6, sv + 1.2];
+        const free = !rects.some(q => res[0] < q[2] && res[2] > q[0] && res[1] < q[3] && res[3] > q[1]);
+        if (fits && free && Math.hypot(su, sv) > 2.7) {
+          stairUV = [su, sv];
+          stairRes = res;
+          rects.push(res);
+          break stairs;
+        }
       }
-    }
   }
   const scatter = (n: number, kinds: ('cloth' | 'glass' | 'paper')[]) => {
     for (let i = 0; i < n; i++) {
@@ -955,6 +957,24 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
           ry,
         ]);
     }
+  }
+  // v24.1 every room has something to search: tiny kiosks / lean-tos whose furniture had no container get a stack
+  // of cardboard boxes (left behind in the hurry) wherever it fits, else a single carton by the door
+  if (!P.conts.length && contCap > 0) {
+    const spots: [number, number][] = [
+      [mid, D * 0.6],
+      [uL + 0.4, D * 0.5],
+      [uR - 0.4, D * 0.5],
+      [mid, D - 0.5],
+    ];
+    if (!spots.some(([u, v]) => put(boxes(r, 2), u, v, 0, 0.6, 0.5, 0.6, { cont: { label: '紙箱', loot: 'home' } })))
+      P.conts.push({
+        id: contId(0),
+        p: W(mid, Math.min(D - 0.4, 1.9)),
+        label: '紙箱',
+        loot: 'home',
+        seed: Math.floor(r() * 1e9),
+      });
   }
   clutterStats.planned++;
   clutterStats.pieces += P.pieces.length;

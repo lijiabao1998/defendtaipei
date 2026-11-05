@@ -706,8 +706,19 @@ type UpState = {
   conts: Cont[];
   /** ground-floor point at the foot of the stairs: map streaming, saving and the HUD use it while upstairs */
   anchor: V2;
+  /** v24.1 floor number (2 = 2F) and the building's top floor */
+  f: number;
+  top: number;
 };
 let up: UpState | null = null;
+/** v24.1 storeys of a building (ground floor = 1), from its modelled height */
+const storeys = (b: { h: number }) => Math.max(1, Math.min(14, Math.round((b.h - GF) / FH) + 1));
+const floorZh = (f: number) =>
+  getLanguage() === 'en'
+    ? f === 1
+      ? 'ground floor'
+      : `floor ${f}`
+    : (['', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '十一', '十二', '十三', '十四'][f] || f) + '樓';
 /** where the player is on the map (the stairwell while upstairs) */
 const mapPos = (): V2 => (up ? up.anchor : [player.pos.x, player.pos.z]);
 // v23.9 20 m bucket grid over the core footprints (rebuilt when blds grows), bldAt is called a lot at boot
@@ -3543,6 +3554,13 @@ function stairAt(): { b: Bld | DEnter; P: CL.Plan } | null {
 }
 /** standing at the top of the stairs (2F) */
 const upLanding = () => !!up && Math.hypot(up.room.land[0] - player.pos.x, up.room.land[1] - player.pos.z) < 1.6;
+/** v24.1 standing at the foot of the flight up to the next floor (closer to it than to the landing) */
+const upFlightFoot = () => {
+  const q = up?.room.upFoot;
+  if (!q) return false;
+  const d = Math.hypot(q[0] - player.pos.x, q[1] - player.pos.z);
+  return d < 1.3 && d < Math.hypot(up!.room.land[0] - player.pos.x, up!.room.land[1] - player.pos.z);
+};
 /** a free ground-floor spot beside the stairwell (the planner keeps the doorway clear as the fallback) */
 function stairFoot(b: Bld | DEnter, P: CL.Plan): V2 {
   const { u, v } = P.stair!;
@@ -3562,6 +3580,30 @@ function stairFoot(b: Bld | DEnter, P: CL.Plan): V2 {
   return planW(P, 0, 1.0);
 }
 function goUp(b: Bld | DEnter, P: CL.Plan) {
+  return goFloor(b, P, 2);
+}
+/** v24.1 the plan-frame spot of the flight up from floor f to f + 1 (beside the opening, toward the room), if it fits */
+function upFlightAt(b: Bld | DEnter, P: CL.Plan): { u: number; v: number } | null {
+  const st = P.stair!;
+  let cu = 0;
+  for (const q of b.pts) cu += (q[0] - P.O[0]) * P.U[0] + (q[1] - P.O[1]) * P.U[1];
+  cu /= b.pts.length;
+  const first = cu > st.u ? 1 : -1;
+  for (const side of [first, -first]) {
+    const u = st.u + side * 1.25;
+    const ok = [
+      [-0.6, -1.2],
+      [0.6, -1.2],
+      [-0.6, 1.2],
+      [0.6, 1.2],
+      [0, -2.1],
+    ].every(([du, dv]) => pip(planW(P, u + du, st.v + dv), b.pts));
+    if (ok) return { u, v: st.v };
+  }
+  return null;
+}
+/** v24.1 build floor f (2 … top) of b off-map and put the player at its landing (from below) or upper flight */
+function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
   const dist = isDEnter(b) ? b : null;
   const off: V2 = [UP.UP_O[0] - b.c[0], UP.UP_O[1] - b.c[1]];
   const T = (q: V2): V2 => [q[0] + off[0], q[1] + off[1]];
@@ -3579,14 +3621,21 @@ function goUp(b: Bld | DEnter, P: CL.Plan) {
     maxz: b.maxz + off[1],
   };
   const st = P.stair!;
-  const seed = ((dist ? dist.id : (b.id + 1) * 2654435761) ^ 0x5bd1e995) >>> 0;
-  const contId = (n: number) => (dist ? `t${dist.key}:${20000 + dist.bi * 64 + n}` : `u${b.id}_${n}`);
-  // same frame as the ground plan (same door), furniture kept off the stair opening and its landing
-  const P2 = CL.plan(
-    bUp,
-    { pip, onRoad: () => false },
-    { seed, contId, reserve: [[st.u - 0.8, st.v - 2.5, st.u + 0.8, st.v + 1.3]], noStair: true },
-  );
+  const top = storeys(b);
+  // 2F keeps its v23.4 seed and container ids (existing saves); higher floors get their own
+  const seed0 = ((dist ? dist.id : (b.id + 1) * 2654435761) ^ 0x5bd1e995) >>> 0;
+  const seed = f === 2 ? seed0 : (seed0 ^ Math.imul(f, 0x9e3779b1)) >>> 0;
+  const contId = (n: number) =>
+    dist
+      ? `t${dist.key}:${20000 * (f - 1) + dist.bi * 64 + n}`
+      : f === 2
+        ? `u${b.id}_${n}`
+        : `u${b.id}_${(f - 2) * 100 + n}`;
+  const fl = f < top ? upFlightAt(b, P) : null;
+  const reserve: [number, number, number, number][] = [[st.u - 0.8, st.v - 2.5, st.u + 0.8, st.v + 1.3]];
+  if (fl) reserve.push([fl.u - 0.75, fl.v - 2.5, fl.u + 0.75, fl.v + 1.3]);
+  // same frame as the ground plan (same door), furniture kept off the stair opening, the upper flight and landings
+  const P2 = CL.plan(bUp, { pip, onRoad: () => false }, { seed, contId, reserve, noStair: true });
   if (!P2) return false;
   const street = (i: number) => {
     const a = b.pts[i],
@@ -3599,7 +3648,15 @@ function goUp(b: Bld | DEnter, P: CL.Plan) {
     if (pip([mx + nx * 0.3, mz + nz * 0.3], b.pts)) ((nx = -nx), (nz = -nz));
     return roadDist(mx + nx * 3, mz + nz * 3) < 4;
   };
-  const room = UP.buildUpstairs({ pts: bUp.pts, F: { O: P2.O, U: P2.U, N: P2.N }, stair: st, street, seed });
+  const room = UP.buildUpstairs({
+    pts: bUp.pts,
+    F: { O: P2.O, U: P2.U, N: P2.N },
+    stair: st,
+    street,
+    seed,
+    floor: f,
+    upFlight: fl,
+  });
   scene.add(room.g);
   const furn = CL.build(P2);
   scene.add(furn);
@@ -3625,14 +3682,21 @@ function goUp(b: Bld | DEnter, P: CL.Plan) {
     c.mesh.visible = false;
     cs.push(c);
   }
-  up = { b, dist, P, room, furn, segs, conts: cs, anchor: stairFoot(b, P) };
-  player.pos.set(room.land[0], 0, room.land[1]);
+  up = { b, dist, P, room, furn, segs, conts: cs, anchor: stairFoot(b, P), f, top };
+  const at = fromAbove && room.upFoot ? room.upFoot : room.land;
+  player.pos.set(at[0], 0, at[1]);
   player.vel.set(0, 0, 0);
   player.cover = null;
-  log(tr('你走上二樓。', 'You go up to the second floor.'), '#fd9');
+  log(
+    fromAbove
+      ? tr(`你走下樓梯，回到${floorZh(f)}。`, `You go back down to the ${floorZh(f)}.`)
+      : tr(`你走上${floorZh(f)}。`, `You go up to the ${floorZh(f)}.`),
+    '#fd9',
+  );
   return true;
 }
-function goDown() {
+/** v24.1 leave the current upper floor: keep what was taken, drop its meshes, collision and containers */
+function leaveFloor() {
   const u = up!;
   UP.disposeUpstairs(u.room);
   CL.dispose(u.furn);
@@ -3650,7 +3714,14 @@ function goDown() {
     if (i >= 0) conts.splice(i, 1);
   }
   up = null;
-  const q = stairFoot(u.b, u.P);
+  return u;
+}
+function goDown() {
+  const u = leaveFloor();
+  toGround(u.b, u.P);
+}
+function toGround(b: Bld | DEnter, P: CL.Plan) {
+  const q = stairFoot(b, P);
   player.pos.set(q[0], 0, q[1]);
   player.vel.set(0, 0, 0);
   log(tr('你走下樓梯，回到一樓。', 'You go back down to the ground floor.'), '#fd9');
@@ -3658,8 +3729,19 @@ function goDown() {
 /** [E] at the foot of the stairs / at the top: change floor */
 function upToggle() {
   if (up) {
+    const { b, P, f } = up;
+    if (upFlightFoot()) {
+      leaveFloor();
+      // the next floor always plans (same footprint), but never strand the player off-map if it does not
+      if (!goFloor(b, P, f + 1)) goFloor(b, P, f);
+      return true;
+    }
     if (!upLanding()) return false;
-    goDown();
+    if (f <= 2) goDown();
+    else {
+      leaveFloor();
+      if (!goFloor(b, P, f - 1, true)) toGround(b, P);
+    }
     return true;
   }
   const s = stairAt();
@@ -6619,9 +6701,12 @@ function drawHud(inside: Bld | null) {
     }
   }
   const rd = roofB ? null : roofDoor();
-  if (up && upLanding() && !panelOpen) {
+  if (up && upFlightFoot() && !panelOpen) {
     pr.style.display = 'block';
-    pr.textContent = tr('[E] 下樓（回一樓）', '[E] Go downstairs (ground floor)');
+    pr.textContent = tr(`[E] 上樓（${floorZh(up.f + 1)}）`, `[E] Go upstairs (${floorZh(up.f + 1)})`);
+  } else if (up && upLanding() && !panelOpen) {
+    pr.style.display = 'block';
+    pr.textContent = tr(`[E] 下樓（回${floorZh(up.f - 1)}）`, `[E] Go downstairs (${floorZh(up.f - 1)})`);
   } else if (!up && !panelOpen && stairAt()) {
     pr.style.display = 'block';
     pr.textContent = tr('[E] 上樓（二樓）', '[E] Go upstairs (2nd floor)');
@@ -7888,6 +7973,7 @@ async function boot() {
         d: isDEnter(b) ? b.key + '#' + b.bi : 'core',
         c: b.c,
         foot: stairFoot(b, groundPlan(b)!),
+        top: storeys(b),
       })),
     // v23.6 public buildings in the core: kind, a point just inside the door, furnished now?, its containers
     coreKinds: () =>
@@ -7909,6 +7995,9 @@ async function boot() {
         ? {
             up: true,
             land: up.room.land,
+            upFoot: up.room.upFoot,
+            f: up.f,
+            top: up.top,
             anchor: up.anchor,
             conts: up.conts.map(c => [c.id, c.label, Object.keys(c.items).length]),
             pieces: up.furn.children.length,
@@ -8046,6 +8135,23 @@ async function boot() {
     CAM_OFF,
     setTime: (m: number) => {
       gameMin = m;
+    },
+    // v24.1 every building enterable: coverage of doors / furnished plans / stairwells (core and loaded tiles)
+    enterStats: () => {
+      const core = { n: 0, door: 0, plan: 0, stair: 0, conts: 0, empty: 0, fill: 0, fillDoor: 0 };
+      for (const b of blds) {
+        core.n++;
+        if ((b as any).fill) core.fill++;
+        if (!b.door) continue;
+        core.door++;
+        if ((b as any).fill) core.fillDoor++;
+        const P = (b as any).clut as CL.Plan | undefined;
+        if (P || b.detailed) core.plan++;
+        if (P?.stair) core.stair++;
+        if (P) core.conts += P.conts.length;
+        if (P && !P.conts.length) core.empty++;
+      }
+      return { core, district: district.enterStats() };
     },
     // v24.0 daylight test hook
     light: () => ({

@@ -18,6 +18,8 @@ const EN_LABELS: Readonly<Record<string, string>> = {
   警用置物櫃: 'Police locker',
   辦公桌抽屜: 'Desk drawer',
   檔案櫃: 'Filing cabinet',
+  // v24.1 fallback container in tiny rooms
+  紙箱: 'Cardboard boxes',
   貨架: 'Shelves',
   櫥櫃: 'Cupboard',
   遺留物: 'Left-behind belongings',
