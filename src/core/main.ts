@@ -28,6 +28,7 @@ import { ITEMS, LOOT } from '../systems/items';
 import { iconURL, iconMat } from '../ui/icons';
 import { GF, FH, ARC, arcadeFits, buildArcade, flushArcades, setArcadeDeps, arcadeAudit } from '../map/arcade';
 import { RemnantSystem, type RemSave } from '../npc/remnant';
+import { JapanSupport, JP_LABEL, type JpKind } from '../systems/japan';
 import {
   makeRig,
   animate,
@@ -2953,6 +2954,10 @@ function npcInteract() {
     return true;
   }
   if (rem?.talk()) return true; // v24.3 國軍殘部
+  if (liaisonNear()) {
+    talkLiaison(); // v24.4 自衛隊連絡官
+    return true;
+  }
   return false;
 }
 function npcPrompt() {
@@ -2963,7 +2968,191 @@ function npcPrompt() {
       : tr('[E] 和聯絡人交談', '[E] Talk to the contact');
   if (elderRig && Math.hypot(P.x - elderPos[0], P.z - elderPos[1]) < 2.4)
     return tr('[E] 和廟口阿伯聊天', '[E] Chat with the old man at the temple');
+  if (liaisonNear()) return tr('[E] 和自衛隊連絡官高橋一尉交談', '[E] Talk to JSDF liaison Captain Takahashi');
   return rem?.prompt() || '';
+}
+// ---------- v24.4 日本支援: a JSDF liaison (fictional) with a field radio; airdrops, F-2 strikes, AH-64DJ cover ----------
+let jp: JapanSupport | null = null;
+let liaison: { rig: Rig; p: V2 } | null = null;
+let jpDrops = 0;
+const liaisonNear = () => !!liaison && Math.hypot(player.pos.x - liaison.p[0], player.pos.z - liaison.p[1]) < 2.4;
+/** just inside the door of a core office / home 140–280 m from the spawn (deterministic) */
+function liaisonSpot(c: V2): V2 | null {
+  const cand = blds
+    .filter(b => b.door && !(b as any).fill)
+    .map(b => ({ b, d: Math.hypot(b.c[0] - c[0], b.c[1] - c[1]) }))
+    .filter(q => q.d > 140 && q.d < 280)
+    .sort((a, b) => a.b.id - b.b.id);
+  for (const { b } of cand) {
+    const dr = b.door!;
+    const ex = dr.c[0] - dr.a[0],
+      ez = dr.c[1] - dr.a[1],
+      el = Math.hypot(ex, ez) || 1;
+    let n: V2 = [-ez / el, ex / el];
+    if (!pip([dr.p[0] + n[0] * 0.6, dr.p[1] + n[1] * 0.6], b.pts)) n = [-n[0], -n[1]];
+    const q: V2 = [dr.p[0] + n[0] * 1.6, dr.p[1] + n[1] * 1.6];
+    if (pip(q, b.pts) && walkable(q[0], q[1])) return q;
+  }
+  return null;
+}
+function setupJapan(c: V2) {
+  if (jp) return;
+  jp = new JapanSupport({
+    scene,
+    player: () => player.pos,
+    foes: () => sols,
+    hit: (f, dmg) => damageSol(f as Sol, dmg, false),
+    blast: p => blast(p, true),
+    freeNear: p => freeNear(p),
+    landed: p => jpLanded(p),
+    log,
+    noise,
+    gunSound: d => AU.gunshot('mg', d, indoorAt(player.pos.x, player.pos.z)),
+    boomSound: d => AU.shellBoom(d, indoorAt(player.pos.x, player.pos.z), 1.4),
+  });
+  const p = liaisonSpot(c);
+  if (!p) return;
+  // JGSDF type III camouflage greens and browns; officer's cap-less helmet like the others
+  const rig = makeRig({ gender: 'm', hair: 0x111111, top: 0x5f5d3e, bottom: 0x4f4a33, shoes: 0x1a1a14, soldier: true });
+  setWeapon(rig, 'type20');
+  rig.root.position.set(p[0], 0, p[1]);
+  scene.add(rig.root);
+  liaison = { rig, p };
+}
+function revealLiaison(say: boolean) {
+  if (!liaison) return;
+  const first = !(surv as any).jpKnown;
+  (surv as any).jpKnown = 1;
+  gmap?.intel('jpl', liaison.p[0], liaison.p[1], 'sup', tr('自衛隊連絡官', 'JSDF liaison'));
+  if (say && first)
+    log(
+      tr(
+        '📍 「日本的連絡官躲在附近一棟樓裡，他有一台能叫飛機的無線電。」（已標上地圖）',
+        '📍 “There is a Japanese liaison officer hiding in a building nearby. He has a radio that can call aircraft.” (marked on your map)',
+      ),
+      '#ffd27a',
+    );
+}
+function talkLiaison() {
+  const st = surv as any;
+  const first = !st.jpMet;
+  st.jpMet = 1;
+  revealLiaison(false);
+  if (first) {
+    addItem('jpradio', 1);
+    addItem('battery', 2);
+    dlg(
+      tr('🎌 高橋一尉（陸上自衛隊 連絡幹部）', '🎌 Captain Takahashi (JGSDF liaison officer)'),
+      tr(
+        '「陸上自衛隊、連絡幹部の高橋一尉です。」——「我是自衛隊的連絡官高橋。日本不會袖手旁觀。這台無線電給你：需要的時候，天空會有人回應。電池省著用，無線電一響，附近的巡邏也會聽到。」（獲得：自衛隊野戰無線電、電池 ×2）',
+        '“I am Captain Takahashi, JGSDF liaison officer. Japan will not stand by and watch. Take this radio: when you need it, someone in the sky will answer. Go easy on the batteries — every call is heard by the patrols nearby.” (Received: JSDF field radio, 2 batteries)',
+      ),
+      [],
+    );
+    return;
+  }
+  const lines = [
+    tr('「大丈夫、必ず助けが来ます。」——別擔心，救援一定會來。', '“Daijōbu. Help will come — I promise you that.”'),
+    tr('「你們守住的每一條巷子，我們都看得到。」', '“Every alley you hold, we can see it from up there.”'),
+    tr(
+      '「空投箱落地會冒紅煙。拿了就走，別在那裡待太久。」',
+      '“The drop crate puts out red smoke when it lands. Grab it and go — do not linger.”',
+    ),
+    tr(
+      '「F-2 只打離你 18 公尺以外的目標。再近，連你也會一起炸到。」',
+      '“The F-2s only hit targets 18 m or more from you. Any closer and you would be under the bombs too.”',
+    ),
+  ];
+  dlg(
+    tr('🎌 高橋一尉', '🎌 Captain Takahashi'),
+    lines[(surv.day + (st.jpTalk = (st.jpTalk || 0) + 1)) % lines.length],
+    (player.inv.battery || 0) < 1
+      ? [
+          [
+            tr('「電池沒了……」', '“I am out of batteries…”'),
+            () => {
+              if (st.jpBat === surv.day)
+                return log(tr('「今天的已經給你了。」', '“I already gave you today’s.”'), '#ccc');
+              st.jpBat = surv.day;
+              addItem('battery', 1);
+              log(
+                tr('高橋一尉從背包裡掏出一顆電池給你。', 'Captain Takahashi digs a battery out of his pack for you.'),
+                '#9fd',
+              );
+            },
+          ],
+        ]
+      : [],
+  );
+}
+/** the radio panel: three kinds of help, one battery each, with their cooldowns */
+function useJpRadio() {
+  if (!jp) return;
+  const btns: [string, () => void][] = jp
+    .status()
+    .map(({ k, cd }) => [
+      cd > 0 ? `${JP_LABEL[k]}（${getLanguage() === 'en' ? `${cd} s` : `${cd} 秒`}）` : JP_LABEL[k],
+      () => jpCall(k),
+    ]);
+  dlg(
+    tr('📻 自衛隊野戰無線電', '📻 JSDF field radio'),
+    getLanguage() === 'en'
+      ? `Batteries: ${player.inv.battery || 0}. Every call uses one and is heard by nearby patrols.`
+      : `電池：${player.inv.battery || 0} 顆。每次呼叫用一顆，附近的巡邏會聽到。`,
+    btns,
+  );
+}
+function jpCall(k: JpKind) {
+  if (!jp) return false;
+  if ((player.inv.battery || 0) < 1) {
+    log(
+      tr(
+        '📻 無線電沒電了——找電池（住家、五金行），或回去找高橋一尉',
+        '📻 The radio is dead — find batteries (homes, hardware stores), or go back to Captain Takahashi',
+      ),
+      '#f99',
+    );
+    return false;
+  }
+  const r = jp.call(k);
+  log(r.msg, r.ok ? '#9cf' : '#ccc', r.ok ? 'radio' : '');
+  if (r.ok) {
+    if (--player.inv.battery <= 0) delete player.inv.battery;
+    slowDown(tr('呼叫日本支援', 'Called Japanese support'));
+  }
+  return r.ok;
+}
+/** the C-2's crate has landed: JSDF weapons, ammunition, rations; red smoke for a while */
+function jpLanded(p: V2) {
+  const r = Math.random;
+  const items: Record<string, number> = {
+    [r() < 0.5 ? 'type20' : 'type89']: 1,
+    a556n: 60,
+    jsdfration: 3,
+    medkit: 1,
+    water: 2,
+    battery: 1,
+  };
+  if (r() < 0.35) Object.assign(items, { p220: 1, a9: 18 });
+  if (r() < 0.12) items.minimi = 1;
+  if (r() < 0.12) Object.assign(items, { lmat: 1, lmatm: 1 });
+  const c = makeCont('jpdrop' + jpDrops++, p, 'crate', undefined, items);
+  c.label = '日本空投物資箱';
+  c.mesh.scale.set(1.4, 2.0, 1.4);
+  c.mesh.position.y = 0.4;
+  gmap?.intel('jpd' + jpDrops, p[0], p[1], 'sup', tr('日本空投', 'Japanese airdrop'));
+  const N = 120;
+  const g = new THREE.BufferGeometry();
+  const pp = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) pp.set([p[0] + (r() - 0.5), r() * 12, p[1] + (r() - 0.5)], i * 3);
+  g.setAttribute('position', new THREE.BufferAttribute(pp, 3));
+  const sm = new THREE.Points(
+    g,
+    new THREE.PointsMaterial({ color: 0xff3a2a, size: 1.5, transparent: true, opacity: 0.5, depthWrite: false }),
+  );
+  scene.add(sm);
+  setTimeout(() => (scene.remove(sm), g.dispose()), 90000);
+  noise(p[0], p[1], 50); // the patrols saw the parachute too
 }
 // ---------- v24.3 國軍殘部: remnant squads holding street corners (src/npc/remnant.ts) ----------
 let rem: RemnantSystem | null = null;
@@ -3029,7 +3218,8 @@ function setupRemnants(c: V2) {
       gunFx(r, false);
       AU.gunshot('rifle', dist, indoorAt(player.pos.x, player.pos.z));
     },
-    noise,
+    // their gunfire draws patrols; it only breaks fast-forward when the fight is right next to you
+    noise: (x, z, r) => noise(x, z, r, Math.hypot(player.pos.x - x, player.pos.z - z) > 25),
     player: () => player.pos,
     log,
     dlg,
@@ -3040,6 +3230,7 @@ function setupRemnants(c: V2) {
     },
     intel: () => {
       mapIntelOutposts(tr('解放軍哨點（國軍殘部情資）', 'PLA checkpoint (ROC remnant intelligence)'));
+      revealLiaison(true);
       gmap?.save();
     },
     leave: (id, p, items) => {
@@ -3892,8 +4083,9 @@ function upToggle() {
   const s = stairAt();
   return !!s && goUp(s.b, s.P);
 }
-function noise(x: number, z: number, r: number) {
-  if (started && r >= 10) {
+function noise(x: number, z: number, r: number, quiet = false) {
+  // quiet: soldiers still hear it, but it does not interrupt fast-forward (v24.3 allied gunfire further off)
+  if (started && r >= 10 && !quiet) {
     const d = Math.hypot(player.pos.x - x, player.pos.z - z);
     if (d > 1.5 && d < r + 10) slowDown(tr('附近有聲響', 'Noise nearby'));
   }
@@ -4589,6 +4781,9 @@ function useItem(k: string) {
   } else if (k === 'cstove') {
     cookOne();
     renderPanel();
+  } else if (k === 'jpradio') {
+    closePanel();
+    useJpRadio();
   } else if (k === 'tmap') {
     if (--player.inv[k] <= 0) delete player.inv[k];
     const si = Math.floor(Math.random() * NSEC);
@@ -6734,6 +6929,15 @@ function update(dt: number) {
   if (!dayF) sun.position.set(player.pos.x - 30, 70, player.pos.z + 20);
   updateSmoke(dt);
   if (started && !offMap(player.pos.x, player.pos.z)) rem?.update(dt);
+  if (started) jp?.update(dt);
+  if (liaison) {
+    const d = Math.hypot(player.pos.x - liaison.p[0], player.pos.z - liaison.p[1]);
+    liaison.rig.root.visible = d < 90;
+    if (d < 90) {
+      liaison.rig.root.rotation.y = Math.atan2(player.pos.x - liaison.p[0], player.pos.z - liaison.p[1]);
+      animate(liaison.rig, 'idle', 0, dt);
+    }
+  }
   if (!plaFlash.length)
     for (let i = 0; i < 4; i++) {
       const L = new THREE.SpotLight(0xfff0d0, 0, 24, 0.32, 0.5, 1.2);
@@ -7398,6 +7602,7 @@ async function boot() {
   if (bestR) nightMarket(bestR.p, bestR.t === 'tertiary' ? 9 : 6, fx, 'nm');
   setupArmor(start!.c as V2);
   setupRemnants(start!.c as V2);
+  setupJapan(start!.c as V2);
   spawnDrivables(start!.c as V2);
   buildJunctions();
   await roadT.init();
@@ -7745,6 +7950,8 @@ async function boot() {
     started = true;
     if (!surv.home) surv.home = [player.pos.x, player.pos.z];
     setupSnipers();
+    // v24.4 the Japanese expat knows where the JSDF liaison hides; a saved game keeps the pin once it was learned
+    if (ROLE.id === 'jp' || (surv as any).jpKnown) revealLiaison(false);
     {
       // v22.4.1 day 1: mark the home's street door (map pin + a bobbing arrow until you have stepped outside)
       const hb = bldAt(player.pos.x, player.pos.z);
@@ -8483,6 +8690,15 @@ async function boot() {
         })),
       },
     remTalk: () => rem?.talk(),
+    // v24.4 日本支援 test hooks
+    jp: () => jp && { stats: jp.stats, cd: jp.cd, crafts: jp.crafts.length, liaison: liaison?.p ?? null },
+    jpCall: (k: JpKind) => jpCall(k),
+    jpTalk: () => talkLiaison(),
+    jpRadio: () => useJpRadio(),
+    /** advance only the aircraft by s seconds (tests: the C-2 pass + parachute is ~20 s of game time) */
+    jpTick: (s: number) => {
+      for (let t = 0; t < s; t += 0.05) jp?.update(0.05);
+    },
     remPrompt: () => rem?.prompt(),
     useItem,
     testAT: (k: string) => {
