@@ -72,6 +72,8 @@ export type TileInfo = {
   roads: DRoad[];
   rnd: () => number;
   enter: DEnter[];
+  /** v24.1 footprints built in this tile / how many became enterable */
+  nB: number;
 };
 type Seg = { a: V2; b: V2; low?: boolean };
 export type DistrictDeps = {
@@ -106,9 +108,13 @@ export const RIVER_W = 140;
 export const LOAD_R = 520,
   DETAIL_R = 300,
   UNLOAD_R = 680;
-/** v23.3 enterable buildings: share of eligible street-front buildings, cap per tile, door width, cut-box margin */
-export const ENTER_P = 0.6,
-  ENTER_CAP = 24,
+/**
+ * v23.3 enterable buildings: share of eligible street-front buildings, cap per tile, door width, cut-box margin.
+ * v24.1 every building: all footprints (any size or height) get a door — on the street side when one faces a road,
+ * otherwise on a lane / light-well side that is not blocked by a neighbour (back door).
+ */
+export const ENTER_P = 1,
+  ENTER_CAP = 400,
   DOOR_W = 1.4,
   CUT_M = 1.0;
 const DOOR_H = 2.4,
@@ -408,6 +414,18 @@ export class District {
   *enterables() {
     for (const t of this.tiles.values()) yield* t.info.enter;
   }
+  /** v24.1 coverage over the loaded tiles: footprints built, enterable, back doors */
+  enterStats() {
+    let n = 0,
+      enter = 0,
+      back = 0;
+    for (const t of this.tiles.values()) {
+      n += t.info.nB;
+      enter += t.info.enter.length;
+      back += t.info.enter.filter(e => !e.street).length;
+    }
+    return { tiles: this.tiles.size, n, enter, back };
+  }
   private egridEach(e: DEnter, f: (k: string) => void) {
     for (let x = Math.floor(e.minx / EG); x <= Math.floor(e.maxx / EG); x++)
       for (let z = Math.floor(e.minz / EG); z <= Math.floor(e.maxz / EG); z++) f(x + ',' + z);
@@ -425,18 +443,21 @@ export class District {
     h: number,
     er: () => number,
     kind: Use | null,
+    free?: (x: number, z: number) => boolean,
   ) {
     // v23.6 public buildings (schools, hospitals, temples, markets, stations, offices) are always enterable,
-    // and may be big; ordinary ones are a random share of the street-front walk-ups
+    // and may be big; v24.1 so is every ordinary building (ENTER_P = 1), whatever its size or height
     const roll = er();
-    if (kind ? area < 20 || area > 6000 || lv > 14 : area < 20 || area > 1500 || lv > 8 || roll >= ENTER_P) return null;
+    if (area < 12 || roll >= ENTER_P) return null;
     let best = -1,
-      bl = 0;
+      bl = 0,
+      back = -1,
+      backL = 0;
     for (let i = 0; i < pts.length; i++) {
       const a = pts[i],
         c = pts[(i + 1) % pts.length];
       const L = Math.hypot(c[0] - a[0], c[1] - a[1]);
-      if (L < 3.6) continue;
+      if (L < 2.4) continue;
       const ux = (c[0] - a[0]) / L,
         uz = (c[1] - a[1]) / L;
       let nx = uz,
@@ -444,9 +465,15 @@ export class District {
       const mx = (a[0] + c[0]) / 2,
         mz = (a[1] + c[1]) / 2;
       if (pip([mx + nx * 0.3, mz + nz * 0.3], pts)) ((nx = -nx), (nz = -nz));
-      if (this.roadDist(mx + nx * 3, mz + nz * 3) > 3) continue;
-      if (L > bl) ((bl = L), (best = i));
+      if (L >= 3.6 && this.roadDist(mx + nx * 3, mz + nz * 3) <= 3) {
+        if (L > bl) ((bl = L), (best = i));
+        continue;
+      }
+      // v24.1 back door: an edge whose outside (1 m and 1.8 m out) is open ground, not a neighbour's footprint
+      if (free && free(mx + nx * 1.0, mz + nz * 1.0) && free(mx + nx * 1.8, mz + nz * 1.8) && L > backL)
+        ((backL = L), (back = i));
     }
+    if (best < 0 && back >= 0) ((best = back), (bl = backL));
     if (best < 0) return null;
     const a = pts[best],
       c = pts[(best + 1) % pts.length];
@@ -717,6 +744,7 @@ export class District {
     // v23.3 enterable buildings (own random stream so the rest of the tile keeps its deterministic sequence)
     const er = seeded('dt23e:' + key);
     const enter: DEnter[] = [];
+    let nB = 0;
     /** points just outside each street door: keep parked scooters out of the doorway */
     const doorOut: V2[] = [];
     let stairs = 0;
@@ -766,9 +794,20 @@ export class District {
       const h = GF + (lv - 1) * FH;
       const tint = WALLTINT[Math.floor(rnd() * WALLTINT.length)];
       const awn = AWN[Math.floor(rnd() * AWN.length)];
+      nB++;
       let ent =
         enter.length < ENTER_CAP
-          ? this.planEnter(key, bi, pts, Math.abs(A / 2), lv, h, er, specialKind(b.k, b.s, b.n))
+          ? this.planEnter(
+              key,
+              bi,
+              pts,
+              Math.abs(A / 2),
+              lv,
+              h,
+              er,
+              specialKind(b.k, b.s, b.n),
+              (x, z) => !otherAt(x, z, pts),
+            )
           : null;
       // not when the outline sits inside another one (overlapping OSM parts) or the door opens into a neighbour
       if (
@@ -1090,7 +1129,7 @@ export class District {
     });
     this.d.scene.add(g);
     void m4;
-    return { key, cx, cz, g, detail, segs, info: { key, cx, cz, fronts, roads: td.r, rnd, enter } };
+    return { key, cx, cz, g, detail, segs, info: { key, cx, cz, fronts, roads: td.r, rnd, enter, nB } };
   }
   // ---------- cheap landmarks ----------
   /** footprints the core map must leave empty (its own generic boxes are replaced by the landmark) */

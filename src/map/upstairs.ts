@@ -13,7 +13,8 @@ export const UP_O: V2 = [6000, 0];
 /** x beyond the district where the upstairs space lives (the district bbox ends near x = 1000) */
 export const isUp = (x: number) => x > 5000;
 export const FLOOR_H = 3.2;
-const STREET_Y = -3.8;
+/** v24.1 the street seen from floor f (2 = one storey up) */
+const streetY = (f: number) => -(3.8 + (Math.max(2, f) - 2) * FLOOR_H);
 
 const wallMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 });
 wallMat.userData.cut = true; // cut down to a low wall while the player is up here, like the ground floors
@@ -61,6 +62,8 @@ export type UpRoom = {
   segs: { a: V2; b: V2 }[];
   /** where the stairs arrive (in front of the opening) */
   land: V2;
+  /** v24.1 foot of the flight up to the next floor, when there is one */
+  upFoot: V2 | null;
   /** cut box for occlusion.ts while up here */
   box: { O: V2; U: V2; ub: [number, number, number, number] };
 };
@@ -75,6 +78,10 @@ export function buildUpstairs(o: {
   stair: { u: number; v: number };
   street: (i: number) => boolean;
   seed: number;
+  /** v24.1 which floor (2 = 2F); the street is drawn that many storeys below */
+  floor?: number;
+  /** v24.1 centre (plan frame) of the flight up to the next floor, beside the opening */
+  upFlight?: { u: number; v: number } | null;
 }): UpRoom {
   const { pts, F, stair } = o;
   const r = hash(o.seed);
@@ -151,6 +158,25 @@ export function buildUpstairs(o: {
     const c = [W(u - 0.6, v - 1.18), W(u + 0.6, v - 1.18), W(u + 0.6, v + 1.18), W(u - 0.6, v + 1.18)];
     for (let i = 0; i < 4; i++) segs.push({ a: c[i], b: c[(i + 1) % 4] });
   }
+  // v24.1 the flight up to the next floor: concrete steps rising away from the landing beside the opening, with a
+  // handrail (a Taipei walk-up stairwell: down-flight and up-flight side by side at every landing)
+  let upFoot: V2 | null = null;
+  if (o.upFlight) {
+    const { u, v } = o.upFlight;
+    const sm = frameM.clone().multiply(new THREE.Matrix4().makeTranslation(u, 0, v));
+    for (let k = 0; k < 8; k++) {
+      const hgt = 0.18 * (k + 1);
+      vc.push(box(1.0, hgt, 0.28, 0, hgt / 2, -0.98 + k * 0.28, k % 2 ? 0x9a968c : 0x8e8a80, sm));
+      vc.push(box(1.0, 0.02, 0.05, 0, hgt + 0.01, -1.1 + k * 0.28, 0xb8b2a4, sm)); // worn nosing
+    }
+    vc.push(box(0.04, 0.04, 2.3, -0.55, 0.95 + 0.7, 0, 0x5a5f5c, sm)); // handrail (sloped look: raised)
+    for (const z of [-1.0, 0.1, 1.0])
+      vc.push(box(0.04, 0.9 + (z + 1) * 0.7, 0.04, -0.55, (0.9 + (z + 1) * 0.7) / 2, z, 0x5a5f5c, sm));
+    const c = [W(u - 0.55, v - 1.15), W(u + 0.55, v - 1.15), W(u + 0.55, v + 1.15), W(u - 0.55, v + 1.15)];
+    for (let i = 1; i < 4; i++) segs.push({ a: c[i], b: c[(i + 1) % 4] });
+    segs.push({ a: c[0], b: c[1] }); // the steps themselves block walking; [E] at the foot climbs
+    upFoot = W(u, v - 1.75);
+  }
   const m = new THREE.Mesh(mergeGeometries(vc), wallMat);
   m.receiveShadow = true;
   g.add(m);
@@ -158,7 +184,7 @@ export function buildUpstairs(o: {
   // the street one storey below, seen past the cut-down walls
   const gp = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), groundMat);
   gp.rotation.x = -Math.PI / 2;
-  gp.position.set(UP_O[0], STREET_Y, UP_O[1]);
+  gp.position.set(UP_O[0], streetY(o.floor ?? 2), UP_O[1]);
   gp.receiveShadow = true;
   g.add(gp);
   // cut box in the plan frame
@@ -178,6 +204,7 @@ export function buildUpstairs(o: {
     g,
     segs,
     land: W(stair.u, stair.v - 1.8),
+    upFoot,
     box: { O: F.O, U: F.U, ub: [umin - 1, umax + 1, vmin - 1, vmax + 1] },
   };
 }
