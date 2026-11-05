@@ -3,6 +3,18 @@
 import * as THREE from 'three';
 import { type Fabric } from '../map/fabric';
 import { Parts, jt, lathe, cyl, sph, box, cap, pickFabrics, SKIN } from '../../packages/character-rig/src/index.ts';
+import {
+  sm,
+  KEYS,
+  eo,
+  ei,
+  zero,
+  trackMotion,
+  baseGait,
+  applySprings,
+  bodyDims,
+  type Pose,
+} from '../../packages/character-rig/src/index.ts';
 import { gunModel, gunFam, gunMat, makeFlash, RECOIL, type GunFam } from './firearms';
 export type AnimState =
   'idle' | 'walk' | 'run' | 'sneak' | 'melee' | 'aim' | 'shoot' | 'loot' | 'hurt' | 'death' | 'sleep' | 'carry';
@@ -91,7 +103,7 @@ export function makeRig(o: RigOpts): Rig {
   const FAB = pickFabrics(o);
   const f = o.gender === 'f',
     S = o.soldier;
-  const k = f ? 0.95 : 1;
+  const { k, LT, LS, hipH } = bodyDims(o.gender);
   const P = new Parts();
   const fab = (f: Fabric | 'plain') => (P.fab = f);
   const det = (fn: () => void) => {
@@ -118,9 +130,6 @@ export function makeRig(o: RigOpts): Rig {
   const root = new THREE.Group();
   const body = new THREE.Group();
   root.add(body);
-  const LT = 0.45 * k,
-    LS = 0.43 * k;
-  const hipH = LT + LS + 0.075;
   const hips = jt(body, 0, hipH, 0);
   // pelvis / pants seat
   fab(FAB.bottom);
@@ -619,47 +628,6 @@ export function fireShot(r: Rig): GunFam {
   }
   return fam;
 }
-const cl01 = (x: number) => (x < 0 ? 0 : x > 1 ? 1 : x);
-const sm = (x: number) => {
-  x = cl01(x);
-  return x * x * (3 - 2 * x);
-};
-const KEYS = [
-  'hipY',
-  'hipX',
-  'hipYaw',
-  'bodyX',
-  'bodyZ',
-  'bodyZoff',
-  'spX',
-  'spY',
-  'spZ',
-  'chX',
-  'chY',
-  'hdX',
-  'hdY',
-  'thL',
-  'thR',
-  'thLz',
-  'thRz',
-  'shL',
-  'shR',
-  'ftL',
-  'ftR',
-  'uaL',
-  'uaR',
-  'uaLz',
-  'uaRz',
-  'uaLy',
-  'uaRy',
-  'laL',
-  'laR',
-  'laLy',
-  'laRy',
-  'tail',
-] as const;
-type Pose = Record<(typeof KEYS)[number], number>;
-const zero = (): Pose => Object.fromEntries(KEYS.map(k => [k, 0])) as Pose;
 /** Fluid procedural animation. speed in m/s (actual, already accelerated). */
 // v17.2 LOD: rigs farther than LOD_FAR from the focus (the player) hide their fine detail meshes
 let lodFocus: THREE.Vector3 | null = null;
@@ -674,14 +642,6 @@ function updateLod(r: Rig) {
   r.lod = want;
   for (const m of r.det) m.visible = !far;
 }
-const eo = (x: number) => {
-  const t = Math.max(0, Math.min(1, x));
-  return 1 - (1 - t) ** 3;
-};
-const ei = (x: number) => {
-  const t = Math.max(0, Math.min(1, x));
-  return t * t * t;
-};
 const ARM = new Set(['uaR', 'laR', 'uaRz', 'uaRy', 'laRy', 'uaL', 'laL', 'uaLz']);
 /** v22.10 swing keyframes: [wind-up, contact, follow-through] per pose key */
 const MELEE: Record<string, [number, number, number]>[] = [
@@ -787,14 +747,7 @@ export function animate(r: Rig, state: AnimState, speed: number, dt: number) {
   r.hurtT = Math.max(0, r.hurtT - dt);
   r.vaultT = Math.max(0, r.vaultT - dt);
   r.shoveT = Math.max(0, r.shoveT - dt);
-  // motion signals: yaw rate (lean / turn-in-place), acceleration (momentum lean)
-  const yaw = r.root.rotation.y;
-  let dy = yaw - r.lastYaw;
-  dy = Math.atan2(Math.sin(dy), Math.cos(dy));
-  r.lastYaw = yaw;
-  r.yawRate += (dy / dt - r.yawRate) * Math.min(1, dt * 8);
-  r.accel += ((speed - r.lastSpeed) / dt - r.accel) * Math.min(1, dt * 6);
-  r.lastSpeed = speed;
+  trackMotion(r, speed, dt);
   const W = r.w,
     ease = (k: string, v: number, rate: number) => {
       W[k] += (v - W[k]) * Math.min(1, dt * rate);
@@ -810,54 +763,12 @@ export function animate(r: Rig, state: AnimState, speed: number, dt: number) {
     LS = r.legS;
   if (state === 'death') return deathPose(r, dt);
   r.deadT = 0;
-  // ---- lower body: stride-locked gait (phase advances with distance → planted feet) ----
-  const s = speed,
-    runW = sm((s - 3.6) / 2.2),
-    walkW = sm(s / 1.2),
-    sn = W.sneak;
-  const stride = (0.95 + 0.42 * s) * (1 - 0.35 * sn);
-  // v22.10 amplitude from stride: the stance foot sweeps stride*duty per contact, so feet don't skate
-  const duty = 0.55 - 0.2 * runW;
-  let amp = walkW * Math.asin(Math.min(0.78, Math.max(0.2, (stride * duty) / (2 * (LT + LS))))) * (1 - 0.35 * sn);
-  const turnStep = s < 0.4 && Math.abs(r.yawRate) > 1.2 ? Math.min(1, (Math.abs(r.yawRate) - 1.2) / 3) : 0; // turn in place: small shuffling steps
-  r.phase += ((2 * Math.PI * s) / stride) * dt + turnStep * dt * 9;
-  if (turnStep > 0) amp = Math.max(amp, 0.16 * turnStep);
-  const p = r.phase;
-  const sL = Math.sin(p),
-    cL = Math.cos(p);
-  const leg = (sinv: number, cosv: number) => {
-    const th = -sinv * amp;
-    const swing = Math.max(0, cosv);
-    const sh = swing * amp * (1.3 + runW * 1.6) + 0.05 + Math.max(0, sinv) * amp * 0.25 * runW;
-    return [th, sh];
-  };
-  const [tL, kL] = leg(sL, cL),
-    [tR, kR] = leg(-sL, -cL);
-  T.thL = tL;
-  T.thR = tR;
-  T.shL = kL;
-  T.shR = kR;
-  // idle weight shift + breathing
-  const breath = Math.sin(r.t * 1.7),
-    idleW = 1 - walkW;
-  T.hipYaw = -sL * amp * 0.25 + idleW * Math.sin(r.t * 0.37) * 0.05;
-  T.spY = sL * amp * 0.32;
-  T.chY = -sL * amp * 0.1;
-  T.bodyZoff = idleW * Math.sin(r.t * 0.37) * 0.02;
-  T.thLz = idleW * 0.05 + 0.05 * walkW + 0.04 * runW; // slight abduction so knees/feet never cross
-  T.thRz = -idleW * 0.03 - 0.05 * walkW - 0.04 * runW;
-  T.chX = breath * 0.018 * idleW - runW * 0.05;
-  T.hdX = -breath * 0.012;
-  T.hdY = idleW * Math.sin(r.t * 0.29) * 0.35 * (1 - W.aim);
-  T.spX = 0.04 + runW * 0.24 + walkW * 0.04 + Math.max(-0.12, Math.min(0.18, r.accel * 0.035));
-  T.bodyZ = Math.max(-0.32, Math.min(0.32, -r.yawRate * s * 0.035)); // lean into turns
-  // arms swing (counter to legs) with elbow drag
-  T.uaL = tR * 0.85 * (1 - W.carry);
-  T.uaR = tL * 0.85;
-  T.uaLz = 0.1 + runW * 0.08 + breath * 0.01;
-  T.uaRz = -0.1 - runW * 0.08 - breath * 0.01;
-  T.laL = -0.18 - amp * 0.35 - runW * 1.05 + Math.max(0, -tR) * 0.25;
-  T.laR = -0.18 - amp * 0.35 - runW * 1.05 + Math.max(0, -tL) * 0.25;
+  // shared stride-locked base gait (@lijiabao/character-rig); game-specific layers follow
+  let { s, runW, walkW, sn, amp, p, sL, cL, tL, kL, tR, kR, breath, idleW } = baseGait(r, T, speed, dt, {
+    sneak: W.sneak,
+    carry: W.carry,
+    aim: W.aim,
+  });
   // sneak: deep crouch blended continuously
   if (sn > 0.01) {
     T.thL += -0.95 * sn;
@@ -1043,44 +954,6 @@ export function animate(r: Rig, state: AnimState, speed: number, dt: number) {
   r.body.position.y = lift + (W.sleep > 0.01 ? 0.25 * W.sleep : 0);
   r.body.position.x = r.sp.bodyZoff?.[0] ?? 0;
   r.body.position.z = -(r.hurtT > 0 ? 0.12 * sm(r.hurtT / 0.35) : 0) + stepZ + recZ;
-}
-function applySprings(r: Rig, T: Pose, dt: number, om: number) {
-  const n = Math.max(1, Math.ceil(dt / 0.012)),
-    h = dt / n;
-  for (const k of KEYS) {
-    let e = r.sp[k];
-    if (!e) e = r.sp[k] = [k === 'hipY' ? T.hipY : 0, 0];
-    const o =
-      k.startsWith('sp') || k.startsWith('ch') || k.startsWith('body') || k === 'hipYaw'
-        ? om * 0.7
-        : k === 'tail'
-          ? 7
-          : om;
-    for (let i = 0; i < n; i++) {
-      const a = o * o * (T[k] - e[0]) - 2 * o * e[1] * (k === 'tail' ? 0.45 : 1);
-      e[1] += a * h;
-      e[0] += e[1] * h;
-    }
-  }
-  const v = (k: string) => r.sp[k][0];
-  r.hips.position.y = v('hipY');
-  r.hips.rotation.y = v('hipYaw');
-  r.body.rotation.x = v('bodyX');
-  r.body.rotation.z = v('bodyZ');
-  r.spine.rotation.set(v('spX'), v('spY'), v('spZ'));
-  r.chest.rotation.set(v('chX'), v('chY'), 0);
-  r.head.rotation.set(v('hdX'), v('hdY'), 0);
-  r.thL.rotation.set(v('thL'), 0, v('thLz'));
-  r.thR.rotation.set(v('thR'), 0, v('thRz'));
-  r.shL.rotation.x = v('shL');
-  r.shR.rotation.x = v('shR');
-  r.ftL.rotation.x = v('ftL');
-  r.ftR.rotation.x = v('ftR');
-  r.uaL.rotation.set(v('uaL'), v('uaLy'), v('uaLz'));
-  r.uaR.rotation.set(v('uaR'), v('uaRy'), v('uaRz'));
-  r.laL.rotation.set(v('laL'), v('laLy'), 0);
-  r.laR.rotation.set(v('laR'), v('laRy'), 0);
-  if (r.tail) r.tail.rotation.x = v('tail');
 }
 function deathPose(r: Rig, dt: number) {
   if (r.deadT === 0) r.deathV = Math.floor(Math.random() * 3);

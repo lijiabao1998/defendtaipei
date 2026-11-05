@@ -2,4 +2,5 @@
 // Each game imports this package; game-specific wardrobe/gear/animation stays in the game.
 export * from './fabric.ts';
 export * from './kit.ts';
-export const CHARACTER_RIG_VERSION = '0.1.0';
+export * from './motion.ts';
+export const CHARACTER_RIG_VERSION = '0.2.0';

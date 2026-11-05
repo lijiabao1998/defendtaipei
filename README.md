@@ -552,3 +552,8 @@ node scripts/tiles.mjs           # 重新切 200 m 道路細節圖塊（public/d
 - 白面人的共用部分抽到 `packages/character-rig/`（`@lijiabao/character-rig` v0.1.0）：布料材質（`fabric.ts`）、每個關節合併成一個網格的 `Parts`、關節與基本形狀工具、人偶材質和衣服布料判斷（`kit.ts`）。台北是基準，魔都生存同步一份一模一樣的副本。
 - `src/npc/human.ts` 改從套件引用，`src/map/fabric.ts` 改為轉出套件內容；畫面和動作不變。
 - 台北自己的槍、士兵、身體和步態仍留在 `src/npc/`。下一步是把骨架比例和走路核心也搬進套件（見套件 README）。
+
+## v24.0.2 — 人物共用套件 v0.2.0：身體比例與走路核心
+
+- `packages/character-rig` 升到 v0.2.0，新增 `motion.ts`：緩動、姿勢鍵與彈簧（`applySprings`）、轉身與加速訊號（`trackMotion`）、跨步鎖定的基本步態（`baseGait`：腿、臀擺、呼吸、轉彎傾身、加速前傾、手臂反向擺動）和身體比例（`bodyDims`）。
+- `src/npc/human.ts` 改用這些；槍、後座力、士兵、近戰等台北自己的動作仍疊在上面。以固定亂數跑 9 種狀態各 100 格比對，所有關節的位置和旋轉跟改前完全相同。
