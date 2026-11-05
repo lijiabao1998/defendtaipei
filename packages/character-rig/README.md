@@ -2,12 +2,14 @@
 
 Shared kit for the 白面人 (faceless mannequin) characters used by **DefendTaipei-Lab** (the baseline, this repo) and **魔都生存 / shanghaisurvival**.
 
-## What is in it (v0.1.0, first slice)
+## What is in it (v0.2.0)
 
 - `fabric.ts`: procedural garment fabrics (`Fabric`, `fabricMat`). Falls back to plain materials when there is no DOM, for Node checks.
 - `kit.ts`: mannequin materials (`matS`, `matC`, `SKIN`), `Parts` (per-joint geometry merged into one mesh per joint and material, LOD-detail tagging, optional `lite` single-material mode), joint/primitive helpers (`jt`, `lathe`, `cyl`, `sph`, `box`, `cap`) and the garment fabric picker (`pickFabrics`, `bluish`).
 
-Each game keeps its own `makeRig` body/wardrobe and `animate` gait and imports the kit from here.
+- `motion.ts` (v0.2.0): easing (`sm`, `eo`, `ei`, `cl01`), the pose keys (`KEYS`, `Pose`, `zero`), the spring solver that writes joint rotations (`applySprings`), motion signals (`trackMotion`: yaw rate, acceleration), the stride-locked base gait (`baseGait`: legs, hip sway, breathing, turn lean, momentum lean, counter arm swing; optional `strideScale`) and the shared proportions (`bodyDims`: thigh/shin length, hip height).
+
+Each game keeps its own wardrobe/gear geometry in `makeRig` and its own action layers in `animate` (Taipei: guns, recoil, soldiers; Shanghai: its own extras), calling `trackMotion` → `baseGait` → its layers → `applySprings`.
 
 ## Rules
 
@@ -17,5 +19,5 @@ Each game keeps its own `makeRig` body/wardrobe and `animate` gait and imports t
 
 ## Next steps
 
-1. Move the shared skeleton (joint hierarchy and proportions) out of `makeRig`.
-2. Move the gait core (stride-locked walk/run, springs, lean) out of `animate`, with per-game overlay hooks.
+1. Move the joint hierarchy itself (joint offsets for spine/chest/neck/arms/legs) into a `buildSkeleton`, leaving garment geometry per game.
+2. Move shared action layers that are still identical in both games (sneak crouch, loot, hurt, death pose) once they stop diverging.
