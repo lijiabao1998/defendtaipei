@@ -6,6 +6,8 @@
 // every client (multiplayer-ready) and player changes are stored per tile key. Data © OpenStreetMap (ODbL).
 import * as THREE from 'three';
 import { chunkify } from '../core/chunk';
+/** v24.6 ?chunk=0 turns the tile chunking off (before / after comparisons) */
+const CHUNK = typeof location === 'undefined' || new URLSearchParams(location.search).get('chunk') !== '0';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { canvasTex, roadMat } from './textures';
 import { lotTex, ARCADE_MATS, worldUV } from './paving';
@@ -606,10 +608,12 @@ export class District {
     await Promise.all([-1, 0, 1].flatMap(i => [-1, 0, 1].map(j => this.fetchTile(tx + i + '_' + (tz + j)))));
     const t0 = performance.now();
     const T = this.ix.T;
-    const tile = this.build(k, this.data.get(k)!, (tx + 0.5) * T, (tz + 0.5) * T);
+    const tile = await this.build(k, this.data.get(k)!, (tx + 0.5) * T, (tz + 0.5) * T);
     // v24.6 split the tile's merged meshes (200 m across) into 50 m pieces so off-screen parts are culled
-    const cs = chunkify(tile.g, { minTris: 6000, minSpan: 70, cell: 50, instanced: true });
-    this.stats.chunked += cs.meshes;
+    if (CHUNK) {
+      const cs = chunkify(tile.g, { minTris: 6000, minSpan: 70, cell: 50, instanced: true });
+      this.stats.chunked += cs.meshes;
+    }
     this.stats.builtMs = Math.max(this.stats.builtMs, performance.now() - t0);
     this.tiles.set(k, tile);
     for (const e of tile.info.enter)
@@ -638,7 +642,15 @@ export class District {
     this.stats.unloads++;
     this.d.onUnload?.(k);
   }
-  private build(key: string, td: TileData, cx: number, cz: number): Tile {
+  private async build(key: string, td: TileData, cx: number, cz: number): Promise<Tile> {
+    // v24.6 tiles with the core block interiors hold 60–100 walk-ups: give the browser a frame every ~12 ms of
+    // building work, so a tile never blocks the page for seconds on a slow CPU (software WebGL, phones)
+    let tY = performance.now();
+    const breathe = async () => {
+      if (performance.now() - tY < 12) return;
+      await new Promise(r => setTimeout(r, 0));
+      tY = performance.now();
+    };
     const rnd = seeded('dt21:' + key);
     const g = new THREE.Group(),
       detail = new THREE.Group();
@@ -787,6 +799,7 @@ export class District {
       return paint(pg, hex, jitter);
     };
     for (let bi = 0; bi < td.b.length; bi++) {
+      await breathe();
       const b = td.b[bi];
       const pts = b.p;
       if (pts.length < 3) continue;

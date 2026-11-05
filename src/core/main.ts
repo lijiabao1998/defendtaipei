@@ -7487,7 +7487,7 @@ function updatePrologue(dt: number) {
 /** v24.6 block-interior infill of the core (src/map/infill.ts blockInfill); ?blocks=0 turns it off for comparison */
 const BLOCKS = {
   on: new URLSearchParams(location.search).get('blocks') !== '0',
-  max: 2400,
+  max: Math.max(0, +(new URLSearchParams(location.search).get('blocksmax') ?? 2400) || 0),
   n: 0,
   ms: 0,
 };
@@ -7861,7 +7861,8 @@ async function boot() {
     (window as any).__game && ((window as any).__game.map = gmap);
   });
   // v24.6 split the big core-wide merged meshes into 60 m pieces so off-screen parts are culled (src/core/chunk.ts)
-  chunkStats = chunkify(scene, { instanced: true, icell: 80, iminTris: 20000 });
+  if (new URLSearchParams(location.search).get('chunk') !== '0')
+    chunkStats = chunkify(scene, { instanced: true, icell: 80, iminTris: 20000 });
   await prog(1, tr('完成', 'Done'));
   // v22.7.1 watchdog: if the title menu has not appeared shortly after loading, offer a clean reload
   setTimeout(() => {
@@ -8779,6 +8780,7 @@ async function boot() {
     jpCall: (k: JpKind) => jpCall(k),
     jpTalk: () => talkLiaison(),
     chunks: () => chunkStats,
+    dstats: () => district.stats,
     blocks: () => ({ ...BLOCKS, tiles: coreBlocks.size }),
     // v24.5 street wreckage stats
     wreck: () => ({ ...wreckStats, visible: !!wreck?.visible, live: wreckLive, segs: wreckSegs.length }),
