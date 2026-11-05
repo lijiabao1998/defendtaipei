@@ -3236,6 +3236,8 @@ function setupJapan(c: V2) {
     noise,
     gunSound: d => AU.gunshot('mg', d, indoorAt(player.pos.x, player.pos.z)),
     boomSound: d => AU.shellBoom(d, indoorAt(player.pos.x, player.pos.z), 1.4),
+    jetSound: d => AU.jetPass(d),
+    rotorSound: d => AU.rotor(d, 1.2),
   });
   const p = liaisonSpot(c);
   if (!p) return;

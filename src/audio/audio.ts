@@ -677,3 +677,38 @@ export function thunder(indoor: boolean) {
   burst(c, o, { type: 'lowpass', hz: 220 }, { a: 0.05, d: 3.2, v: 1 }, 0.35);
   burst(c, o, { type: 'lowpass', hz: 90 }, { at: 0.4, a: 0.3, d: 3.8, v: 0.8 }, 0.25);
 }
+/** v24.10 a fighter passing low overhead: a tearing roar that sweeps down (doppler), loudest at `dist` m */
+export function jetPass(dist: number) {
+  const c = ctx(true);
+  if (!c || c.state !== 'running' || dist > 400) return;
+  cnt('jet');
+  const v = 0.5 * Math.max(0.15, 1 - dist / 400);
+  const o = ambOut(c, v);
+  const s = c.createBufferSource();
+  s.buffer = noise(c);
+  s.loop = true;
+  const lp = c.createBiquadFilter();
+  lp.type = 'lowpass';
+  const t = c.currentTime;
+  lp.frequency.setValueAtTime(400, t);
+  lp.frequency.exponentialRampToValueAtTime(3200, t + 1.2);
+  lp.frequency.exponentialRampToValueAtTime(260, t + 3.6);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(1, t + 1.1);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 4.2);
+  s.connect(lp).connect(g).connect(o);
+  s.start(t);
+  s.stop(t + 4.3);
+  tone(c, o, 'sawtooth', 220, 90, { a: 0.6, d: 3.2, v: 0.25 });
+}
+/** v24.10 helicopter rotor: ~5 thumps a second for `dur` s, fading in and out */
+export function rotor(dist: number, dur = 1.2) {
+  const c = ctx(true);
+  if (!c || c.state !== 'running' || dist > 300) return;
+  cnt('rotor');
+  const v = 0.35 * Math.max(0.1, 1 - dist / 300);
+  const o = ambOut(c, v);
+  for (let i = 0; i < Math.round(dur * 5.2); i++)
+    burst(c, o, { type: 'lowpass', hz: 180 }, { at: i / 5.2, a: 0.01, d: 0.12, v: 0.9 }, 0.6);
+}

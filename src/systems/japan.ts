@@ -24,6 +24,9 @@ export type JpDeps = {
   noise: (x: number, z: number, r: number) => void;
   gunSound: (dist: number) => void;
   boomSound: (dist: number) => void;
+  /** v24.10 engine sounds: a jet passing, the helicopter's rotor */
+  jetSound?: (dist: number) => void;
+  rotorSound?: (dist: number) => void;
 };
 export const JP_COOLDOWN: Record<JpKind, number> = { drop: 360, strike: 300, heli: 240 };
 const T = (zh: string, en: string) => (getLanguage() === 'en' ? en : zh);
@@ -146,6 +149,9 @@ type Craft = {
   v: number;
   done?: boolean;
   dropped?: boolean;
+  /** v24.10 the pass has been heard */
+  heard?: boolean;
+  rotorT?: number;
   target?: V2;
   gunT?: number;
   chute?: THREE.Group;
@@ -282,6 +288,11 @@ export class JapanSupport {
         const L = c.a.distanceTo(c.b);
         const s = Math.min(1, (c.t * c.v) / L);
         c.g.position.lerpVectors(c.a, c.b, s);
+        // the roar reaches you a moment before the plane is overhead
+        if (!c.heard && s >= 0.42) {
+          c.heard = true;
+          d.jetSound?.(Math.hypot(c.g.position.x - P.x, c.g.position.z - P.z));
+        }
         // bombs at the closest approach to the target (three along the track)
         if (c.kind === 'strike' && c.target && !c.dropped && s >= 0.5) {
           c.dropped = true;
@@ -337,6 +348,11 @@ export class JapanSupport {
     const rot = c.g.getObjectByName('rotor');
     if (rot) rot.rotation.y += dt * 28;
     const d = this.d;
+    c.rotorT = (c.rotorT ?? 0) - dt;
+    if (c.rotorT <= 0) {
+      c.rotorT = 1.1;
+      d.rotorSound?.(Math.hypot(c.g.position.x - P.x, c.g.position.z - P.z));
+    }
     const inbound = c.t * c.v < c.a.distanceTo(c.b);
     const leaving = c.t > 52;
     if (inbound) {
