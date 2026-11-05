@@ -29,6 +29,7 @@ import { iconURL, iconMat } from '../ui/icons';
 import { GF, FH, ARC, arcadeFits, buildArcade, flushArcades, setArcadeDeps, arcadeAudit } from '../map/arcade';
 import { RemnantSystem, type RemSave } from '../npc/remnant';
 import { JapanSupport, JP_LABEL, type JpKind } from '../systems/japan';
+import { buildWreckage, wreckStats } from '../map/wreckage';
 import {
   makeRig,
   animate,
@@ -2970,6 +2971,47 @@ function npcPrompt() {
     return tr('[E] 和廟口阿伯聊天', '[E] Chat with the old man at the temple');
   if (liaisonNear()) return tr('[E] 和自衛隊連絡官高橋一尉交談', '[E] Talk to JSDF liaison Captain Takahashi');
   return rem?.prompt() || '';
+}
+// ---------- v24.5 the stopped traffic of the occupied city (src/map/wreckage.ts) ----------
+let wreck: THREE.Group | null = null;
+const wreckSegs: Seg[] = [];
+let wreckLive = false;
+function setupWreckage(sc: V2) {
+  if (wreck) return;
+  // doorways (2.5 m) and the spawn block stay clear
+  const DG = 10,
+    dg = new Map<string, V2[]>();
+  for (const dr of doors) {
+    const k = Math.floor(dr.p[0] / DG) + ',' + Math.floor(dr.p[1] / DG);
+    (dg.get(k) || dg.set(k, []).get(k)!).push(dr.p);
+  }
+  const nearDoor = (x: number, z: number) => {
+    for (let i = -1; i <= 1; i++)
+      for (let j = -1; j <= 1; j++)
+        for (const q of dg.get(Math.floor(x / DG) + i + ',' + (Math.floor(z / DG) + j)) || [])
+          if (Math.hypot(q[0] - x, q[1] - z) < 2.5) return true;
+    return false;
+  };
+  wreck = buildWreckage({
+    scene,
+    roads,
+    roadW: ROADW,
+    bldAt: (x, z) => bldAt(x, z),
+    blocked: (x, z) => nearDoor(x, z) || Math.hypot(x - sc[0], z - sc[1]) < 14,
+    addSeg: (a, b, h) => wreckSegs.push({ a, b, h } as Seg),
+    rnd,
+  });
+  wreck.visible = false;
+}
+/** shown (and solid) once the morning-commute prologue is over: before the landing the streets were moving */
+function wreckTick() {
+  if (!wreck) return;
+  const on = !PRO.on;
+  wreck.visible = on;
+  if (on && !wreckLive) {
+    wreckLive = true;
+    for (const q of wreckSegs) addSeg(q, (q.h ?? 9) < 1.6);
+  }
 }
 // ---------- v24.4 日本支援: a JSDF liaison (fictional) with a field radio; airdrops, F-2 strikes, AH-64DJ cover ----------
 let jp: JapanSupport | null = null;
@@ -6930,6 +6972,7 @@ function update(dt: number) {
   updateSmoke(dt);
   if (started && !offMap(player.pos.x, player.pos.z)) rem?.update(dt);
   if (started) jp?.update(dt);
+  if (started) wreckTick();
   if (liaison) {
     const d = Math.hypot(player.pos.x - liaison.p[0], player.pos.z - liaison.p[1]);
     liaison.rig.root.visible = d < 90;
@@ -7605,6 +7648,7 @@ async function boot() {
   setupJapan(start!.c as V2);
   spawnDrivables(start!.c as V2);
   buildJunctions();
+  setupWreckage(start!.c as V2);
   await roadT.init();
   decay = buildDecay({
     scene,
@@ -8694,6 +8738,8 @@ async function boot() {
     jp: () => jp && { stats: jp.stats, cd: jp.cd, crafts: jp.crafts.length, liaison: liaison?.p ?? null },
     jpCall: (k: JpKind) => jpCall(k),
     jpTalk: () => talkLiaison(),
+    // v24.5 street wreckage stats
+    wreck: () => ({ ...wreckStats, visible: !!wreck?.visible, live: wreckLive, segs: wreckSegs.length }),
     jpRadio: () => useJpRadio(),
     /** advance only the aircraft by s seconds (tests: the C-2 pass + parachute is ~20 s of game time) */
     jpTick: (s: number) => {
@@ -8736,6 +8782,17 @@ async function boot() {
         if (fpv?.active) fpv.update(dt);
       }
     },
+    // v24.5 the road segments within r m: type, width, name, distance
+    roadsNear: (r = 60) =>
+      roads
+        .map(q => ({
+          t: q.t,
+          n: q.n,
+          w: ROADW[q.t.replace('_link', '')] ?? 3,
+          d: Math.round(Math.min(...q.p.map(a => Math.hypot(a[0] - player.pos.x, a[1] - player.pos.z)))),
+        }))
+        .filter(q => q.d < r)
+        .sort((a, b) => a.d - b.d),
     roadPt: () => {
       let best: V2 = [player.pos.x, player.pos.z],
         bd = 1e9;
