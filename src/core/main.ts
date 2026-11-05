@@ -710,8 +710,23 @@ type UpState = {
 let up: UpState | null = null;
 /** where the player is on the map (the stairwell while upstairs) */
 const mapPos = (): V2 => (up ? up.anchor : [player.pos.x, player.pos.z]);
+// v23.9 20 m bucket grid over the core footprints (rebuilt when blds grows), bldAt is called a lot at boot
+const BG = 20;
+let bgN = -1;
+const bGrid = new Map<number, Bld[]>();
 function bldAt(x: number, z: number) {
-  for (const b of blds) if (x > b.minx && x < b.maxx && z > b.minz && z < b.maxz && pip([x, z], b.pts)) return b;
+  if (bgN !== blds.length) {
+    bGrid.clear();
+    for (const b of blds)
+      for (let i = Math.floor(b.minx / BG); i <= Math.floor(b.maxx / BG); i++)
+        for (let j = Math.floor(b.minz / BG); j <= Math.floor(b.maxz / BG); j++) {
+          const k = i * 4096 + j;
+          (bGrid.get(k) || bGrid.set(k, []).get(k)!).push(b);
+        }
+    bgN = blds.length;
+  }
+  const L = bGrid.get(Math.floor(x / BG) * 4096 + Math.floor(z / BG));
+  if (L) for (const b of L) if (x > b.minx && x < b.maxx && z > b.minz && z < b.maxz && pip([x, z], b.pts)) return b;
   return null;
 }
 /** v23.3 core building or enterable district building at (x, z): stable identity for same-room comparisons */
@@ -1405,6 +1420,7 @@ function buildMap(data: any) {
   // buildings
   setArcadeDeps({ roadDist, pip: pip as any, addSeg });
   let seed0: number | null = null;
+  const fillFloors: THREE.BufferGeometry[] = [];
   data.buildings.forEach((ob: any, id: number) => {
     // v23.9 infill lots come last and use their own RNG stream, so OSM buildings, loot and soldiers stay put
     if (ob.fill && seed0 === null) ((seed0 = seed), (seed = 0x5f11));
@@ -1554,7 +1570,8 @@ function buildMap(data: any) {
         // v19.3 騎樓: built inside the footprint — columns on the street edge under the upper floors,
         // shopfront recessed ARC m behind them, continuous ceiling; only on edges facing a road
         if (arcOk) buildArcade(arcOk, b.roof);
-        if ((h > 6 && rnd() < 0.6) || type !== 'home') {
+        // v23.9 infill: no per-house fascia sign (decay.ts hangs vertical signs on the street fronts)
+        if ((h > 6 && rnd() < 0.6 && !ob.fill) || type !== 'home') {
           const tex = type !== 'home' ? signTex[type] : pick(shopSignTex);
           const sg = new THREE.Mesh(
             new THREE.PlaneGeometry(Math.min(dl * 0.8, 5), 1.1),
@@ -1594,11 +1611,15 @@ function buildMap(data: any) {
     roof.position.y = h;
     roof.castShadow = true;
     b.roof.add(roof);
-    const fl = new THREE.Mesh(rgeo, floorMat);
-    fl.position.y = 0.03;
-    fl.receiveShadow = true;
-    group.add(fl);
-    b.floor = fl;
+    if (ob.fill)
+      fillFloors.push(rgeo.clone().translate(0, 0.03, 0)); // v23.9 one merged floor mesh for all infill
+    else {
+      const fl = new THREE.Mesh(rgeo, floorMat);
+      fl.position.y = 0.03;
+      fl.receiveShadow = true;
+      group.add(fl);
+      b.floor = fl;
+    }
     // rooftop additions 頂樓加蓋 + water tanks
     {
       const rcls = roofClass(pts as any, lv, type + ' ' + (ob.n || ''));
@@ -1630,7 +1651,7 @@ function buildMap(data: any) {
       });
     }
     const tq = rnd();
-    if (tq < 0.5 || hh(4) < (lv <= 3 ? 0.5 : 0)) {
+    if (!ob.fill && (tq < 0.5 || hh(4) < (lv <= 3 ? 0.5 : 0))) {
       const st = lv <= 3 ? 1.6 : 0;
       const t = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 1.4, 10), tankMat);
       const tp: V2 =
@@ -1670,6 +1691,11 @@ function buildMap(data: any) {
     }
   });
   if (seed0 !== null) seed = seed0;
+  if (fillFloors.length) {
+    const fl = new THREE.Mesh(mergeGeometries(fillFloors), floorMat);
+    fl.receiveShadow = true;
+    scene.add(fl);
+  }
   flushArcades(scene);
   // parked vehicles (scooters on sidewalks, cars/taxis on bigger roads, occupation trucks) + street lamps
   const spots: { x: number; z: number; ang: number; kind: VehicleKind }[] = [];
@@ -6898,9 +6924,9 @@ function updatePrologue(dt: number) {
 const INFILL = {
   cx: 70,
   cz: 40,
-  r: 320,
+  r: 220,
   // ?infill=N caps the lot count (0 = OSM only), for before/after perf checks
-  max: Math.max(0, +(new URLSearchParams(location.search).get('infill') ?? 360) || 0),
+  max: Math.max(0, +(new URLSearchParams(location.search).get('infill') ?? 200) || 0),
 };
 const prog = async (f: number, msg: string) => {
   const i = document.querySelector('#loadbar i') as HTMLElement | null;
