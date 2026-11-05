@@ -3198,6 +3198,19 @@ const isNight = () => {
   const h = (gameMin / 60) % 24;
   return h < 6 || h >= 20;
 }; // 宵禁 20:00–06:00
+// v24.0 visual daylight for Taipei (lighting only): day 0..1, warm 0..1 (golden / blue hour tint)
+const sstep = (a: number, b: number, x: number) => {
+  const t = clamp((x - a) / (b - a), 0, 1);
+  return t * t * (3 - 2 * t);
+};
+function taipeiLight(hr: number) {
+  const day = sstep(5.2, 6.7, hr) * (1 - sstep(17.4, 19.7, hr));
+  const warm = Math.max(
+    sstep(5.2, 6.0, hr) * (1 - sstep(6.0, 7.2, hr)) * 0.6,
+    sstep(16.3, 17.8, hr) * (1 - sstep(18.4, 19.7, hr)),
+  );
+  return { day, warm };
+}
 // ---------- time system (PZ-style): day length + fast-forward ----------
 let DAYH = 1;
 const MPS = () => 1440 / (DAYH * 3600); // game minutes per real second
@@ -6413,13 +6426,16 @@ function update(dt: number) {
   }
   // lighting by time of day
   const hr = (gameMin / 60) % 24;
-  const dayF = clamp(Math.sin(((hr - 6) / 13) * Math.PI), 0, 1);
+  // v24.0: Taipei daylight. The old sin(06–19) curve left 07:30 at a third of daylight (the city looked like
+  // night all morning). Now: quick dawn 05:20–06:40, a flat humid-grey day, golden hour from 16:30 and blue
+  // hour until full dark at 19:40, just before the 20:00 curfew. Gameplay night (isNight) is unchanged.
+  const { day: dayF, warm: warmF } = taipeiLight(hr);
   sun.intensity = 0.15 + dayF * 2.2;
   hemi.intensity = 0.25 + dayF * 0.75;
   nightAdapt.intensity = (1 - dayF) * 5;
   nightAdapt.position.set(player.pos.x, player.pos.y + 2.6, player.pos.z);
-  sun.color.setHSL(0.09, 0.6, 0.55 + dayF * 0.3);
-  const ang = ((hr - 6) / 13) * Math.PI;
+  sun.color.setHSL(0.09 - warmF * 0.04, 0.6 + warmF * 0.3, 0.55 + dayF * 0.3 - warmF * 0.08);
+  const ang = clamp((hr - 5.6) / 14, 0, 1) * Math.PI;
   sun.position.set(player.pos.x + Math.cos(ang) * 60, 20 + Math.sin(Math.max(ang, 0.3)) * 60, player.pos.z + 30);
   sun.target.position.copy(player.pos);
   if (!dayF) sun.position.set(player.pos.x - 30, 70, player.pos.z + 20);
@@ -6452,7 +6468,8 @@ function update(dt: number) {
     });
   }
   const fogC = new THREE.Color(0x0c1220)
-    .lerp(new THREE.Color(0xa7b0b5), dayF)
+    .lerp(new THREE.Color(0xb3bcc0), dayF)
+    .lerp(new THREE.Color(0xd99a6c), warmF * 0.45)
     .lerp(new THREE.Color(0x5a6068).multiplyScalar(0.3 + dayF * 0.7), WX.amt * 0.5);
   sun.intensity *= 1 - WX.amt * 0.55;
   (scene.fog as THREE.Fog).color.copy(fogC);
@@ -8030,6 +8047,13 @@ async function boot() {
     setTime: (m: number) => {
       gameMin = m;
     },
+    // v24.0 daylight test hook
+    light: () => ({
+      ...taipeiLight((gameMin / 60) % 24),
+      sun: sun.intensity,
+      hemi: hemi.intensity,
+      fog: '#' + (scene.fog as THREE.Fog).color.getHexString(),
+    }),
     start: () => start!.c,
     scene,
     gm: () => gameMin,
