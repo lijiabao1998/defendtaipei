@@ -1598,7 +1598,7 @@ function buildMap(data: any) {
     const mi = id % wallMats.length;
     (b as any).mi = mi;
     b.walls = new THREE.Mesh(mergeGeometries(wg), wallMats[mi]);
-    b.walls.castShadow = true;
+    b.walls.castShadow = !ob.fill; // v23.9 infill row-houses don't cast (shadow-pass cost on phones/CI)
     b.walls.receiveShadow = true;
     group.add(b.walls);
     const shape = new THREE.Shape(pts.map(p => new THREE.Vector2(p[0], p[1])));
@@ -1609,7 +1609,7 @@ function buildMap(data: any) {
       pickRoofMat(() => hh(9)),
     );
     roof.position.y = h;
-    roof.castShadow = true;
+    roof.castShadow = !ob.fill;
     b.roof.add(roof);
     if (ob.fill)
       fillFloors.push(rgeo.clone().translate(0, 0.03, 0)); // v23.9 one merged floor mesh for all infill
