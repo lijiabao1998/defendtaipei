@@ -643,11 +643,12 @@ export class District {
     this.d.onUnload?.(k);
   }
   private async build(key: string, td: TileData, cx: number, cz: number): Promise<Tile> {
-    // v24.6 tiles with the core block interiors hold 60–100 walk-ups: give the browser a frame every ~12 ms of
-    // building work, so a tile never blocks the page for seconds on a slow CPU (software WebGL, phones)
+    // v24.6 tiles with the core block interiors hold 60–100 walk-ups: give the browser a chance to draw after every
+    // ~200 ms of building work, so a heavy tile never blocks the page for seconds on a slow CPU (software WebGL,
+    // phones). Ordinary tiles build in well under that and never yield (each yield may cost a whole frame there).
     let tY = performance.now();
     const breathe = async () => {
-      if (performance.now() - tY < 12) return;
+      if (performance.now() - tY < 200) return;
       await new Promise(r => setTimeout(r, 0));
       tY = performance.now();
     };
