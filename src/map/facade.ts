@@ -231,7 +231,7 @@ export function buildFacade(c: FCtx) {
   for (const b of c.blds) {
     if (!b.wins || !near(b.c[0], b.c[1], R)) continue;
     // v23.9 infill row houses only get 3D window units in the closest blocks (painted windows beyond)
-    if (b.fill && !near(b.c[0], b.c[1], R * 0.5)) continue;
+    if (b.fill && !near(b.c[0], b.c[1], R * 0.25)) continue;
     const style = rnd();
     const aluC = style < 0.6 ? 0xb8bcc0 : style < 0.85 ? 0x6a5a48 : 0x3a3a3a; // 銀色/茶色鋁窗/黑框
     const cagePat = Math.floor(rnd() * 4),

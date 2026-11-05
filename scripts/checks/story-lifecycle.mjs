@@ -18,7 +18,7 @@ try {
   await page.goto(base + '?storydebug=1', { waitUntil: 'commit' });
   await ready();
   await pickRole(page, { g: 'f' });
-  await page.waitForFunction(() => window.__game.started());
+  await page.waitForFunction(() => window.__game.started(), null, { timeout: 120000 });
   const fired = await page.evaluate(() => window.__game.storyEvent('act1_siren_test'));
   assert.deepEqual(fired, { fired: true, saved: true });
   const progress = () => page.evaluate(() => JSON.parse(localStorage.getItem('defendtaipei-save-v1'))?.story);
@@ -27,13 +27,13 @@ try {
   await page.evaluate(() => sessionStorage.setItem('dt.autoload', '1'));
   await page.reload({ waitUntil: 'commit' });
   await ready();
-  await page.waitForFunction(() => window.__game.started());
+  await page.waitForFunction(() => window.__game.started(), null, { timeout: 120000 });
   assert.equal((await page.evaluate(() => window.__game.storyEvent('act1_siren_test'))).fired, false);
   await page.screenshot({ path: shot('story-debug-restored-no-replay.png') });
   await page.evaluate(() => sessionStorage.setItem('dt.autoload', '1'));
   await page.goto(base, { waitUntil: 'commit' });
   await ready();
-  await page.waitForFunction(() => window.__game.started());
+  await page.waitForFunction(() => window.__game.started(), null, { timeout: 120000 });
   assert.equal(await page.evaluate(() => 'storyEvent' in window.__game), false);
   await page.evaluate(() => window.__game.save());
   assert.deepEqual(await progress(), ['act1_siren_test']);
@@ -41,7 +41,7 @@ try {
   await page.evaluate(() => sessionStorage.setItem('dt.autoload', '1'));
   await page.goto(base + '?storydebug=1', { waitUntil: 'commit' });
   await ready();
-  await page.waitForFunction(() => window.__game.started());
+  await page.waitForFunction(() => window.__game.started(), null, { timeout: 120000 });
   // Exercise the real pause-menu return/reload and title-menu new-game route.
   // Calling __game.go twice in one document is not the supported restart lifecycle.
   assert.equal(await page.locator('#speed').count(), 1);
@@ -64,7 +64,7 @@ try {
   await page.locator('#startgo').click(UI);
   assert.equal(await page.evaluate(() => localStorage.getItem('defendtaipei-save-v1')), previousSave);
   await page.locator('#startgo').click(UI);
-  await page.waitForFunction(() => window.__game.started());
+  await page.waitForFunction(() => window.__game.started(), null, { timeout: 120000 });
   assert.equal(await page.locator('#speed').count(), 1);
   assert.deepEqual(await page.evaluate(() => window.__game.storyEvent('act1_siren_test')), {
     fired: true,

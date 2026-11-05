@@ -520,7 +520,7 @@ export function buildDecay(c: DCtx) {
     const pts: V2[] = b.pts;
     for (let i = 0; i < pts.length; i++) {
       // v23.9 infill row houses: side walls are party walls, dress only the street front and the back
-      if (b.fill && i % 2) continue;
+      if (b.fill && i !== 0) continue;
       const a = pts[i],
         e = pts[(i + 1) % pts.length];
       const L = Math.hypot(e[0] - a[0], e[1] - a[1]);

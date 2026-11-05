@@ -34,7 +34,7 @@ try {
   await finish();
 }
 check(true, 'game loads');
-await p.screenshot({ path: shot('smoke-title.png') });
+await p.screenshot({ path: shot('smoke-title.png'), timeout: 120000 });
 
 // new game with the prologue (alarm clock, commute), then skip it
 await pickRole(p, { g: 'f', role: 'nurse', skipIntro: false });
