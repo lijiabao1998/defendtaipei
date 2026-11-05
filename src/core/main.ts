@@ -7261,7 +7261,7 @@ async function boot() {
   };
   const nearestBy = (f: (b: Bld) => boolean, from: V2, minD = 0, maxD = 1e9) =>
     blds
-      .filter(b => b.door && f(b))
+      .filter(b => b.door && !(b as any).fill && f(b)) // v23.9 role spawns stay on OSM buildings
       .map(b => [b, Math.hypot(b.c[0] - from[0], b.c[1] - from[1])] as const)
       .filter(([, d]) => d >= minD && d <= maxD)
       .sort((a, b) => a[1] - b[1])[0]?.[0];
