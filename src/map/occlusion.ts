@@ -23,6 +23,19 @@ export const CUT = {
   /** fragments above this height are cut; 1e9 = off */
   y: { value: 1e9 },
 };
+// v24.13 street signs: each carries its building's centre (attribute aBld) and goes ghostly by the very rule that turns
+// that building's walls see-through (main.ts: near && dx + dz in -4..30 && |dx - dz| < 22), so a sign fades exactly when
+// its own wall does, instead of floating solid. Materials opt in with userData.front and customProgramCacheKey.
+const NL = String.fromCharCode(10);
+const GLSL_FRONT = /* glsl */ `
+    if (occW.y > 0.35) {
+      vec2 frD = vBld - uOccP.xz;
+      float frA = frD.x + frD.y;
+      if (abs(frD.x) < 40.0 && abs(frD.y) < 40.0 && frA > -4.0 && frA < 30.0 && abs(frD.x - frD.y) < 22.0) {
+        if (mod(floor(gl_FragCoord.x), 2.0) + mod(floor(gl_FragCoord.y), 2.0) > 0.5) discard;
+      }
+    }
+`;
 const GLSL = /* glsl */ `
   if (uOccOn > 0.5) {
     vec3 occW = cameraPosition + transpose(mat3(viewMatrix)) * (-vViewPosition);
@@ -35,6 +48,7 @@ const GLSL = /* glsl */ `
       float occS = mod(floor(gl_FragCoord.x) + floor(gl_FragCoord.y), 2.0);
       if (occE < 0.5 || occS < 0.5) discard;
     }
+    /*FRONT*/
     if (uCutMe > 0.5 && occW.y > uCutY) {
       // the fragment itself is inside the building box, or it hides a floor point of the box from the camera
       vec3 cutR = isOrthographic ? -(transpose(mat3(viewMatrix)) * vec3(0.0, 0.0, 1.0)) : occW - cameraPosition;
@@ -68,10 +82,22 @@ THREE.Material.prototype.onBeforeCompile = function (
       return m.userData?.cut ? 1 : 0;
     },
   };
+  const fr = !!m.userData?.front;
+  if (fr)
+    sh.vertexShader =
+      'attribute vec2 aBld;' +
+      NL +
+      'varying vec2 vBld;' +
+      NL +
+      sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>' + NL + 'vBld = aBld;');
   sh.fragmentShader =
     'uniform vec3 uOccP;\nuniform float uOccR;\nuniform float uOccOn;\n' +
     'uniform vec4 uCutF;\nuniform vec4 uCutB;\nuniform float uCutY;\nuniform float uCutMe;\n' +
-    fs.replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n' + GLSL);
+    (fr ? 'varying vec2 vBld;' + NL : '') +
+    fs.replace(
+      '#include <clipping_planes_fragment>',
+      '#include <clipping_planes_fragment>' + NL + GLSL.replace('/*FRONT*/', fr ? GLSL_FRONT : ''),
+    );
 };
 /** call once per frame before rendering */
 export function updateOcclusion(px: number, py: number, pz: number, on = true) {
