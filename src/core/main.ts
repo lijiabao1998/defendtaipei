@@ -39,6 +39,7 @@ import {
 } from '../map/arcade';
 import { RainFx, makeUmbrella } from '../systems/rain';
 import { Reclaim, reclaimTitle } from '../systems/reclaim';
+import { buildHuaxi } from '../map/huaxi';
 import { RemnantSystem, type RemSave } from '../npc/remnant';
 import { JapanSupport, JP_LABEL, type JpKind } from '../systems/japan';
 import { buildWreckage, wreckStats } from '../map/wreckage';
@@ -3131,6 +3132,8 @@ function setupWreckage(sc: V2) {
     roadW: ROADW,
     bldAt: (x, z) => bldAt(x, z),
     blocked: (x, z) => nearDoor(x, z) || Math.hypot(x - sc[0], z - sc[1]) < 14,
+    // v24.16 no abandoned cars on a pedestrian market street
+    keepOff: (x, z) => !!huaxi?.covers(x, z),
     addSeg: (a, b, h) => wreckSegs.push({ a, b, h } as Seg),
     rnd,
   });
@@ -6337,6 +6340,7 @@ function checkSectors(silent = false) {
   rocCheck(silent);
 }
 
+let huaxi: ReturnType<typeof buildHuaxi> | null = null;
 // ---------- v24.14 奪回: a reclaimed district changes on the street, and it pays ----------
 let reclaim: Reclaim | null = null;
 let reclaimSynced = false;
@@ -7044,6 +7048,7 @@ function update(dt: number) {
     player.mesh.position.y += roofB ? roofB.h : walkH(player.pos.x, player.pos.z); // v21.4 stand on the raised walk (v22.5 or a roof)
   }
   // v21.2 shader cutaway around the camera→player line (see occlusion.ts); camera itself unchanged
+  OCC.r.value = up || indoorAt(player.pos.x, player.pos.z) ? 3 : 6; // v24.16 outdoors: see the street behind the block
   updateOcclusion(player.pos.x, player.pos.y, player.pos.z);
   // v23.3 inside an enterable district building: cut its upper floors and roof away (core blocks lower their walls)
   setBuildingCut(
@@ -7459,6 +7464,7 @@ function update(dt: number) {
   }
   updateLamps((1 - dayF) * PW, dt);
   decay?.update(dt, (1 - dayF) * PW, player.pos.x, player.pos.z);
+  huaxi?.update((1 - dayF) * PW);
   facade?.update(1 - dayF, PW);
   alley?.update(dt, (1 - dayF) * PW, player.pos.x, player.pos.z, PW);
   roadMat.roughness = 0.95 - (1 - dayF) * 0.55;
@@ -8109,6 +8115,29 @@ async function boot() {
   }
   if (bestR) nightMarket(bestR.p, bestR.t === 'tertiary' ? 9 : 6, fx, 'nm');
   setupArmor(start!.c as V2);
+  // v24.16 華西街觀光夜市 over the real pedestrian stretch (桂林路 to 廣州街); search the stalls for food
+  {
+    const hx = roads.filter(q => q.n === '華西街' && q.t === 'pedestrian');
+    const line = hx
+      .slice()
+      .sort((a, b) => a.p[0][1] - b.p[0][1])
+      .filter(q => q.p[q.p.length - 1][1] > 300)
+      .flatMap(q => q.p) as V2[];
+    if (line.length >= 2) {
+      const others = roads.filter(q => !hx.includes(q));
+      huaxi = buildHuaxi({
+        scene,
+        road: line,
+        addSeg: (a, b) => addSeg({ a, b }),
+        crossing: (x, z) => others.some(q => q.p.some((p: V2) => Math.abs(p[0] - x) < 5 && Math.abs(p[1] - z) < 5)),
+      });
+      for (const c of huaxi.conts) {
+        const ct = makeCont(c.id, c.p, 'crate', undefined, { ...c.items });
+        ct.label = c.label;
+        (ct.mesh as THREE.Object3D).visible = false;
+      }
+    }
+  }
   // v24.15 what can be searched in the temple: the altars are part of its model, so the crates themselves stay unseen
   for (const c of district.landConts) {
     const ct = makeCont(c.id, c.p, 'crate', undefined, { ...c.items });
@@ -9247,6 +9276,14 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.16 華西街
+    huaxi: () =>
+      huaxi && {
+        bays: huaxi.bays,
+        frames: huaxi.frames,
+        across: huaxi.across,
+        conts: conts.filter(c => /^hx\d/.test(c.id)).map(c => ({ id: c.id, label: c.label, p: c.p, items: c.items })),
+      },
     // v24.15 the temple: where it is, how heavy, and whether a straight walk is clear of its walls
     temple: () => ({
       ...district.templeStats,

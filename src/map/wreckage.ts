@@ -15,6 +15,8 @@ export type WreckDeps = {
   bldAt: (x: number, z: number) => unknown;
   /** keep clear: doorways, the spawn, junction centres */
   blocked: (x: number, z: number) => boolean;
+  /** v24.15 nothing is left here: checked as the last step of placing, so rnd() keeps its sequence */
+  keepOff?: (x: number, z: number) => boolean;
   addSeg: (a: V2, b: V2, h: number) => void;
   rnd: () => number;
 };
@@ -93,6 +95,7 @@ export function buildWreckage(d: WreckDeps) {
   const free = (x: number, z: number, r: number) =>
     !d.bldAt(x, z) && !d.blocked(x, z) && taken.every(q => Math.hypot(q[0] - x, q[1] - z) > r);
   const put = (list: Inst[], x: number, z: number, ang: number, c: number, tilt = 0, y = 0) => {
+    if (d.keepOff?.(x, z)) return;
     const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, ang, tilt, 'YXZ'));
     list.push({
       m: new THREE.Matrix4().compose(new THREE.Vector3(x, y, z), q, new THREE.Vector3(1, 1, 1)),
@@ -102,6 +105,7 @@ export function buildWreckage(d: WreckDeps) {
   };
   /** a vehicle's footprint as low cover (cars 1.45 m, buses 2.8 m stop everything) */
   const cover = (x: number, z: number, ang: number, w: number, l: number, h: number) => {
+    if (d.keepOff?.(x, z)) return;
     const ux = Math.sin(ang),
       uz = Math.cos(ang),
       vx = uz,
