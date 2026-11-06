@@ -883,15 +883,24 @@ let fpv: FPV | null = null,
   recon: Recon | null = null;
 // v22.9 artillery: realistic radii (old: 7 m linear, ±7 m spread, no telegraph, soldiers unhurt)
 const SHELL = { core: 6, wound: 18, spread: 4.5, lead: 6, gap: 1.3, n: 4, coreDmg: 85, woundDmg: 50 };
-const shells: { t: number; p: V2; w?: ReturnType<BlastFX['warn']>; wh?: boolean }[] = [];
+const shells: {
+  t: number;
+  p: V2;
+  w?: ReturnType<BlastFX['warn']>;
+  wh?: boolean;
+  /** v24.21 what is coming down (default: the old artillery shell) */
+  k?: WarWeapon;
+}[] = [];
 const blastFx = new BlastFX(scene, SET.quality, {
   wind: () => (raining() ? [2.2, 0.9] : [0.9, 0.35]),
 });
 setBoomFx((p, big) => {
-  const d = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
+  // upstairs you are on another part of the map: hear it from the foot of the stairs
+  const q = mapPos();
+  const d = Math.hypot(q[0] - p.x, q[1] - p.z);
   blastFx.explode(p, big);
   blastFx.kick(d, big);
-  AU.shellBoom(d, indoorAt(player.pos.x, player.pos.z), big);
+  AU.shellBoom(d, !!up || indoorAt(player.pos.x, player.pos.z), big);
 });
 /** shell damage factor at distance d: full lethal core, then quadratic falloff to the wounding radius */
 function shellDmg(d: number) {
@@ -1004,18 +1013,27 @@ function updateShells(dt: number) {
     shells.splice(i, 1);
     blastFx.unwarn(s.w);
     const p = new THREE.Vector3(s.p[0], 0.5, s.p[1]);
-    boom(scene, p, 1.4);
-    noise(p.x, p.z, 60);
+    const W = s.k;
+    boom(scene, p, W ? W.big : 1.4);
+    noise(p.x, p.z, W ? W.wound * 2 : 60, !!W);
+    if (W) warImpact(W, s.p);
+    const dmgAt = (d: number) => (W ? weaponDmg(W, d) : shellDmg(d));
+    const wound = W ? W.wound : SHELL.wound,
+      core = W ? W.core : SHELL.core;
     for (const o of sols) {
       if (o.state === 'dead') continue;
       const d = Math.hypot(o.pos.x - p.x, o.pos.z - p.z);
-      if (d < SHELL.wound) damageSol(o, d < SHELL.core ? 300 : shellDmg(d) * 1.5, true);
+      if (d < wound) damageSol(o, d < core ? 300 : dmgAt(d) * 1.5, true);
     }
-    const dp = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
-    let dmg = shellDmg(dp);
+    // on an upper floor you are in the building that stands at the foot of the stairs
+    const mp = mapPos();
+    const dp = Math.hypot(mp[0] - p.x, mp[1] - p.z);
+    if (W) blastFx.kick(dp, W.big);
+    let dmg = dmgAt(dp);
     if (dmg <= 0) continue;
     // indoors the walls stop almost all fragments; low walls / arcade pillars (cover) halve them
-    if (indoorAt(player.pos.x, player.pos.z)) dmg *= 0.15;
+    // (a missile is another matter: close in, the blast comes through the walls)
+    if (up || indoorAt(player.pos.x, player.pos.z)) dmg *= W ? (dp < core ? 0.6 : 0.25) : 0.15;
     else if (findCover(player.pos.x, player.pos.z, 1.4)) dmg *= 0.5;
     lastShellHit = Math.round(dmg);
     player.hp -= dmg;
@@ -1027,6 +1045,199 @@ function updateShells(dt: number) {
   }
 }
 let lastShellHit = 0;
+// ---------- v24.21 the war gets worse: distant gunfire, shelling, and now and then a rocket or a missile ----------
+// Radii and damage are rough game values scaled from public figures for warhead weight and tuned for play. Not a simulation.
+type WarWeapon = {
+  id: string;
+  name: string;
+  core: number;
+  wound: number;
+  coreDmg: number;
+  woundDmg: number;
+  big: number;
+  lead: number;
+};
+const WAR: Record<'mortar' | 'rocket' | 'srbm' | 'cruise', WarWeapon> = {
+  mortar: {
+    id: 'mortar',
+    name: tr('迫擊砲彈', 'Mortar round'),
+    core: 6,
+    wound: 18,
+    coreDmg: 85,
+    woundDmg: 50,
+    big: 1.4,
+    lead: 5,
+  },
+  rocket: {
+    id: 'rocket',
+    name: tr('遠程火箭彈', 'Long-range rocket'),
+    core: 16,
+    wound: 45,
+    coreDmg: 190,
+    woundDmg: 70,
+    big: 2.6,
+    lead: 8,
+  },
+  srbm: {
+    id: 'srbm',
+    name: tr('短程彈道飛彈', 'Short-range ballistic missile'),
+    core: 24,
+    wound: 70,
+    coreDmg: 240,
+    woundDmg: 80,
+    big: 4,
+    lead: 10,
+  },
+  cruise: {
+    id: 'cruise',
+    name: tr('巡弋飛彈', 'Cruise missile'),
+    core: 22,
+    wound: 62,
+    coreDmg: 230,
+    woundDmg: 75,
+    big: 3.6,
+    lead: 9,
+  },
+};
+const weaponDmg = (W: WarWeapon, d: number) =>
+  d < W.core
+    ? W.coreDmg * (1 - 0.4 * (d / W.core))
+    : d < W.wound
+      ? W.woundDmg * ((W.wound - d) / (W.wound - W.core))
+      : 0;
+const warStat = { level: 0, gunfire: 0, shells: 0, rockets: 0, missiles: 0, craters: 0 };
+/** the level at which shells start to fall: about the evening of the first day */
+const WAR_START = 0.1;
+let warGunT = 18,
+  warShellT = 160,
+  warBigT = 420,
+  warFireT = 0;
+/** 0 at the landing, 1 about a week in; a counter-offensive makes it hotter */
+const warLevel = () => clamp((gameMin / 1440 - 0.25) / 6 + liberated.size * 0.015, 0, 1);
+const warFires: { x: number; z: number; r: number; t: number }[] = [];
+/** where to bring it down: a ring around the player */
+function warSpot(minD: number, maxD: number): V2 {
+  const P = mapPos();
+  const a = Math.random() * Math.PI * 2,
+    d = minD + Math.random() * (maxD - minD);
+  return [P[0] + Math.cos(a) * d, P[1] + Math.sin(a) * d];
+}
+function warBarrage(n: number, p: V2) {
+  warStat.shells += n;
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283,
+      r = 3 + Math.random() * 16;
+    const q: V2 = [p[0] + Math.cos(a) * r, p[1] + Math.sin(a) * r];
+    shells.push({
+      t: WAR.mortar.lead + i * (0.9 + Math.random() * 1.2),
+      p: q,
+      k: WAR.mortar,
+      w: blastFx.warn(q[0], q[1], WAR.mortar.core, WAR.mortar.wound),
+    });
+  }
+}
+function warStrike(W: WarWeapon, p: V2) {
+  if (W.id === 'rocket') warStat.rockets++;
+  else warStat.missiles++;
+  shells.push({ t: W.lead, p, k: W, w: blastFx.warn(p[0], p[1], W.core, W.wound) });
+  siren(true, 'alert');
+  log(
+    getLanguage() === 'en'
+      ? `⚠ Air raid warning! ${W.name} incoming. Get indoors or out of the ring!`
+      : `⚠ 防空警報！${W.name}來襲，快躲進室內或離開紅圈！`,
+    '#f66',
+  );
+  slowDown(tr('防空警報', 'Air raid warning'));
+}
+/** what a big warhead leaves behind: a burning crater */
+function warImpact(W: WarWeapon, p: V2) {
+  if (W.id === 'mortar') return;
+  warStat.craters++;
+  // a big warhead throws fire and earth above the rooftops
+  const col = W.big * 5;
+  for (let i = 0; i < 26; i++) {
+    const a = Math.random() * 6.283,
+      r = Math.random() * W.core * 0.22,
+      y = 3 + Math.random() * col;
+    blastFx.fire.spawn({
+      k: 0,
+      x: p[0] + Math.cos(a) * r,
+      y,
+      z: p[1] + Math.sin(a) * r,
+      vy: 3 + Math.random() * 6,
+      life: 0.5 + Math.random() * 0.7,
+      s0: W.big * 1.1,
+      s1: W.big * 2.6,
+      a0: 0.85,
+    });
+    blastFx.smoke.spawn({
+      k: 2,
+      x: p[0] + Math.cos(a) * r,
+      y: y + 2,
+      z: p[1] + Math.sin(a) * r,
+      vy: 2 + Math.random() * 5,
+      age: -0.3 - Math.random() * 0.5,
+      life: 6 + Math.random() * 5,
+      s0: W.big * 1.2,
+      s1: W.big * 4,
+      a0: 0.9,
+    });
+  }
+  warFires.push({ x: p[0], z: p[1], r: W.core * 0.35, t: 45 });
+  if (warFires.length > 5) warFires.shift();
+  const d = Math.hypot(mapPos()[0] - p[0], mapPos()[1] - p[1]);
+  log(
+    getLanguage() === 'en'
+      ? `💥 ${W.name} hit about ${Math.round(d)} m from you. The ground shakes and windows blow in.`
+      : `💥 ${W.name}落在約 ${Math.round(d)} 公尺外，地面在晃，玻璃全碎了。`,
+    '#fa8',
+  );
+}
+function warTick(dt: number) {
+  const L = (warStat.level = warLevel());
+  // the war in the distance: bursts of small arms, more often as it goes on
+  if ((warGunT -= dt) <= 0) {
+    warGunT = (40 - 32 * L) * (0.6 + Math.random() * 0.8);
+    warStat.gunfire++;
+    const dist = 140 + Math.random() * 380;
+    const kind = Math.random() < 0.3 ? 'mg' : 'rifle';
+    const n = 3 + Math.floor(Math.random() * (5 + 10 * L));
+    const indoors = !!up || indoorAt(player.pos.x, player.pos.z);
+    for (let i = 0; i < n; i++)
+      setTimeout(() => AU.gunshot(kind as any, dist, indoors), i * (kind === 'mg' ? 90 : 170 + Math.random() * 240));
+  }
+  // burning craters
+  if (warFires.length && (warFireT -= dt) <= 0) {
+    warFireT = 0.28;
+    for (let i = warFires.length - 1; i >= 0; i--) {
+      const f = warFires[i];
+      f.t -= 0.28;
+      if (f.t <= 0) {
+        warFires.splice(i, 1);
+        continue;
+      }
+      const a = Math.random() * 6.283,
+        r = Math.random() * f.r;
+      const x = f.x + Math.cos(a) * r,
+        z = f.z + Math.sin(a) * r;
+      blastFx.fire.spawn({ k: 0, x, y: 0.5, z, vy: 1.6, life: 0.8, s0: 1.2, s1: 2.2, a0: 0.8 });
+      blastFx.smoke.spawn({ k: 2, x, y: 1.2, z, vy: 1.8, life: 4.5, s0: 1.8, s1: 6, a0: 0.42 });
+    }
+  }
+  // nothing falls on the first day, or while you are asleep with nobody on watch
+  if (L < WAR_START || player.sleeping) return;
+  if ((warShellT -= dt) <= 0) {
+    warShellT = (260 - 190 * L) * (0.7 + Math.random() * 0.6);
+    warBarrage(2 + Math.floor(Math.random() * (2 + 3 * L)), warSpot(30, 130));
+  }
+  if (L > 0.3 && (warBigT -= dt) <= 0) {
+    warBigT = (900 - 600 * L) * (0.7 + Math.random() * 0.6);
+    const r = Math.random();
+    const W = r < 0.55 ? WAR.rocket : r < 0.8 ? WAR.cruise : WAR.srbm;
+    // inside the wound ring only once the war is at its worst
+    warStrike(W, warSpot(W.core + 8 + (1 - L) * 60, 240));
+  }
+}
 // ---------- v24.20 hand grenades: thrown the way you face, a four-second-ish fuse, about 5 m lethal, 15 m wounding ----------
 const GREN = { core: 5, wound: 15, fuse: 3.5, range: 13, coreDmg: 95, woundDmg: 42, oldDud: 0.3 };
 const grenades: {
@@ -7562,6 +7773,7 @@ function update(dt: number) {
   if (started && !PRO.on && !MP) rescueTick();
   if (started && !PRO.on) reclaimTick();
   if (grenades.length) grenadeTick(dt);
+  if (started && !PRO.on && !MP) warTick(dt);
   if (rescueRig) animate(rescueRig.rig, 'idle', 0, dt);
   if (liaison) {
     const d = Math.hypot(player.pos.x - liaison.p[0], player.pos.z - liaison.p[1]);
@@ -9457,6 +9669,13 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.21 the war gets worse
+    war: () => ({ ...warStat, pending: shells.length, fires: warFires.length }),
+    WAR,
+    warStrike: (id: 'mortar' | 'rocket' | 'srbm' | 'cruise', x: number, z: number) => warStrike(WAR[id], [x, z]),
+    warBarrage: (n: number, x: number, z: number) => warBarrage(n, [x, z]),
+    warTickNow: (dt: number) => warTick(dt),
+    weaponDmg,
     // v24.20 hands and the stations
     losTest: (a: V2, b: V2) => blastReach(a, b),
     grenades: () => grenades.map(g => ({ t: g.t, b: g.b, dud: g.dud })),
