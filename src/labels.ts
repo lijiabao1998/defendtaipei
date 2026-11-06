@@ -3,6 +3,14 @@ import { getLanguage } from './i18n';
 /** Display-only localization. Keep persisted labels and gameplay comparison keys unchanged. */
 const EN_LABELS: Readonly<Record<string, string>> = {
   國軍補給箱: 'ROC supply crate',
+  // v24.18 東三水街市場
+  菜攤: 'Vegetable stall',
+  魚攤: 'Fish stall',
+  肉攤: 'Butcher',
+  雜糧行: 'Grain merchant',
+  雞蛋行: 'Egg stall',
+  麵攤: 'Noodle stall',
+  熟食攤: 'Cooked food stall',
   // v24.17 西門紅樓、剝皮寮
   雜貨: 'General goods shop',
   中藥行: 'Chinese herbal shop',

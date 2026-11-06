@@ -191,6 +191,28 @@ const upperTex = canvasTex(128, 128, c => {
     c.fill();
   }
 });
+// v24.18 the same bay in coursed masonry; the vertex tint makes it red brick or small white tile
+const upperAltTex = canvasTex(128, 128, c => {
+  c.fillStyle = '#b4aea2';
+  c.fillRect(0, 0, 128, 128);
+  for (let r = 0; r < 32; r++)
+    for (let k = -1; k < 11; k++) {
+      const v = 214 + Math.random() * 40;
+      c.fillStyle = `rgb(${v},${v},${v})`;
+      c.fillRect(k * 12 + (r % 2 ? 6 : 0), r * 4, 11, 3);
+    }
+  c.fillStyle = '#4a4c48';
+  c.fillRect(22, 30, 84, 62);
+  c.fillStyle = '#7d8a86';
+  c.fillRect(25, 33, 38, 56);
+  c.fillRect(65, 33, 38, 56);
+  c.fillStyle = 'rgba(190,210,210,.45)';
+  c.fillRect(27, 35, 34, 24);
+  c.fillRect(67, 35, 34, 24);
+  c.fillStyle = '#e8e2d6';
+  c.fillRect(0, 112, 128, 16);
+  stain(c, 128, 128, 6, 0.3);
+});
 // ground floor: rolled steel shutter / open shop front
 const shutTex = canvasTex(128, 128, c => {
   c.fillStyle = '#8d9190';
@@ -242,6 +264,7 @@ const signTex = canvasTex(512, 384, c => {
 });
 signTex.repeat.set(1, 1);
 const upperMat = new THREE.MeshStandardMaterial({ map: upperTex, vertexColors: true, roughness: 0.95 });
+const upperAltMat = new THREE.MeshStandardMaterial({ map: upperAltTex, vertexColors: true, roughness: 0.92 });
 const shutMat = new THREE.MeshStandardMaterial({ map: shutTex, vertexColors: true, roughness: 0.8, metalness: 0.2 });
 const vcMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85 });
 const metalMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.45 });
@@ -416,6 +439,10 @@ export class District {
     for (const e of this.egrid.get(Math.floor(x / EG) + ',' + Math.floor(z / EG)) || [])
       if (x > e.minx && x < e.maxx && z > e.minz && z < e.maxz && pip([x, z], e.pts)) return e;
     return null;
+  }
+  /** v24.18 what is loaded right now */
+  *loadedInfos() {
+    for (const t of this.tiles.values()) yield t.info;
   }
   /** v23.3 every enterable building of the loaded tiles */
   *enterables() {
@@ -660,6 +687,7 @@ export class District {
     g.name = 'tile:' + key;
     g.add(detail);
     const segs: Seg[] = [];
+    const upAlt: THREE.BufferGeometry[] = [];
     const up: THREE.BufferGeometry[] = [],
       gr: THREE.BufferGeometry[] = [],
       misc: THREE.BufferGeometry[] = [],
@@ -922,8 +950,13 @@ export class District {
           gr.push(wallQuad(d1, [c[0], c[1]], 0, gH, [uAt(d1), uAt(c), 0, 1], out, tint, 0.06));
           gr.push(wallQuad(d0, d1, DOOR_H, gH, [uAt(d0), uAt(d1), DOOR_H / GF, 1], out, tint, 0.06));
         } else gr.push(wallQuad([a[0], a[1]], [c[0], c[1]], 0, gH, [uAt(a), uAt(c), 0, 1], out, tint, 0.06));
-        if (h > GF)
-          up.push(wallQuad([a[0], a[1]], [c[0], c[1]], GF, h, [uAt(a), uAt(c), 0, (h - GF) / FH], out, tint, 0.06));
+        if (h > GF) {
+          // v24.18 about one building in four: red brick or small white tile, picked by position so rnd() is untouched
+          const ah = Math.abs(Math.sin(pts[0][0] * 12.9898 + pts[0][1] * 78.233) * 43758.5453) % 1;
+          const list = ah < 0.25 ? upAlt : up,
+            ut = ah < 0.14 ? 0xc06a4c : ah < 0.25 ? 0xf8f6ee : tint;
+          list.push(wallQuad([a[0], a[1]], [c[0], c[1]], GF, h, [uAt(a), uAt(c), 0, (h - GF) / FH], out, ut, 0.06));
+        }
         if (ent) {
           // v23.3 plastered inner face, inset so it never fights the outer one; split around the doorway too
           const inn: V2 = [-nx, -nz];
@@ -1111,6 +1144,7 @@ export class District {
     add(vsG, vsignMat, detail, false);
     tileG.forEach((gs, i) => add(gs, ARCADE_MATS[i], g, false));
     add(up, upperMat, g);
+    add(upAlt, upperAltMat, g);
     add(gr, shutMat, g);
     add(misc, vcMat, g);
     add(metal, metalMat, detail, false);

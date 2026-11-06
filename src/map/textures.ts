@@ -20,6 +20,26 @@ const wallTexs = WALLC.map((col, wi) =>
     const tile = wi % 2 === 0; // 二丁掛 tile facades vs. painted render
     c.fillStyle = col;
     c.fillRect(0, 0, 256, 256);
+    // v24.18 from street photos: old shop-houses in red brick, and in small white tile (小口磚) with dark grout
+    if (wi === 3) {
+      c.fillStyle = '#9c8f7e';
+      c.fillRect(0, 0, 256, 256);
+      for (let r = 0; r < 43; r++)
+        for (let k = -1; k < 14; k++) {
+          const v = 128 + Math.random() * 44;
+          c.fillStyle = `rgb(${v},${v * 0.44},${v * 0.31})`;
+          c.fillRect(k * 19 + (r % 2 ? 9 : 0), r * 6, 18, 5);
+        }
+    } else if (wi === 5) {
+      c.fillStyle = '#7f7f78';
+      c.fillRect(0, 0, 256, 256);
+      for (let r = 0; r < 32; r++)
+        for (let k = 0; k < 32; k++) {
+          const v = 212 + Math.random() * 30;
+          c.fillStyle = `rgb(${v},${v},${v - 6})`;
+          c.fillRect(k * 8, r * 8, 7, 7);
+        }
+    }
     if (tile) {
       c.strokeStyle = 'rgba(70,60,50,.35)';
       c.lineWidth = 1;
