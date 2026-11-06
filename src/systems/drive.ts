@@ -626,6 +626,7 @@ export class DriveSystem {
       }); // dusty
     m.g.position.set(x, 0, z);
     m.g.rotation.y = hd;
+    m.g.userData.noCull = true;
     this.d.scene.add(m.g);
     const v: DV = {
       id: this.list.length,
