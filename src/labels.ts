@@ -3,6 +3,18 @@ import { getLanguage } from './i18n';
 /** Display-only localization. Keep persisted labels and gameplay comparison keys unchanged. */
 const EN_LABELS: Readonly<Record<string, string>> = {
   國軍補給箱: 'ROC supply crate',
+  // v24.17 西門紅樓、剝皮寮
+  雜貨: 'General goods shop',
+  中藥行: 'Chinese herbal shop',
+  文創小店: 'Craft stall',
+  紅樓茶坊: 'Red House tea room',
+  老旅社: 'Old inn',
+  鹹粥: 'Savoury congee shop',
+  柑仔店: 'Old corner shop',
+  碾米行: 'Rice mill',
+  理髮廳: 'Barber',
+  舊書店: 'Used book shop',
+  布行: 'Cloth merchant',
   // v24.16 華西街
   海產攤: 'Seafood stall',
   當歸鴨攤: 'Angelica duck stall',

@@ -746,6 +746,12 @@ const mapPos = (): V2 => (up ? up.anchor : [player.pos.x, player.pos.z]);
 const BG = 20;
 let bgN = -1;
 const bGrid = new Map<number, Bld[]>();
+let keepOutRects: [number, number, number, number][] | null = null;
+/** v24.17 inside a walk-in landmark or on the temple square: no vehicles, wrecks or lamps here */
+function onLandmark(x: number, z: number) {
+  keepOutRects ??= district.ix ? District.keepOut(district.ix) : [];
+  return keepOutRects.some(r => x > r[0] && x < r[2] && z > r[1] && z < r[3]);
+}
 /** every core building that is actually in the world (v24.15) */
 const liveBlds = () => blds.filter(b => !(b as any).ghost);
 function bldAt(x: number, z: number) {
@@ -1791,12 +1797,16 @@ function buildMap(data: any) {
             [hw, hl],
             [-hw, hl],
           ].map(([a, b]) => [x + a * nx + b * ux, z + a * nz + b * uz] as V2);
-          for (let q = 0; q < 4; q++) addSeg({ a: cs[q], b: cs[(q + 1) % 4], h: kind === 'truck' ? 2.8 : 1.45 });
+          if (!onLandmark(x, z))
+            for (let q = 0; q < 4; q++) addSeg({ a: cs[q], b: cs[(q + 1) % 4], h: kind === 'truck' ? 2.8 : 1.45 });
         }
       }
     }
   }
+  // rnd() is spent per spot, so a vehicle on a landmark is sent far off the map rather than dropped from the list
+  for (const q of spots) if (onLandmark(q.x, q.z)) ((q.x = 1e5), (q.z = 1e5));
   vehicles.build(spots, mergeGeometries, rnd);
+  for (let i = lamps.length - 1; i >= 0; i--) if (onLandmark(lamps[i][0], lamps[i][1])) lamps.splice(i, 1);
   buildLamps();
 }
 
@@ -2524,7 +2534,7 @@ function spawnDrivables(c: V2) {
       uz = (bz - az) / L;
     const x = (ax + bx) / 2 - uz * (w / 2 - 1.6),
       z = (az + bz) / 2 + ux * (w / 2 - 1.6);
-    if (bldAt(x, z)) continue;
+    if (bldAt(x, z) || onLandmark(x, z)) continue;
     const v = drive.spawn('bus', x, z, Math.atan2(ux, uz), r);
     if (drive.blocked(v, x, z, v.hd)) {
       scene.remove(v.g);
@@ -3133,7 +3143,7 @@ function setupWreckage(sc: V2) {
     bldAt: (x, z) => bldAt(x, z),
     blocked: (x, z) => nearDoor(x, z) || Math.hypot(x - sc[0], z - sc[1]) < 14,
     // v24.16 no abandoned cars on a pedestrian market street
-    keepOff: (x, z) => !!huaxi?.covers(x, z),
+    keepOff: (x, z) => !!huaxi?.covers(x, z) || onLandmark(x, z),
     addSeg: (a, b, h) => wreckSegs.push({ a, b, h } as Seg),
     rnd,
   });
@@ -9276,6 +9286,12 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.17 紅樓、剝皮寮
+    landmarks: () => ({
+      ghosts: blds.filter(b => (b as any).ghost).map(b => [b.id, b.c]),
+      list: district.ix?.landmarks ?? [],
+      conts: conts.filter(c => /^lmk_[rb]/.test(c.id)).map(c => ({ id: c.id, label: c.label, p: c.p, items: c.items })),
+    }),
     // v24.16 華西街
     huaxi: () =>
       huaxi && {
