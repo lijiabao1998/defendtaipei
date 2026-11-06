@@ -9013,33 +9013,50 @@ async function boot() {
     R: 110,
   });
   console.log('parks', JSON.stringify(parks));
-  // v24.25 what grows on the core's open ground, before the navigation grid so that it knows about the fences
+  // v24.25 what grows on the core's open ground, before the navigation grid so that it knows about the fences.
+  // In blocks of a few hundred metres, each one draw call: fine enough to leave most of it out, coarse enough for a phone.
   {
-    const L = dressLots({
-      x0: CORE.minx,
-      x1: CORE.maxx,
-      z0: CORE.minz,
-      z1: CORE.maxz,
-      roads: roads.map(r => ({ p: r.p, w: ROADW[r.t.replace('_link', '')] ?? 3 })),
-      seed: 11,
-      maxTris: 110000,
-      taken: (x, z) =>
-        !!bldAt(x, z) ||
-        onLandmark(x, z) ||
-        parks.covers(x, z) ||
-        !!huaxi?.covers(x, z) ||
-        !!market?.covers(x, z) ||
-        Math.hypot(x - start.c[0], z - start.c[1]) < 14,
-    });
-    coreLots = L;
-    if (L.geo) {
-      const lm = new THREE.Mesh(L.geo, lotMaterial());
-      lm.castShadow = LOT_SHADOW;
-      lm.receiveShadow = true;
-      lm.userData.front = false;
-      scene.add(lm);
-    }
-    for (const q of L.segs) addSeg({ a: q.a, b: q.b }, q.low);
+    const NB = 4;
+    const W = (CORE.maxx - CORE.minx) / NB,
+      D = (CORE.maxz - CORE.minz) / NB;
+    const all: LotResult = {
+      geo: null,
+      segs: [],
+      stats: { veg: 0, weeds: 0, park: 0, corner: 0, slab: 0, cells: 0, tris: 0 },
+      stops: [],
+    };
+    const mat = lotMaterial();
+    for (let a = 0; a < NB; a++)
+      for (let b = 0; b < NB; b++) {
+        const L = dressLots({
+          x0: CORE.minx + a * W,
+          x1: CORE.minx + (a + 1) * W,
+          z0: CORE.minz + b * D,
+          z1: CORE.minz + (b + 1) * D,
+          roads: roads.map(r => ({ p: r.p, w: ROADW[r.t.replace('_link', '')] ?? 3 })),
+          seed: 11 + a * 5 + b,
+          maxTris: 10000,
+          taken: (x, z) =>
+            !!bldAt(x, z) ||
+            onLandmark(x, z) ||
+            parks.covers(x, z) ||
+            !!huaxi?.covers(x, z) ||
+            !!market?.covers(x, z) ||
+            Math.hypot(x - start.c[0], z - start.c[1]) < 14,
+        });
+        for (const k of ['veg', 'weeds', 'park', 'corner', 'slab', 'cells', 'tris'] as const)
+          all.stats[k] += L.stats[k];
+        all.stops.push(...L.stops);
+        if (L.geo) {
+          const lm = new THREE.Mesh(L.geo, mat);
+          lm.castShadow = LOT_SHADOW;
+          lm.receiveShadow = true;
+          lm.userData.noChunk = true;
+          scene.add(lm);
+        }
+        for (const q of L.segs) addSeg({ a: q.a, b: q.b }, q.low);
+      }
+    coreLots = all;
   }
   // navigation grid (built after all collision geometry exists)
   nav = new Nav(start.c[0] - 170, start.c[1] - 170, start.c[0] + 170, start.c[1] + 170, 0.5);
@@ -9187,7 +9204,7 @@ async function boot() {
   });
   // v24.6 split the big core-wide merged meshes into 60 m pieces so off-screen parts are culled (src/core/chunk.ts)
   if (new URLSearchParams(location.search).get('chunk') !== '0')
-    chunkStats = chunkify(scene, { instanced: true, icell: 80, iminTris: 20000 });
+    chunkStats = chunkify(scene, { instanced: true, icell: 80, iminTris: 42000 }); // v24.25 trees have about twice the triangles now
   await prog(1, tr('完成', 'Done'));
   // v22.7.1 watchdog: if the title menu has not appeared shortly after loading, offer a clean reload
   setTimeout(() => {

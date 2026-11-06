@@ -327,7 +327,7 @@ export const TRUNK_R: Record<Kind, number> = {
   luan: 0.2,
   luanY: 0.2,
   luanR: 0.2,
-  flame: 0.3,
+  flame: 0.2, // as the 欒樹 it stands in for: a door is placed clear of trunks, so this decides where doors go
   banana: 0.2,
   papaya: 0.1,
   camphor: 0.3,

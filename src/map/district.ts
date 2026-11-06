@@ -645,7 +645,7 @@ export class District {
     const tile = await this.build(k, this.data.get(k)!, (tx + 0.5) * T, (tz + 0.5) * T);
     // v24.6 split the tile's merged meshes (200 m across) into 50 m pieces so off-screen parts are culled
     if (CHUNK) {
-      const cs = chunkify(tile.g, { minTris: 6000, minSpan: 70, cell: 50, instanced: true });
+      const cs = chunkify(tile.g, { minTris: 6000, minSpan: 70, cell: 50, instanced: true, iminTris: 14000 });
       this.stats.chunked += cs.meshes;
     }
     this.stats.builtMs = Math.max(this.stats.builtMs, performance.now() - t0);
@@ -1212,6 +1212,7 @@ export class District {
       if (L.geo) {
         const lm = new THREE.Mesh(L.geo, LOT_MAT);
         lm.castShadow = LOT_SHADOW;
+        lm.userData.noChunk = true; // one draw call for the tile's lots, whatever chunk.ts would have made of it
         lm.receiveShadow = true;
         detail.add(lm);
       }

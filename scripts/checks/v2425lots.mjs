@@ -23,7 +23,7 @@ check(core.core.veg > 0 && core.core.weeds > 0, 'vegetable plots and weedy lots'
 check(core.core.park > 0 || core.core.corner > 0, 'and car parks or shrines');
 check(core.core.slab > 0, 'and old slabs left alone');
 check(core.core.veg < core.core.cells / 12, 'vegetable plots are not most of it');
-check(core.core.tris < 120000, `at a price (${core.core.tris} triangles in all, drawn only where they are)`);
+check(core.core.tris < 200000, `at a price (${core.core.tris} triangles in all, drawn only where they are)`);
 
 // walk about the open places and look
 const views = await p.evaluate(async () => {
