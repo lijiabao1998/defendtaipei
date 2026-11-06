@@ -965,6 +965,12 @@ export class District {
             const M1 = place(bx, 0, bz, ang, 1, 1, 1);
             if (k % 2 === 0 && rnd() < 0.3)
               vsG.push(vsign(bw / 2 - 0.15, GF + 1.6, Math.floor(rnd() * VSN)).applyMatrix4(M1));
+            // v24.12 more blades, chosen by position: rnd() must keep its sequence, because tile garrisons and
+            // everything else built after this draw from it (an extra rnd() here moved a soldier onto the spawn)
+            else if (k % 2 === 0) {
+              const hb = Math.abs(Math.sin(bx * 12.9898 + bz * 78.233) * 43758.5453) % 1;
+              if (hb < 0.17) vsG.push(vsign(bw / 2 - 0.15, GF + 1.6, Math.floor((hb / 0.17) * VSN)).applyMatrix4(M1));
+            }
             for (let f = 1; f < lv; f++) {
               if (rnd() < 0.18) local(ac(-bw / 2 + 0.6, GF + (f - 1) * FH + 0.5), M1, misc);
               if (rnd() < 0.05) local(brickPatch((rnd() - 0.5) * bw, GF + (f - 1) * FH + 1.6, rnd), M1, brickG);

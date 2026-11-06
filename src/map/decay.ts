@@ -675,6 +675,122 @@ export function buildDecay(c: DCtx) {
         }
     }
   }
+  // ---------- v24.12 招牌牆: beyond the spawn blocks every street front of the core still has its signs ----------
+  // Its own RNG, so everything generated after this stays as it was. No shadows: the shadow pass is not touched.
+  const SIGN2: THREE.BufferGeometry[] = [],
+    V2: THREE.BufferGeometry[] = [];
+  const signStats = { blades: 0, boards: 0, bills: 0, acs: 0 };
+  {
+    let rs = 0x51e5a;
+    const r = () => (rs = (Math.imul(rs, 1664525) + 1013904223) >>> 0) / 4294967296;
+    const IRON = 0x3a302a;
+    for (const b of c.blds) {
+      if (b.h < 6.5 || near(b.c[0], b.c[1], R * 0.85)) continue;
+      const pts: V2[] = b.pts;
+      const shop = r() < 0.8; // one street front in five has no shop on it
+      let bill = !b.fill && b.h >= 11 && r() < 0.14; // a big rooftop sign on a steel frame
+      for (let i = 0; i < pts.length; i++) {
+        if (b.fill && i !== 0) continue; // infill row houses: side walls are party walls
+        const a = pts[i],
+          e = pts[(i + 1) % pts.length];
+        const L = Math.hypot(e[0] - a[0], e[1] - a[1]);
+        if (L < 2.5) continue;
+        const ux = (e[0] - a[0]) / L,
+          uz = (e[1] - a[1]) / L;
+        let nx = -uz,
+          nz = ux;
+        const m: V2 = [(a[0] + e[0]) / 2, (a[1] + e[1]) / 2];
+        if (c.pip([m[0] + nx * 0.5, m[1] + nz * 0.5], pts)) {
+          nx = -nx;
+          nz = -nz;
+        }
+        if (c.bldAt(m[0] + nx * 4, m[1] + nz * 4) || c.bldAt(m[0] + nx * 8, m[1] + nz * 8)) continue; // street fronts only
+        const fy = Math.atan2(nx, nz);
+        if (shop) {
+          // vertical blades running up several floors, touching the wall, a little crooked
+          for (let d = 0.7 + r() * 1.4; d < L - 0.5; d += 1.7 + r() * 2.8) {
+            if (r() < 0.22) continue;
+            const w = 0.7 + r() * 0.5,
+              hh = Math.min(w * (3.4 + r() * 1.8), b.h - 4.4);
+            if (hh < 1.4) continue;
+            const y = 3.7 + r() * Math.max(0.1, b.h - 3.9 - hh) + hh / 2;
+            const off = 0.16 + w / 2;
+            SIGN2.push(
+              place(
+                setUV(B(0.1, hh, w), vCell(Math.floor(r() * VSIGNS.length))),
+                a[0] + ux * d + nx * off,
+                y,
+                a[1] + uz * d + nz * off,
+                fy + (r() - 0.5) * 0.1,
+                0,
+                r() < 0.1 ? (r() - 0.5) * 0.5 : (r() - 0.5) * 0.05,
+              ),
+            );
+            signStats.blades++;
+          }
+          // a board over the shopfront
+          if (r() < 0.75) {
+            const w = Math.min(L * 0.75, 2.6 + r() * 3);
+            const d = w / 2 + r() * Math.max(0.01, L - w);
+            SIGN2.push(
+              place(
+                setUV(new THREE.PlaneGeometry(w, w / 4), hCell(Math.floor(r() * HSIGNS.length))),
+                a[0] + ux * d + nx * 0.17,
+                2.95 + r() * 0.35,
+                a[1] + uz * d + nz * 0.17,
+                fy,
+                0,
+                (r() - 0.5) * 0.06,
+              ),
+            );
+            signStats.boards++;
+          }
+        }
+        // split ACs hung on the upper floors
+        for (let y = 4.4; y < b.h - 0.8; y += 3.2)
+          for (let d = 1.2; d < L - 1; d += 2.8 + r()) {
+            if (r() > 0.16) continue;
+            V2.push(
+              color(
+                place(B(0.8, 0.55, 0.4), a[0] + ux * d + nx * 0.28, y, a[1] + uz * d + nz * 0.28, fy),
+                [0xd8d2c0, 0xb8b4a8, 0xe0dccc][Math.floor(r() * 3)],
+                0.12,
+              ),
+            );
+            signStats.acs++;
+          }
+        // the rooftop sign: panel, backing, posts and braces, set back from the parapet
+        if (bill && L >= 7) {
+          bill = false;
+          const w = Math.min(L * 0.85, 5 + r() * 4.5),
+            hh = w / 4,
+            lift = 1.15,
+            d = L / 2,
+            back = 0.8;
+          const at = (s: number, o: number): V2 => [a[0] + ux * (d + s) - nx * o, a[1] + uz * (d + s) - nz * o];
+          const [px, pz] = at(0, back);
+          const yc = b.h + lift + hh / 2;
+          SIGN2.push(
+            place(
+              setUV(new THREE.PlaneGeometry(w, hh), hCell(Math.floor(r() * HSIGNS.length))),
+              px + nx * 0.05,
+              yc,
+              pz + nz * 0.05,
+              fy,
+            ),
+          );
+          V2.push(color(place(B(w + 0.12, hh + 0.12, 0.08), px, yc, pz, fy), IRON));
+          for (const s of [-w * 0.42, 0, w * 0.42]) {
+            const [qx, qz] = at(s, back + 0.06);
+            V2.push(color(place(B(0.12, lift + hh, 0.12), qx, b.h + (lift + hh) / 2, qz, fy), IRON));
+            const [gx, gz] = at(s, back + 0.6);
+            V2.push(color(place(B(0.07, 1.9, 0.07), gx, b.h + 0.75, gz, fy, 0.6), IRON));
+          }
+          signStats.bills++;
+        }
+      }
+    }
+  }
   // ---------- street clutter: trash, debris, burnt cars, sandbags, barricades, checkpoints, potholes, puddles ----------
   const blobShape = (r: number) => {
     const sh = new THREE.Shape();
@@ -971,7 +1087,9 @@ export function buildDecay(c: DCtx) {
     g.deleteAttribute('uv');
     g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
   }
-  add(V, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.05 }));
+  const vMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.05 });
+  add(V, vMat);
+  add(V2, vMat, false); // v24.12 招牌牆: no shadows
   add(WIRE, new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.7 }), false); // overhead cables: no shadow scribbles on the asphalt
   const atlas = signAtlas();
   const signMat = new THREE.MeshStandardMaterial({
@@ -983,6 +1101,7 @@ export function buildDecay(c: DCtx) {
     side: THREE.DoubleSide,
   });
   add(SIGN, signMat);
+  add(SIGN2, signMat, false);
   add(
     HOLE,
     new THREE.MeshStandardMaterial({
@@ -1031,6 +1150,7 @@ export function buildDecay(c: DCtx) {
     polePos: allPoles.map(p => [p.x, p.z] as [number, number]),
     poles: allPoles.length,
     acs: acs.length,
+    signs: signStats,
     update(dt: number, night: number, px: number, pz: number) {
       signMat.emissiveIntensity = 0.12 + night * 0.85;
       dt0 -= dt;

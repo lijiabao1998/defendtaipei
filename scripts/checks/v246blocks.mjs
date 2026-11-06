@@ -38,7 +38,7 @@ const run = async (ctxOpt, label, budget) => {
     s.r.calls <= budget.calls && s.r.tris <= budget.tris,
     `${label}: spawn view within budget (${s.r.calls} calls ≤ ${budget.calls}, ${s.r.tris} tris ≤ ${budget.tris})`,
   );
-  await p.screenshot({ path: shot(`v246-${label}-spawn.png`) });
+  await p.screenshot({ path: shot(`v246-${label}-spawn.png`), timeout: 180000 });
   const rp = await p.evaluate(() => window.__game.roadPt());
   await p.evaluate(q => window.__game.tp(q[0], q[1]), rp);
   await p.waitForTimeout(3000);
@@ -47,7 +47,7 @@ const run = async (ctxOpt, label, budget) => {
     r2.calls <= budget.calls && r2.tris <= budget.tris,
     `${label}: main road within budget (${r2.calls} calls, ${r2.tris} tris)`,
   );
-  await p.screenshot({ path: shot(`v246-${label}-road.png`) });
+  await p.screenshot({ path: shot(`v246-${label}-road.png`), timeout: 180000 });
   await ctx.close();
   return s;
 };
