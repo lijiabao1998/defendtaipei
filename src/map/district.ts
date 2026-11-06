@@ -963,7 +963,7 @@ export class District {
           // v21.5 vertical sign blades, split ACs, peeled render on the street face
           {
             const M1 = place(bx, 0, bz, ang, 1, 1, 1);
-            if (k % 2 === 0 && rnd() < 0.3)
+            if (k % 2 === 0 && rnd() < 0.42)
               vsG.push(vsign(bw / 2 - 0.15, GF + 1.6, Math.floor(rnd() * VSN)).applyMatrix4(M1));
             for (let f = 1; f < lv; f++) {
               if (rnd() < 0.18) local(ac(-bw / 2 + 0.6, GF + (f - 1) * FH + 0.5), M1, misc);

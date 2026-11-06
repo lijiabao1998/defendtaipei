@@ -9110,6 +9110,8 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.12 招牌牆 counts
+    signs: () => decay?.signs ?? null,
     // v24.11 rain hooks
     rainfx: () => ({ ...rainFx.stats, flashK: rainFx.flashK, vis: rainFx.group.visible }),
     rainState: () => ({ amt: WX.amt, int: WX.int, soak: WX.soak, umb: umbOpen, sneezes, raining: raining() }),
