@@ -54,6 +54,7 @@ export const UPG: Record<Upg, { name: string; cost: Record<string, number>; desc
 export const VAL: Record<string, number> = {
   cig: 1,
   umbrella: 1,
+  poncho: 1,
   mask: 2,
   powerbank: 4,
   bread: 1,

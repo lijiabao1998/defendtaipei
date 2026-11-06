@@ -678,10 +678,22 @@ export const ITEMS: Record<string, ItemDef> = {
     ),
   },
   umbrella: {
-    name: tr('折疊傘', 'Folding umbrella'),
+    name: tr('透明雨傘', 'Clear umbrella'),
     w: 0.4,
     kind: 'tool',
-    desc: tr('下雨天很搶手，也能拿來換東西', 'In demand on rainy days. Useful for barter.'),
+    desc: tr(
+      '帶在身上，下雨走在外面會自動撐開（開槍、揮刀時收起）；也能拿來換東西',
+      'Carry it and it opens over you when you walk in the rain (closed while you shoot or swing). Also good for barter.',
+    ),
+  },
+  poncho: {
+    name: tr('輕便雨衣', 'Disposable poncho'),
+    w: 0.15,
+    kind: 'tool',
+    desc: tr(
+      '帶在身上，淋雨時濕得慢很多（和傘一起用最好）',
+      'Carry it and you get wet far more slowly in the rain (best with an umbrella).',
+    ),
   },
   mask: {
     name: tr('醫用口罩（一盒）', 'Medical masks (box)'),
@@ -814,6 +826,8 @@ export const LOOT: Record<string, [string, number, number][]> = {
     ['cracker', 2, 2],
     ['driedtofu', 2, 2],
     ['butane', 1, 2],
+    ['umbrella', 2, 1],
+    ['poncho', 2, 1],
   ],
   pharmacy: [
     ['cig', 1, 1],
@@ -828,6 +842,7 @@ export const LOOT: Record<string, [string, number, number][]> = {
     ['battery', 2, 3],
     ['cloth', 2, 1],
     ['seeds', 1, 1],
+    ['umbrella', 1, 1],
     ['tmap', 1, 1],
     ['hose', 1, 1],
     ['can', 3, 2],
