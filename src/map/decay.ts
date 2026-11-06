@@ -14,6 +14,8 @@ export type DCtx = {
   center: V2;
   R: number;
   doors: V2[];
+  /** v24.13 chance that a wide-street front carries a wall billboard */
+  adRate?: (x: number, z: number) => number;
 };
 const VSIGNS = [
   '永和豆漿',
@@ -108,6 +110,109 @@ function grime(c: CanvasRenderingContext2D, x: number, y: number, w: number, h: 
     c.fillStyle = g;
     c.fillRect(sx, y + Math.random() * h * 0.3, 1 + Math.random() * 3, h * (0.3 + Math.random() * 0.7));
   }
+}
+// v24.13 看板: posters for the wall billboards (all fictional). 512×256 landscape cells in the top half of the atlas,
+// 256×512 portrait cells in the bottom half.
+const ADS_L = [
+  { a: '#e3147a', b: '#ff8a1e', fg: '#ffffff', t: '夏日大特賣', s: '全館五折起', m: 'sun' },
+  { a: '#14110c', b: '#4a3510', fg: '#f2c94c', t: '金好運銀樓', s: '黃金回收・現金交易', m: 'ring' },
+  { a: '#0d2a6e', b: '#2a6fd6', fg: '#ffffff', t: '萬華大戲院', s: '本週強檔上映', m: 'beam' },
+  { a: '#0a8f8a', b: '#bff0e6', fg: '#06403e', t: '美麗佳診所', s: '微笑矯正・免費諮詢', m: 'dot' },
+];
+const ADS_P = [
+  { a: '#c8141a', b: '#7a0a10', fg: '#ffe94a', t: '明星補習班', s: '升學榜首', m: '' },
+  { a: '#050a14', b: '#0f4a8a', fg: '#6fe8ff', t: '新世代手機', s: '今日開賣', m: 'phone' },
+  { a: '#b3120f', b: '#e8b818', fg: '#fff3c8', t: '大三元餐廳', s: '婚宴・尾牙', m: '' },
+  { a: '#6a1fb0', b: '#ff4fa0', fg: '#ffffff', t: '青春潮牌', s: '新品上市', m: 'sun' },
+];
+const adCellL = (i: number) => [((i % 2) * 512) / 1024, 1 - ((i >> 1) * 256 + 256) / 1024, 512 / 1024, 256 / 1024];
+const adCellP = (i: number) => [(i * 256) / 1024, 1 - 1024 / 1024, 256 / 1024, 512 / 1024];
+function adAtlas() {
+  const [cv, c] = mkCanvas(1024, 1024);
+  const base = (x: number, y: number, w: number, h: number, a: string, b: string) => {
+    const g = c.createLinearGradient(x, y, x + w, y + h);
+    g.addColorStop(0, a);
+    g.addColorStop(1, b);
+    c.fillStyle = g;
+    c.fillRect(x, y, w, h);
+  };
+  const mark = (m: string, x: number, y: number, r: number, fg: string) => {
+    c.save();
+    c.fillStyle = c.strokeStyle = fg;
+    if (m === 'sun') {
+      c.globalAlpha = 0.35;
+      for (let k = 0; k < 3; k++) {
+        c.beginPath();
+        c.arc(x, y, r * (1 - k * 0.28), 0, Math.PI * 2);
+        c.fill();
+      }
+    } else if (m === 'ring') {
+      c.lineWidth = r * 0.26;
+      c.beginPath();
+      c.arc(x, y, r * 0.7, 0, Math.PI * 2);
+      c.stroke();
+    } else if (m === 'beam') {
+      c.globalAlpha = 0.28;
+      for (const d of [-0.5, 0, 0.5]) {
+        c.beginPath();
+        c.moveTo(x, y + r);
+        c.lineTo(x + (d - 0.14) * r * 2, y - r);
+        c.lineTo(x + (d + 0.14) * r * 2, y - r);
+        c.fill();
+      }
+    } else if (m === 'dot') {
+      c.globalAlpha = 0.9;
+      c.beginPath();
+      c.arc(x, y, r * 0.62, 0, Math.PI);
+      c.lineWidth = r * 0.16;
+      c.stroke();
+    } else if (m === 'phone') {
+      c.globalAlpha = 0.9;
+      c.lineWidth = r * 0.1;
+      c.strokeRect(x - r * 0.42, y - r * 0.8, r * 0.84, r * 1.6);
+    }
+    c.restore();
+  };
+  ADS_L.forEach((q, i) => {
+    const x = (i % 2) * 512,
+      y = (i >> 1) * 256;
+    base(x, y, 512, 256, q.a, q.b);
+    mark(q.m, x + 410, y + 110, 110, q.fg);
+    c.textAlign = 'left';
+    c.textBaseline = 'middle';
+    c.fillStyle = q.fg;
+    c.font = 'bold 74px sans-serif';
+    c.fillText(q.t, x + 24, y + 96, 464);
+    c.fillStyle = 'rgba(0,0,0,.42)';
+    c.fillRect(x, y + 176, 512, 56);
+    c.fillStyle = '#ffffff';
+    c.font = 'bold 36px sans-serif';
+    c.fillText(q.s, x + 24, y + 205, 464);
+    grime(c, x, y, 512, 256, 0.8);
+  });
+  ADS_P.forEach((q, i) => {
+    const x = i * 256,
+      y = 512;
+    base(x, y, 256, 512, q.a, q.b);
+    mark(q.m, x + 128, y + 220, 120, q.fg);
+    const ch = [...q.t];
+    const fs = Math.min(80, 390 / ch.length);
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillStyle = q.fg;
+    c.font = `bold ${fs}px sans-serif`;
+    ch.forEach((t, k) => c.fillText(t, x + 128, y + 215 + (k - (ch.length - 1) / 2) * fs * 1.04));
+    c.fillStyle = 'rgba(0,0,0,.42)';
+    c.fillRect(x, y + 440, 256, 52);
+    c.fillStyle = '#ffffff';
+    c.font = 'bold 34px sans-serif';
+    c.fillText(q.s, x + 128, y + 467, 236);
+    grime(c, x, y, 256, 512, 0.8);
+  });
+  const t = new THREE.CanvasTexture(cv);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  return t;
 }
 function signAtlas() {
   const [cv, c] = mkCanvas(1024, 1024);
@@ -314,6 +419,17 @@ export function buildDecay(c: DCtx) {
     PUD: THREE.BufferGeometry[] = [],
     HOLE: THREE.BufferGeometry[] = [];
   const near = (x: number, z: number, r = R) => Math.hypot(x - center[0], z - center[1]) < r;
+  // v24.13 every sign knows its building's centre, so it fades with that building's walls (see occlusion.ts)
+  const NOT_A_FRONT: V2 = [1e6, 1e6];
+  const tagB = (g: THREE.BufferGeometry, q: V2) => {
+    const n = g.attributes.position.count,
+      a = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) ((a[i * 2] = q[0]), (a[i * 2 + 1] = q[1]));
+    g.setAttribute('aBld', new THREE.BufferAttribute(a, 2));
+    return g;
+  };
+  let curB: V2 = NOT_A_FRONT;
+  const pushSign = (g: THREE.BufferGeometry) => SIGN.push(tagB(g, curB));
   const freeAt = (x: number, z: number, pad = 0.6) =>
     !c.bldAt(x, z) &&
     !c.bldAt(x + pad, z) &&
@@ -456,7 +572,7 @@ export function buildDecay(c: DCtx) {
           const g2 = g.clone();
           g2.rotateY(Math.PI);
           const both = c.merge([g, g2]);
-          SIGN.push(
+          pushSign(
             place(
               both,
               sx,
@@ -517,6 +633,7 @@ export function buildDecay(c: DCtx) {
   const acs: THREE.Vector3[] = [];
   for (const b of c.blds) {
     if (!near(b.c[0], b.c[1], R * 0.85) || b.h < 4) continue;
+    curB = b.c as V2;
     const pts: V2[] = b.pts;
     for (let i = 0; i < pts.length; i++) {
       // v23.9 infill row houses: side walls are party walls, dress only the street front and the back
@@ -547,7 +664,7 @@ export function buildDecay(c: DCtx) {
           const y = 3.4 + rnd() * Math.max(0.1, b.h - 3.6 - h) + h / 2;
           const off = 0.3 + w / 2 + rnd() * 0.2;
           const g = setUV(B(0.1, h, w), vCell(Math.floor(rnd() * VSIGNS.length)));
-          SIGN.push(
+          pushSign(
             place(
               g,
               a[0] + ux * d + nx * off,
@@ -578,7 +695,7 @@ export function buildDecay(c: DCtx) {
           const w = Math.min(L * 0.7, 2.5 + rnd() * 2.5);
           const g = setUV(new THREE.PlaneGeometry(w, w / 4), hCell(Math.floor(rnd() * HSIGNS.length)));
           const d = w / 2 + rnd() * Math.max(0.01, L - w);
-          SIGN.push(
+          pushSign(
             place(
               g,
               a[0] + ux * d + nx * (0.16 + k * 0.03),
@@ -678,14 +795,18 @@ export function buildDecay(c: DCtx) {
   // ---------- v24.12 招牌牆: beyond the spawn blocks every street front of the core still has its signs ----------
   // Its own RNG, so everything generated after this stays as it was. No shadows: the shadow pass is not touched.
   const SIGN2: THREE.BufferGeometry[] = [],
-    V2: THREE.BufferGeometry[] = [];
-  const signStats = { blades: 0, boards: 0, bills: 0, acs: 0 };
+    V2: THREE.BufferGeometry[] = [],
+    ADS: THREE.BufferGeometry[] = [];
+  const signStats = { blades: 0, boards: 0, bills: 0, acs: 0, walls: 0, wallAt: [] as V2[] };
   {
     let rs = 0x51e5a;
     const r = () => (rs = (Math.imul(rs, 1664525) + 1013904223) >>> 0) / 4294967296;
     const IRON = 0x3a302a;
     for (const b of c.blds) {
       if (b.h < 6.5 || near(b.c[0], b.c[1], R * 0.85)) continue;
+      const n0s = SIGN2.length,
+        n0v = V2.length,
+        n0a = ADS.length;
       const pts: V2[] = b.pts;
       const shop = r() < 0.8; // one street front in five has no shop on it
       let bill = !b.fill && b.h >= 11 && r() < 0.14; // a big rooftop sign on a steel frame
@@ -728,22 +849,58 @@ export function buildDecay(c: DCtx) {
             );
             signStats.blades++;
           }
-          // a board over the shopfront
-          if (r() < 0.75) {
-            const w = Math.min(L * 0.75, 2.6 + r() * 3);
-            const d = w / 2 + r() * Math.max(0.01, L - w);
-            SIGN2.push(
-              place(
-                setUV(new THREE.PlaneGeometry(w, w / 4), hCell(Math.floor(r() * HSIGNS.length))),
-                a[0] + ux * d + nx * 0.17,
-                2.95 + r() * 0.35,
-                a[1] + uz * d + nz * 0.17,
-                fy,
-                0,
-                (r() - 0.5) * 0.06,
-              ),
-            );
-            signStats.boards++;
+          // v24.13 fascia: shop after shop, edge to edge over the first-floor spandrel (as on the real street)
+          for (let d = r() * 0.4; d < L - 1.2;) {
+            const w = Math.min(L - d, 2.8 + r() * 2.8);
+            if (r() < 0.88) {
+              SIGN2.push(
+                place(
+                  setUV(new THREE.PlaneGeometry(w, w / 4), hCell(Math.floor(r() * HSIGNS.length))),
+                  a[0] + ux * (d + w / 2) + nx * 0.17,
+                  4.25 + (r() - 0.5) * 0.08,
+                  a[1] + uz * (d + w / 2) + nz * 0.17,
+                  fy,
+                  0,
+                  (r() - 0.5) * 0.02,
+                ),
+              );
+              signStats.boards++;
+            }
+            d += w + 0.04;
+          }
+          // v24.13 看板: a poster the size of the wall, on the fronts that look onto something wide
+          if (
+            !b.fill &&
+            L >= 8 &&
+            b.h >= 13 &&
+            !c.bldAt(m[0] + nx * 16, m[1] + nz * 16) &&
+            r() < (c.adRate?.(m[0], m[1]) ?? 0)
+          ) {
+            const room = b.h - 5.6;
+            const tall = r() < 0.4;
+            const hh = tall ? Math.min(room, 8 + r() * 8) : Math.min(room, Math.min(L * 0.9, 9 + r() * 9) / 2);
+            const w = tall ? hh / 2 : hh * 2;
+            if (hh >= 3.5 && w <= L * 0.95) {
+              const d = w / 2 + r() * (L - w);
+              const y = 5 + hh / 2 + r() * Math.max(0, room - hh);
+              const px = a[0] + ux * d,
+                pz = a[1] + uz * d;
+              ADS.push(
+                place(
+                  setUV(
+                    new THREE.PlaneGeometry(w, hh),
+                    tall ? adCellP(Math.floor(r() * ADS_P.length)) : adCellL(Math.floor(r() * ADS_L.length)),
+                  ),
+                  px + nx * 0.26,
+                  y,
+                  pz + nz * 0.26,
+                  fy,
+                ),
+              );
+              V2.push(color(place(B(w + 0.24, hh + 0.24, 0.2), px + nx * 0.14, y, pz + nz * 0.14, fy), IRON));
+              signStats.walls++;
+              if (signStats.wallAt.length < 12) signStats.wallAt.push([m[0] + nx * 9, m[1] + nz * 9]);
+            }
           }
         }
         // split ACs hung on the upper floors
@@ -789,6 +946,9 @@ export function buildDecay(c: DCtx) {
           signStats.bills++;
         }
       }
+      for (let k = n0s; k < SIGN2.length; k++) tagB(SIGN2[k], b.c as V2);
+      for (let k = n0v; k < V2.length; k++) tagB(V2[k], b.c as V2);
+      for (let k = n0a; k < ADS.length; k++) tagB(ADS[k], b.c as V2);
     }
   }
   // ---------- street clutter: trash, debris, burnt cars, sandbags, barricades, checkpoints, potholes, puddles ----------
@@ -1075,7 +1235,7 @@ export function buildDecay(c: DCtx) {
     if (!g.length) return null;
     for (const x of g)
       for (const k of Object.keys(x.attributes))
-        if (!['position', 'normal', 'uv', 'color'].includes(k)) x.deleteAttribute(k);
+        if (!['position', 'normal', 'uv', 'color', 'aBld'].includes(k)) x.deleteAttribute(k);
     const me = new THREE.Mesh(c.merge(g.map(x => (x.index ? x.toNonIndexed() : x))), m);
     me.castShadow = shadow;
     me.receiveShadow = true;
@@ -1089,7 +1249,10 @@ export function buildDecay(c: DCtx) {
   }
   const vMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.05 });
   add(V, vMat);
-  add(V2, vMat, false); // v24.12 招牌牆: no shadows
+  const v2Mat = vMat.clone(); // v24.12 招牌牆: no shadows; v24.13 fades with the wall in front of the player
+  v2Mat.userData.front = true;
+  v2Mat.customProgramCacheKey = () => 'front';
+  add(V2, v2Mat, false);
   add(WIRE, new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.7 }), false); // overhead cables: no shadow scribbles on the asphalt
   const atlas = signAtlas();
   const signMat = new THREE.MeshStandardMaterial({
@@ -1101,7 +1264,20 @@ export function buildDecay(c: DCtx) {
     side: THREE.DoubleSide,
   });
   add(SIGN, signMat);
+  signMat.userData.front = true;
+  signMat.customProgramCacheKey = () => 'front';
   add(SIGN2, signMat, false);
+  const adTex = adAtlas();
+  const adMat = new THREE.MeshStandardMaterial({
+    map: adTex,
+    emissive: 0xffffff,
+    emissiveMap: adTex,
+    emissiveIntensity: 0.1,
+    roughness: 0.55,
+  });
+  adMat.userData.front = true;
+  adMat.customProgramCacheKey = () => 'front';
+  add(ADS, adMat, false);
   add(
     HOLE,
     new THREE.MeshStandardMaterial({
@@ -1153,6 +1329,7 @@ export function buildDecay(c: DCtx) {
     signs: signStats,
     update(dt: number, night: number, px: number, pz: number) {
       signMat.emissiveIntensity = 0.12 + night * 0.85;
+      adMat.emissiveIntensity = 0.1 + night * 0.75;
       dt0 -= dt;
       if (dt0 <= 0) {
         dt0 = 1;

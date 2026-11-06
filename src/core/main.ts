@@ -8022,6 +8022,8 @@ async function boot() {
     center: start.c,
     R: 140,
     doors: doors.map(d => d.p),
+    // v24.13 看板: Ximending and Zhonghua Road are thick with wall billboards, other wide streets have a few
+    adRate: (x, z) => (sectorOf(x, z) <= 1 ? 0.55 : 0.1),
   });
   checkpoints = decay.checkpoints;
   setupRecon(start!.c as V2);
