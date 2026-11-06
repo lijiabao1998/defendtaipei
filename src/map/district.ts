@@ -4,6 +4,7 @@
 // signboards, curved-pole lamps, parked scooters/taxis/kei trucks, rooftop tin additions); mid tiles drop to
 // walls + roofs (LOD); far tiles are disposed. Each tile has a deterministic seed so content is identical on
 // every client (multiplayer-ready) and player changes are stored per tile key. Data © OpenStreetMap (ODbL).
+import { buildTemple, type TempleCont } from './temple';
 import * as THREE from 'three';
 import { chunkify } from '../core/chunk';
 /** v24.6 ?chunk=0 turns the tile chunking off (before / after comparisons) */
@@ -1162,6 +1163,30 @@ export class District {
     void m4;
     return { key, cx, cz, g, detail, segs, info: { key, cx, cz, fronts, roads: td.r, rnd, enter, nB } };
   }
+  // ---------- v24.15 the walk-in temple ----------
+  /** what can be searched in the landmarks (world positions), for the game to turn into containers */
+  landConts: TempleCont[] = [];
+  templeStats: { tris: number; meshes: number } | null = null;
+  private templeAt: V2 | null = null;
+  /** inside the temple walls: lifts the roofs off, as inside any other building */
+  landmarkCut(x: number, z: number) {
+    const t = this.templeAt;
+    if (!t || Math.abs(x - t[0]) > 16.2 || Math.abs(z - t[1]) > 19.6) return null;
+    return { O: t, U: [1, 0] as V2, ub: [-16.6, 16.6, -20, 20] as [number, number, number, number] };
+  }
+  /** under one of the temple's roofs (the courtyard is open to the sky) */
+  landmarkRoofAt(x: number, z: number) {
+    const t = this.templeAt;
+    if (!t) return false;
+    const dx = Math.abs(x - t[0]),
+      lz = z - t[1];
+    return (
+      (dx <= 13 && lz >= 12 && lz <= 19.6) || // front hall
+      (dx >= 12.4 && dx <= 16 && Math.abs(lz) <= 12) || // side corridors
+      (dx <= 9.8 && lz >= -6.8 && lz <= 5.8) || // main hall
+      (dx <= 14 && lz >= -19 && lz <= -11.6) // rear hall
+    );
+  }
   // ---------- cheap landmarks ----------
   /** footprints the core map must leave empty (its own generic boxes are replaced by the landmark) */
   static rects(ix: DIndex) {
@@ -1176,6 +1201,12 @@ export class District {
         const r = R[l.kind];
         return [l.x + r[0], l.z + r[1], l.x + r[2], l.z + r[3]] as [number, number, number, number];
       });
+  }
+  /** v24.15 the square in front of a landmark temple: a building whose centre is here is not placed in the world */
+  static squares(ix: DIndex) {
+    return ix.landmarks
+      .filter(l => l.kind === 'temple')
+      .map(l => [l.x - 20, l.z + 19, l.x + 20, l.z + 36] as [number, number, number, number]);
   }
   private buildLandmarks() {
     for (const l of this.ix.landmarks) {
@@ -1197,10 +1228,11 @@ export class District {
           const f = new Forest();
           let sd = 11;
           const rr = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+          // the axis from the arch to the front door stays open
           for (const [x, z] of [
-            [-11, 24],
-            [11, 25],
-            [0, 30],
+            [-12, 27],
+            [13, 26],
+            [19, 34],
           ]) {
             f.add('banyan', x, z, rr() * 6, 1.2 + rr() * 0.3, 0, 0.9 + rr() * 0.2);
             this.d.addSeg({ a: [l.x + x - 0.9, l.z + z], b: [l.x + x + 0.9, l.z + z] });
@@ -1209,43 +1241,13 @@ export class District {
           }
           f.build(g);
         }
-        const base = new THREE.Mesh(new THREE.BoxGeometry(32, 0.8, 38), M(0x9a9286));
-        base.position.y = 0.4;
-        g.add(base);
-        for (const [z, w, d, hh] of [
-          [-13, 22, 8, 6],
-          [0, 16, 10, 9],
-          [13, 26, 8, 7],
-        ]) {
-          const hall = new THREE.Mesh(new THREE.BoxGeometry(w, hh, d), M(0xa8322a));
-          hall.position.set(0, 0.8 + hh / 2, z);
-          g.add(hall);
-          for (let tier = 0; tier < (hh > 8 ? 2 : 1); tier++) {
-            const rf = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 1, 1, 4, 1), M(0xd9822b, 0.5));
-            rf.scale.set((w + 4 - tier * 6) * 0.72, 2.6, (d + 4 - tier * 4) * 0.72);
-            rf.rotation.y = Math.PI / 4;
-            rf.position.set(0, 0.8 + hh + 1.3 + tier * 2.8, z);
-            g.add(rf);
-            // upturned swallowtail ridge ends
-            for (const s of [-1, 1]) {
-              const tip = new THREE.Mesh(new THREE.ConeGeometry(0.35, 2.4, 5), M(0x2f6f5a, 0.5));
-              tip.rotation.z = s * 0.9;
-              tip.position.set(s * (w / 2 - tier * 3), 0.8 + hh + 2.9 + tier * 2.8, z);
-              g.add(tip);
-            }
-          }
-          for (let x = -w / 2 + 2; x <= w / 2 - 2; x += 4) {
-            const col2 = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, hh, 8), M(0x8a1f1a, 0.5));
-            col2.position.set(x, 0.8 + hh / 2, z + d / 2 + 0.3);
-            g.add(col2);
-          }
-        }
-        seg([
-          [-16, -19],
-          [16, -19],
-          [16, 19],
-          [-16, 19],
-        ]);
+        // v24.15 a walled complex you can walk into, not a solid block
+        const T = buildTemple(g, l.x, l.z, (p, q) =>
+          this.d.addSeg({ a: [l.x + p[0], l.z + p[1]], b: [l.x + q[0], l.z + q[1]] }),
+        );
+        for (const c of T.conts) this.landConts.push({ ...c, p: [l.x + c.p[0], l.z + c.p[1]] });
+        this.templeAt = [l.x, l.z];
+        this.templeStats = T.stats;
       } else if (l.kind === 'redhouse') {
         // 西門紅樓: red-brick octagon + cruciform hall behind
         const brick = M(0xa8442e);
