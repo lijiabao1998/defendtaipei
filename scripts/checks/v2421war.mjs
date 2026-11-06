@@ -103,7 +103,8 @@ const strike = await p.evaluate(async () => {
   g.tp(sp.mid[0] + sp.nx * 7, sp.mid[1] + sp.nz * 7);
   await new Promise(r => setTimeout(r, 1500));
   const P = g.player.pos;
-  const live = g.sols.filter(q => q.state !== 'dead');
+  // (not from a district tile: those leave when the tile does)
+  const live = g.sols.filter(q => q.state !== 'dead' && !q.tile);
   const a = live[0],
     c = live[1];
   const yaw = Math.atan2(sp.nx, sp.nz);

@@ -40,6 +40,7 @@ import {
 import { RainFx, makeUmbrella } from '../systems/rain';
 import { Reclaim, reclaimTitle } from '../systems/reclaim';
 import { buildHuaxi } from '../map/huaxi';
+import { AV_LOADOUT, avTick, avFire, avReload, avStatus } from '../systems/avgun';
 import { buildMarket } from '../map/market';
 import { RemnantSystem, type RemSave } from '../npc/remnant';
 import { JapanSupport, JP_LABEL, type JpKind } from '../systems/japan';
@@ -1045,6 +1046,101 @@ function updateShells(dt: number) {
   }
 }
 let lastShellHit = 0;
+// ---------- v24.22 fighting from captured armour: the turret follows the mouse, a shot goes to the first thing it meets ----------
+const avStat = { shots: 0, kills: 0, hullHits: 0 };
+let avHpAt = 100;
+const avTracer = new THREE.LineSegments(
+  new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3)),
+  new THREE.LineBasicMaterial({ color: 0xffd98a, transparent: true, opacity: 0.95 }),
+);
+avTracer.frustumCulled = false;
+avTracer.visible = false;
+let avTracerT = 0;
+function avControl(v: NonNullable<typeof drive.cur>, dt: number) {
+  const gun = v.gun!;
+  if (!avTracer.parent) scene.add(avTracer);
+  if (avTracerT > 0 && (avTracerT -= dt) <= 0) avTracer.visible = false;
+  const can = avTick(gun, dt);
+  // the turret traverses at its own speed towards the mouse (or the nearest foe on a phone)
+  ray.setFromCamera(mouse, camera);
+  ray.ray.intersectPlane(plane, aimPt);
+  if (MB.fire) {
+    const e = nearestFoe(60);
+    if (e) aimPt.set(e.pos.x, 0, e.pos.z);
+  }
+  const want = Math.atan2(aimPt.x - v.pos.x, aimPt.z - v.pos.z);
+  const L = AV_LOADOUT[v.kind as keyof typeof AV_LOADOUT];
+  const tur = v.tur!;
+  const rel = want - v.hd;
+  const dr = Math.atan2(Math.sin(rel - tur.rotation.y), Math.cos(rel - tur.rotation.y));
+  tur.rotation.y += Math.sign(dr) * Math.min(Math.abs(dr), L.traverse * dt);
+  // a shot goes out along the barrel, not to the mouse: aim first, then fire
+  if ((clicking || MB.fire) && !panelOpen && can) {
+    const w = avFire(gun);
+    avStat.shots++;
+    const yaw = v.hd + tur.rotation.y;
+    const ux = Math.sin(yaw),
+      uz = Math.cos(yaw);
+    const o: V2 = [v.pos.x + ux * (v.s.L * 0.5), v.pos.z + uz * (v.s.L * 0.5)];
+    // walls and cover stop it first (the muzzle is at 1.9 m, so it clears a parked car close by)
+    let reach = w.range * shotRay(o, [o[0] + ux * w.range, o[1] + uz * w.range], 1.9, 1.2, 1.5);
+    let target: Sol | null = null;
+    for (const s of sols) {
+      if (s.state === 'dead' || !s.mesh.visible) continue;
+      const dx = s.pos.x - o[0],
+        dz = s.pos.z - o[1];
+      const along = dx * ux + dz * uz;
+      if (along < 0 || along > reach) continue;
+      if (Math.abs(dx * uz - dz * ux) < 0.75) ((reach = along), (target = s));
+    }
+    // and a hull in the way takes the round
+    let hull = false;
+    for (const a of armor?.list ?? []) {
+      if (a.dead) continue;
+      const dx = a.g.position.x - o[0],
+        dz = a.g.position.z - o[1];
+      const along = dx * ux + dz * uz;
+      if (along < 0 || along > reach) continue;
+      if (Math.abs(dx * uz - dz * ux) < 2.2) ((reach = along), (target = null), (hull = true));
+    }
+    const end = new THREE.Vector3(o[0] + ux * reach, 0.8, o[1] + uz * reach);
+    if (target) {
+      damageSol(target, w.dmg, false);
+      if (target.state === 'dead') avStat.kills++;
+    }
+    if (hull && w.antiArmor) {
+      avStat.hullHits++;
+      armor!.hit(end.x, end.z, w.antiArmor, true);
+    }
+    if (w.splash) {
+      if (w.splash > 4 || avStat.shots % 3 === 0) boom(scene, end, w.splash > 4 ? 2.2 : 0.5);
+      for (const s of sols) {
+        if (s === target || s.state === 'dead') continue;
+        const d = Math.hypot(s.pos.x - end.x, s.pos.z - end.z);
+        if (d < w.splash) damageSol(s, w.dmg * 0.5 * (1 - d / w.splash), false);
+      }
+    }
+    // tracer
+    const a = avTracer.geometry.attributes.position as THREE.BufferAttribute;
+    a.setXYZ(0, o[0], 1.9, o[1]);
+    a.setXYZ(1, end.x, end.y, end.z);
+    a.needsUpdate = true;
+    avTracer.visible = true;
+    avTracerT = 0.09;
+    AU.gunshot(w.sound, 0, false);
+    noise(v.pos.x, v.pos.z, w.noise, true);
+  }
+}
+/** v24.22 inside armour only one tenth of what would have hit you gets through; no bleeding */
+function avArmorShield() {
+  if (!drive.cur?.gun) {
+    avHpAt = player.hp;
+    return;
+  }
+  if (player.hp < avHpAt) player.hp = avHpAt - (avHpAt - player.hp) * 0.1;
+  player.bleed = false;
+  avHpAt = player.hp;
+}
 // ---------- v24.21 the war gets worse: distant gunfire, shelling, and now and then a rocket or a missile ----------
 // Radii and damage are rough game values scaled from public figures for warhead weight and tuned for play. Not a simulation.
 type WarWeapon = {
@@ -1628,6 +1724,20 @@ function setupArmor(c: V2) {
     },
     log,
     player: () => player.pos,
+    // v24.22 badly hurt: the crew bails out and leaves it where it stands, and it can be taken
+    bail: a => {
+      const P = a.g.position;
+      let sd = Math.floor(P.x * 13 + P.z * 7) | 1;
+      const r = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+      const v = drive.spawn(a.kind as DKind, P.x, P.z, a.g.rotation.y + Math.PI / 2, r, { eng: 0.4 });
+      log(
+        getLanguage() === 'en'
+          ? `The crew bails out of the ${v.s.name}! It can still be driven.`
+          : `${v.s.name}的乘員棄車逃了！這台還能開。`,
+        '#9f9',
+      );
+      return true;
+    },
   });
   const len = (r: { p: V2[] }) =>
     r.p.reduce((s, q, i) => (i ? s + Math.hypot(q[0] - r.p[i - 1][0], q[1] - r.p[i - 1][1]) : 0), 0);
@@ -2842,6 +2952,39 @@ const WRECK_LOOT: [string, number][][] = [
   ],
   [['carbat', 1]],
 ];
+/** v24.22 PLA vehicles left where they stopped: on the wide roads, far enough from the start that it takes finding them */
+function spawnAbandonedArmor(c: V2) {
+  let sd = 4177;
+  const r = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+  const kinds: DKind[] = ['mengshi', 'zbl08', 'zbd05', 'ztd05', 'mengshi', 'zbl08'];
+  const spots: { x: number; z: number; hd: number; d: number }[] = [];
+  for (const rd of roads) {
+    const w = ROADW[rd.t.replace('_link', '')] ?? 3;
+    if (w < 9) continue;
+    for (let i = 0; i < rd.p.length - 1; i++) {
+      const [ax, az] = rd.p[i],
+        [bx, bz] = rd.p[i + 1];
+      const L = Math.hypot(bx - ax, bz - az);
+      if (L < 18) continue;
+      const ux = (bx - ax) / L,
+        uz = (bz - az) / L;
+      const x = (ax + bx) / 2 - uz * (w / 2 - 2),
+        z = (az + bz) / 2 + ux * (w / 2 - 2);
+      const d = Math.hypot(x - c[0], z - c[1]);
+      if (d > 130 && d < 560 && !bldAt(x, z) && !onLandmark(x, z)) spots.push({ x, z, hd: Math.atan2(ux, uz), d });
+    }
+  }
+  spots.sort((a, b) => a.d - b.d);
+  for (let i = 0; i < kinds.length && spots.length; i++) {
+    // spread out along the distance from the start
+    const q = spots[Math.floor(((i + r() * 0.8) / kinds.length) * spots.length)];
+    const v = drive.spawn(kinds[i], q.x, q.z, q.hd, r);
+    if (drive.blocked(v, q.x, q.z, v.hd)) {
+      scene.remove(v.g);
+      drive.list.pop();
+    }
+  }
+}
 function spawnDrivables(c: V2) {
   let sd = 977;
   const r = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
@@ -4902,6 +5045,17 @@ let clicking = false;
 // v21.5.1 portrait thumb buttons: 打 held = fire at the nearest target, 撤 = retreat sprint for a moment
 const MB = { fire: false, retreat: 0, rn: 0 };
 addEventListener('keydown', e => {
+  // v24.22 in captured armour: V changes gun, R brings up a fresh box
+  if (drive.cur?.gun && !panelOpen) {
+    if (e.code === 'KeyV' && drive.cur.gun.guns.length > 1) {
+      drive.cur.gun.sel = (drive.cur.gun.sel + 1) % drive.cur.gun.guns.length;
+      return;
+    }
+    if (e.code === 'KeyR') {
+      avReload(drive.cur.gun);
+      return;
+    }
+  }
   // v22.4: Esc backs out of whatever is on top (modal → shop/ride → shelter → map → panel), else opens the pause menu
   if (e.code === 'Escape') {
     e.preventDefault();
@@ -7231,6 +7385,7 @@ function update(dt: number) {
     if (jm > 0.12) mv.addScaledVector(f, -joy.y).addScaledVector(r, joy.x);
     drive.update(dt, mv, UT.power);
     const v = drive.cur;
+    if (v?.gun) avControl(v, dt);
     if (v) {
       player.pos.set(v.pos.x, 0, v.pos.z);
       player.mesh.position.set(v.pos.x, v.s.seatY - 0.45, v.pos.z);
@@ -7773,6 +7928,7 @@ function update(dt: number) {
   if (started && !PRO.on && !MP) rescueTick();
   if (started && !PRO.on) reclaimTick();
   if (grenades.length) grenadeTick(dt);
+  avArmorShield();
   if (started && !PRO.on && !MP) warTick(dt);
   if (rescueRig) animate(rescueRig.rig, 'idle', 0, dt);
   if (liaison) {
@@ -8035,8 +8191,10 @@ function drawHud(inside: Bld | null) {
     pr.style.display = 'block';
     pr.textContent =
       getLanguage() === 'en'
-        ? `[E] Exit vehicle | ${drive.status(drive.cur)} | ${Math.round(Math.abs(drive.cur.v) * 3.6)} km/h`
-        : `[E] 下車｜${drive.status(drive.cur)}｜${Math.round(Math.abs(drive.cur.v) * 3.6)} km/h`;
+        ? `[E] Exit vehicle | ${drive.status(drive.cur)} | ${Math.round(Math.abs(drive.cur.v) * 3.6)} km/h` +
+          (drive.cur.gun ? ` | ${avStatus(drive.cur.gun)} | [V] Change gun [R] Reload` : '')
+        : `[E] 下車｜${drive.status(drive.cur)}｜${Math.round(Math.abs(drive.cur.v) * 3.6)} km/h` +
+          (drive.cur.gun ? `｜${avStatus(drive.cur.gun)}｜[V] 換武器 [R] 換箱` : '');
   } else if (!panelOpen && drive.nearest(player.pos)) {
     const v = drive.nearest(player.pos)!;
     pr.style.display = 'block';
@@ -8540,6 +8698,7 @@ async function boot() {
   setupRemnants(start!.c as V2);
   setupJapan(start!.c as V2);
   spawnDrivables(start!.c as V2);
+  spawnAbandonedArmor(start!.c as V2);
   buildJunctions();
   setupWreckage(start!.c as V2);
   await roadT.init();
@@ -9669,6 +9828,16 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.22 captured armour
+    avStat,
+    /** how far along a-b a round gets, 0..1 */
+    shotClear: (a: V2, b: V2) => shotRay(a, b, 1.9, 1.2, 1.5),
+    avStatusNow: () => (drive.cur?.gun ? avStatus(drive.cur.gun) : ''),
+    avSpawn: (kind: DKind, x: number, z: number, hd = 0) => {
+      let sd = 77;
+      const r = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+      return drive.spawn(kind, x, z, hd, r);
+    },
     // v24.21 the war gets worse
     war: () => ({ ...warStat, pending: shells.length, fires: warFires.length }),
     WAR,
