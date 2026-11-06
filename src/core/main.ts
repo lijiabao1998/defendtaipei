@@ -9121,7 +9121,7 @@ async function boot() {
     // v24.1 every building enterable: coverage of doors / furnished plans / stairwells (core and loaded tiles)
     enterStats: () => {
       const core = { n: 0, door: 0, plan: 0, stair: 0, conts: 0, empty: 0, fill: 0, fillDoor: 0 };
-      for (const b of blds) {
+      for (const b of liveBlds()) {
         core.n++;
         if ((b as any).fill) core.fill++;
         if (!b.door) continue;
