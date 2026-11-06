@@ -5,6 +5,7 @@
 // walls + roofs (LOD); far tiles are disposed. Each tile has a deterministic seed so content is identical on
 // every client (multiplayer-ready) and player changes are stored per tile key. Data © OpenStreetMap (ODbL).
 import { buildTemple, type TempleCont } from './temple';
+import { buildRedHouse, buildBopiliao, type WalkIn } from './landmarks';
 import * as THREE from 'three';
 import { chunkify } from '../core/chunk';
 /** v24.6 ?chunk=0 turns the tile chunking off (before / after comparisons) */
@@ -1168,14 +1169,21 @@ export class District {
   landConts: TempleCont[] = [];
   templeStats: { tris: number; meshes: number } | null = null;
   private templeAt: V2 | null = null;
+  private walkIns: WalkIn[] = [];
   /** inside the temple walls: lifts the roofs off, as inside any other building */
   landmarkCut(x: number, z: number) {
+    for (const w of this.walkIns) {
+      const lx = x - w.O[0],
+        lz = z - w.O[1];
+      if (lx > w.ub[0] && lx < w.ub[1] && lz > w.ub[2] && lz < w.ub[3]) return { O: w.O, U: [1, 0] as V2, ub: w.ub };
+    }
     const t = this.templeAt;
     if (!t || Math.abs(x - t[0]) > 16.2 || Math.abs(z - t[1]) > 19.6) return null;
     return { O: t, U: [1, 0] as V2, ub: [-16.6, 16.6, -20, 20] as [number, number, number, number] };
   }
   /** under one of the temple's roofs (the courtyard is open to the sky) */
   landmarkRoofAt(x: number, z: number) {
+    for (const w of this.walkIns) if (w.roofAt(x - w.O[0], z - w.O[1])) return true;
     const t = this.templeAt;
     if (!t) return false;
     const dx = Math.abs(x - t[0]),
@@ -1202,11 +1210,23 @@ export class District {
         return [l.x + r[0], l.z + r[1], l.x + r[2], l.z + r[3]] as [number, number, number, number];
       });
   }
+  /** v24.17 where no vehicle, wreck or street lamp belongs: inside the walk-in landmarks and on the temple square */
+  static keepOut(ix: DIndex) {
+    const out = District.rects(ix).map(
+      r => [r[0] - 1.2, r[1] - 1.2, r[2] + 1.2, r[3] + 1.2] as [number, number, number, number],
+    );
+    for (const l of ix.landmarks) if (l.kind === 'temple') out.push([l.x - 18, l.z + 19, l.x + 26, l.z + 38]);
+    return out;
+  }
   /** v24.15 the square in front of a landmark temple: a building whose centre is here is not placed in the world */
   static squares(ix: DIndex) {
-    return ix.landmarks
-      .filter(l => l.kind === 'temple')
-      .map(l => [l.x - 20, l.z + 19, l.x + 20, l.z + 36] as [number, number, number, number]);
+    const out: [number, number, number, number][] = [];
+    for (const l of ix.landmarks) {
+      if (l.kind === 'temple') out.push([l.x - 20, l.z + 19, l.x + 20, l.z + 36]);
+      // 剝皮寮: the street in front of the arcade and the lane behind the last units
+      if (l.kind === 'bopiliao') out.push([l.x - 20, l.z, l.x + 12, l.z + 30], [l.x + 20, l.z - 14, l.x + 34, l.z - 4]);
+    }
+    return out;
   }
   private buildLandmarks() {
     for (const l of this.ix.landmarks) {
@@ -1248,66 +1268,18 @@ export class District {
         for (const c of T.conts) this.landConts.push({ ...c, p: [l.x + c.p[0], l.z + c.p[1]] });
         this.templeAt = [l.x, l.z];
         this.templeStats = T.stats;
-      } else if (l.kind === 'redhouse') {
-        // 西門紅樓: red-brick octagon + cruciform hall behind
-        const brick = M(0xa8442e);
-        const oct = new THREE.Mesh(new THREE.CylinderGeometry(11, 11, 10, 8), brick);
-        oct.position.set(30, 5, 0);
-        oct.rotation.y = Math.PI / 8;
-        g.add(oct);
-        const top = new THREE.Mesh(new THREE.CylinderGeometry(5.5, 6.5, 4, 8), brick);
-        top.position.set(30, 12, 0);
-        g.add(top);
-        const cap = new THREE.Mesh(new THREE.ConeGeometry(6, 3, 8), M(0x3b3b3b, 0.6));
-        cap.position.set(30, 15.5, 0);
-        g.add(cap);
-        for (let i = 0; i < 8; i++) {
-          const w = new THREE.Mesh(new THREE.BoxGeometry(2.2, 3.6, 0.3), M(0xf0e8d6, 0.6));
-          const a = (i / 8) * Math.PI * 2;
-          w.position.set(30 + Math.sin(a) * 10.4, 6, Math.cos(a) * 10.4);
-          w.rotation.y = a;
-          g.add(w);
-        }
-        const hall = new THREE.Mesh(new THREE.BoxGeometry(24, 8, 16), brick);
-        hall.position.set(8, 4, 0);
-        g.add(hall);
-        const pts: V2[] = [];
-        for (let i = 0; i < 8; i++)
-          pts.push([30 + Math.sin((i / 8) * 6.283 + 0.39) * 11.5, Math.cos((i / 8) * 6.283 + 0.39) * 11.5]);
-        seg(pts);
-        seg([
-          [-4, -8],
-          [19, -8],
-          [19, 8],
-          [-4, 8],
-        ]);
-      } else if (l.kind === 'bopiliao') {
-        // 剝皮寮: Qing/Japanese-era red-brick row with arched arcade (亭仔腳) and tile roofs
-        for (let i = 0; i < 9; i++) {
-          const x = i * 6 - 24;
-          const body = new THREE.Mesh(new THREE.BoxGeometry(5.8, 7, 10), M(i % 3 ? 0xb0553c : 0x9c4a36));
-          body.position.set(x, 3.5, 0);
-          g.add(body);
-          const roof = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 4, 2.2, 3), M(0x5a3a30, 0.6));
-          roof.rotation.z = Math.PI / 2;
-          roof.scale.set(1, 2.9, 1.4);
-          roof.position.set(x, 8.1, 0);
-          g.add(roof);
-          const arch = new THREE.Mesh(new THREE.TorusGeometry(1.6, 0.25, 6, 12, Math.PI), M(0xe8dcc0, 0.6));
-          arch.position.set(x, 2.4, 5.05);
-          g.add(arch);
-        }
-        seg([
-          [-27, -5],
-          [27, -5],
-          [27, 5],
-          [-27, 5],
-        ]);
+      } else if (l.kind === 'redhouse' || l.kind === 'bopiliao') {
+        // v24.17 walk-in, searchable, built from photos
+        const build = l.kind === 'redhouse' ? buildRedHouse : buildBopiliao;
+        const R = build(g, (p, q) => this.d.addSeg({ a: [l.x + p[0], l.z + p[1]], b: [l.x + q[0], l.z + q[1]] }));
+        for (const c of R.conts) this.landConts.push({ ...c, p: [l.x + c.p[0], l.z + c.p[1]] });
+        this.walkIns.push({ ...R.walk, O: [l.x, l.z] });
       }
-      g.traverse(o => {
-        (o as THREE.Mesh).castShadow = true;
-        (o as THREE.Mesh).receiveShadow = true;
-      });
+      if (l.kind !== 'redhouse' && l.kind !== 'bopiliao')
+        g.traverse(o => {
+          (o as THREE.Mesh).castShadow = true;
+          (o as THREE.Mesh).receiveShadow = true;
+        });
       this.d.scene.add(g);
     }
   }
