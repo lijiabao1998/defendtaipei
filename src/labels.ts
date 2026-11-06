@@ -3,6 +3,8 @@ import { getLanguage } from './i18n';
 /** Display-only localization. Keep persisted labels and gameplay comparison keys unchanged. */
 const EN_LABELS: Readonly<Record<string, string>> = {
   國軍補給箱: 'ROC supply crate',
+  // v24.20
+  警局槍櫃: 'Police gun locker',
   // v24.18 東三水街市場
   菜攤: 'Vegetable stall',
   魚攤: 'Fish stall',

@@ -26,6 +26,7 @@ export const GUN_FAM: Record<string, GunFam> = {
   t75saw: 'lmg',
   qcw05: 'smg',
   qbs09: 'shotgun',
+  huntsg: 'shotgun',
   kestrel: 'launcher',
   at4: 'launcher',
   jav: 'launcher',
@@ -358,6 +359,7 @@ function spec(id: string): Spec | null {
     case 'qcw05':
       return smg();
     case 'qbs09':
+    case 'huntsg':
       return shotgun();
     case 'kestrel':
     case 'at4':

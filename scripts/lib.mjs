@@ -18,11 +18,14 @@ export function shot(name) {
   return path.join(dir, name);
 }
 
-// Chromium with software WebGL, so it also works headless and in CI.
+// Chromium with software WebGL, so it also works headless and in CI. PW_GPU=1 uses the machine's real graphics card
+// instead (still headless): on a desktop that is twice as fast, and it leaves the other cores free.
 export const launch = () =>
   chromium.launch({
     executablePath: process.env.PW_CHROMIUM || undefined,
-    args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader'],
+    args: process.env.PW_GPU
+      ? ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist']
+      : ['--use-gl=swiftshader', '--enable-unsafe-swiftshader'],
   });
 
 // Serve dist/ with `vite preview` on the given port and wait until it answers. Returns { url, stop }.

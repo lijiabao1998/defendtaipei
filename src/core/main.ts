@@ -1027,6 +1027,106 @@ function updateShells(dt: number) {
   }
 }
 let lastShellHit = 0;
+// ---------- v24.20 hand grenades: thrown the way you face, a four-second-ish fuse, about 5 m lethal, 15 m wounding ----------
+const GREN = { core: 5, wound: 15, fuse: 3.5, range: 13, coreDmg: 95, woundDmg: 42, oldDud: 0.3 };
+const grenades: {
+  m: THREE.Mesh;
+  t: number;
+  fly: number;
+  flyT: number;
+  a: V2;
+  b: V2;
+  dud: boolean;
+  indoorP: boolean;
+}[] = [];
+let grenadeMat: THREE.Material | null = null;
+function playerThrow(k: string) {
+  if (!player.inv[k]) return;
+  player.inv[k]--;
+  if (player.inv[k] <= 0) delete player.inv[k];
+  const P = player.pos;
+  // it lands where you aim, as far as an arm can throw; it sails over low cover and stops at the first wall
+  const ax = aimPt.x - P.x,
+    az = aimPt.z - P.z,
+    al = Math.hypot(ax, az) || 1;
+  const ux = ax / al,
+    uz = az / al;
+  const want = clamp(al, 4, GREN.range);
+  const clear = shotRay([P.x, P.z], [P.x + ux * want, P.z + uz * want], 1.7, 1.7, 0.4);
+  const d = clear < 1 ? Math.max(1, want * clear - 0.4) : want;
+  grenadeMat ||= new THREE.MeshStandardMaterial({ color: 0x3a4a2e, roughness: 0.6 });
+  const m = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 6), grenadeMat);
+  m.scale.set(1, 1.25, 1);
+  m.castShadow = true;
+  scene.add(m);
+  grenades.push({
+    m,
+    t: GREN.fuse,
+    fly: 0.25 + d * 0.055,
+    flyT: 0,
+    a: [P.x, P.z],
+    b: [P.x + ux * d, P.z + uz * d],
+    dud: k === 'oldgrenade' && Math.random() < GREN.oldDud,
+    indoorP: false,
+  });
+  log(tr('你把手榴彈丟了出去！', 'You throw the grenade!'), '#ffd27a');
+  noise(P.x, P.z, 6);
+}
+/** can a blast reach q from p? A wall stops it, but low cover is blown over and a trunk or a post hides nobody */
+function blastReach(p: V2, q: V2) {
+  const dx = q[0] - p[0],
+    dz = q[1] - p[1],
+    L = Math.hypot(dx, dz) || 1;
+  const nx = (-dz / L) * 0.8,
+    nz = (dx / L) * 0.8;
+  return (
+    shotRay(p, q, 1.5, 1.5, 0) >= 1 ||
+    shotRay(p, [q[0] + nx, q[1] + nz], 1.5, 1.5, 0) >= 1 ||
+    shotRay(p, [q[0] - nx, q[1] - nz], 1.5, 1.5, 0) >= 1
+  );
+}
+function grenadeTick(dt: number) {
+  for (let i = grenades.length - 1; i >= 0; i--) {
+    const g = grenades[i];
+    g.t -= dt;
+    g.flyT = Math.min(g.fly, g.flyT + dt);
+    const f = g.flyT / g.fly;
+    g.m.position.set(
+      g.a[0] + (g.b[0] - g.a[0]) * f,
+      0.12 + 1.5 * 4 * f * (1 - f) + (1 - f) * 1.2,
+      g.a[1] + (g.b[1] - g.a[1]) * f,
+    );
+    if (g.t > 0) continue;
+    grenades.splice(i, 1);
+    scene.remove(g.m);
+    if (g.dud) {
+      log(tr('……沒有炸。放了太多年，它啞了。', '...Nothing. After so many years, it is a dud.'), '#ccc');
+      continue;
+    }
+    const p = new THREE.Vector3(g.b[0], 0.4, g.b[1]);
+    boom(scene, p, 0.9);
+    noise(p.x, p.z, 45);
+    for (const o of sols) {
+      if (o.state === 'dead') continue;
+      const dd = Math.hypot(o.pos.x - p.x, o.pos.z - p.z);
+      if (dd < GREN.wound && blastReach([p.x, p.z], [o.pos.x, o.pos.z]))
+        damageSol(o, dd < GREN.core ? 240 : GREN.woundDmg * 1.6 * ((GREN.wound - dd) / (GREN.wound - GREN.core)), true);
+    }
+    const dp = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
+    if (dp < GREN.wound && blastReach([p.x, p.z], [player.pos.x, player.pos.z])) {
+      const dmg =
+        dp < GREN.core
+          ? GREN.coreDmg * (1 - 0.4 * (dp / GREN.core))
+          : GREN.woundDmg * ((GREN.wound - dp) / (GREN.wound - GREN.core));
+      player.hp -= dmg;
+      player.rig.hurtT = 0.4;
+      if (dmg > 15 && !player.bleed) {
+        player.bleed = true;
+        log(tr('被破片擊中，流血了！', 'Fragments hit you. You are bleeding!'), '#f66');
+      }
+    }
+  }
+}
 // ---------- 國軍 (ROC) support: weapons unlock, radio call-in, final counter-offensive ----------
 const ROC = { unlocked: false, cd: 0, offensive: false, ended: false, n: 0 };
 let roc: RocSystem | null = null;
@@ -1517,6 +1617,11 @@ function buildMap(data: any) {
     if (ob.fill) (b as any).fill = 1;
     const kind = CL.specialKind('', ob.s, ob.n);
     if (kind) (b as any).kind = kind;
+    // v24.20 invented police stations: not at any real address, spread by position, big enough to hold the rooms
+    else if (!ob.fill && A > 180 && A < 900) {
+      const ph = Math.abs(Math.sin(cx * 3.1 + cz * 7.7) * 43758.5453) % 1;
+      if (ph < 0.035) (b as any).kind = 'police';
+    }
     // door: longest edge
     let di = 0,
       dl = 0;
@@ -2050,6 +2155,17 @@ function rollLoot(type: string, r: () => number) {
         break;
       }
     }
+  }
+  if (type === 'armory') {
+    // v24.20 a station's locker always holds a gun, and rounds for it
+    if (!items.t75p && !items.t65k2 && !items.t93 && !items.huntsg) items.t75p = 1;
+    for (const [g, a, n] of [
+      ['t75p', 'a9', 12],
+      ['t65k2', 'a556n', 30],
+      ['t93', 'a762n', 10],
+      ['huntsg', 'a12', 4],
+    ] as const)
+      if (items[g] && !items[a]) items[a] = n;
   }
   return spoilRolled(items, r);
 }
@@ -5265,6 +5381,9 @@ function useItem(k: string) {
       player.thirst = clamp(player.thirst - 12, 0, 100);
       log(tr('肚子一陣絞痛⋯⋯拉肚子了。下次煮過再吃。', 'Stomach cramps... diarrhoea. Cook it next time.'), '#f99');
     }
+  } else if (k === 'grenade' || k === 'oldgrenade') {
+    playerThrow(k);
+    return;
   } else if (k === 'bucket') {
     if (indoorAt(player.pos.x, player.pos.z)) {
       log(
@@ -7442,6 +7561,7 @@ function update(dt: number) {
   if (started && !PRO.on) taipeiSounds(dt);
   if (started && !PRO.on && !MP) rescueTick();
   if (started && !PRO.on) reclaimTick();
+  if (grenades.length) grenadeTick(dt);
   if (rescueRig) animate(rescueRig.rig, 'idle', 0, dt);
   if (liaison) {
     const d = Math.hypot(player.pos.x - liaison.p[0], player.pos.z - liaison.p[1]);
@@ -9337,6 +9457,15 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.20 hands and the stations
+    losTest: (a: V2, b: V2) => blastReach(a, b),
+    grenades: () => grenades.map(g => ({ t: g.t, b: g.b, dud: g.dud })),
+    gren: GREN,
+    policeBlds: () =>
+      liveBlds()
+        .filter(b => (b as any).kind === 'police')
+        .map(b => ({ id: b.id, c: b.c, door: b.door?.p ?? null })),
+    armoryConts: () => conts.filter(c => c.label === '警局槍櫃').map(c => ({ id: c.id, p: c.p, items: c.items })),
     // v24.18 東三水街市場
     market: () =>
       market && {
