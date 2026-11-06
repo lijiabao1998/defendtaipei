@@ -49,11 +49,11 @@ const merged = (L: Geo[], keep: string[]) =>
     }),
   );
 
-function tileTex() {
+export function tileTex() {
   const cv = document.createElement('canvas');
   cv.width = cv.height = 128;
   const c = cv.getContext('2d')!;
-  c.fillStyle = '#c9772c';
+  c.fillStyle = '#b4622c'; // photos: a deep terracotta, not bright orange
   c.fillRect(0, 0, 128, 128);
   // barrel tiles: rounded ribs running down the slope, one course across
   for (let x = 0; x < 128; x += 16) {
@@ -86,7 +86,7 @@ function tileTex() {
  * A curved hall roof. The ridge runs along local x and sweeps up at both ends into swallowtails; the eaves lift towards
  * the corners and the slopes are concave. `rot` turns the whole roof a quarter (for the side corridors).
  */
-function hallRoof(
+export function hallRoof(
   tiles: Geo[],
   trim: Geo[],
   o: { x: number; z: number; W: number; D: number; y: number; H: number; lift: number; rot?: boolean; rich?: boolean },

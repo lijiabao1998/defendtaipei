@@ -3,6 +3,23 @@ import { getLanguage } from './i18n';
 /** Display-only localization. Keep persisted labels and gameplay comparison keys unchanged. */
 const EN_LABELS: Readonly<Record<string, string>> = {
   國軍補給箱: 'ROC supply crate',
+  // v24.16 華西街
+  海產攤: 'Seafood stall',
+  當歸鴨攤: 'Angelica duck stall',
+  鱔魚麵攤: 'Eel noodle stall',
+  魯肉飯攤: 'Braised pork rice stall',
+  米粉湯攤: 'Rice noodle soup stall',
+  麵線攤: 'Vermicelli stall',
+  肉粥攤: 'Pork congee stall',
+  蜜餞攤: 'Candied fruit stall',
+  青草茶攤: 'Herbal tea stall',
+  藥燉排骨攤: 'Herbal pork rib stall',
+  甜不辣攤: 'Fried fishcake stall',
+  足底按摩攤: 'Foot massage stall',
+  腳底按摩攤: 'Foot massage stall',
+  古早味攤: 'Old-style snack stall',
+  水果攤: 'Fruit stall',
+  金飾攤: 'Gold jewellery stall',
   // v24.3
   國軍殘部遺留裝備: 'Gear left by the ROC remnant',
   // v24.4
