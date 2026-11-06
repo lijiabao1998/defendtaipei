@@ -24,6 +24,8 @@ export function setArcadeDeps(d: Deps) {
   D = d;
 }
 const pillars: { x: number; z: number; pts: V2[]; nx: number; nz: number }[] = [];
+/** v24.11 every arcade front built (rain pours off their outer beams) */
+export const arcFronts: Arc[] = [];
 const G = {
   col: [] as THREE.BufferGeometry[],
   shut: [] as THREE.BufferGeometry[],
@@ -68,6 +70,7 @@ const LAMP_M = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff
 export function buildArcade(A: Arc, roof: THREE.Object3D) {
   const ceil: THREE.BufferGeometry[] = [],
     lamp: THREE.BufferGeometry[] = [];
+  arcFronts.push(A);
   const { a, ux, uz, nx, nz, dl } = A;
   const ang = Math.atan2(uz, ux);
   const at = (s: number, d: number): V2 => [a[0] + ux * s - nx * d, a[1] + uz * s - nz * d];

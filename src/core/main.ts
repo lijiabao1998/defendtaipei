@@ -26,7 +26,18 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { makeLampBatches } from './lamps';
 import { ITEMS, LOOT } from '../systems/items';
 import { iconURL, iconMat } from '../ui/icons';
-import { GF, FH, ARC, arcadeFits, buildArcade, flushArcades, setArcadeDeps, arcadeAudit } from '../map/arcade';
+import {
+  GF,
+  FH,
+  ARC,
+  arcadeFits,
+  buildArcade,
+  flushArcades,
+  setArcadeDeps,
+  arcadeAudit,
+  arcFronts,
+} from '../map/arcade';
+import { RainFx, makeUmbrella } from '../systems/rain';
 import { RemnantSystem, type RemSave } from '../npc/remnant';
 import { JapanSupport, JP_LABEL, type JpKind } from '../systems/japan';
 import { buildWreckage, wreckStats } from '../map/wreckage';
@@ -2569,7 +2580,18 @@ function mapIntelOutposts(lbl: string) {
   checkpoints.forEach((c, i) => gmap!.intel('out' + i, c[0], c[1], 'out', lbl));
 }
 // ---------- weather: rain (visual drops, wet ground, optional sound) + rain buckets ----------
-const WX = { rainNext: 15 * 60, rainUntil: 0, wet: 0, amt: 0 };
+const WX = { rainNext: 15 * 60, rainUntil: 0, wet: 0, amt: 0, int: 1, soak: 0 };
+// v24.11 台北的雨: splashes, 騎樓 eave curtains, lightning; the clear umbrella; getting soaked
+const rainFx = new RainFx({ indoorAt: (x, z) => indoorAt(x, z), groundY: (x, z) => walkH(x, z) });
+const umbrella = makeUmbrella();
+umbrella.visible = false;
+let umbOpen = false,
+  umbHold = 0,
+  soakTold = false,
+  sneezeT = 12,
+  sneezes = 0;
+/** on the street map: not upstairs, not underground */
+const onStreet = () => !UP.isUp(player.pos.x) && player.pos.z > -6000;
 const NR = 2500;
 const rainPos = new Float32Array(NR * 6);
 const rainG = new THREE.BufferGeometry();
@@ -2637,16 +2659,28 @@ function makeBucket(id: string, p: V2, items: Record<string, number> = {}) {
 }
 function updateWeather(dt: number, gm: number) {
   if (gameMin >= WX.rainNext && !raining()) {
-    WX.rainUntil = gameMin + 60 * (1.5 + rnd() * 4);
+    // v24.11 an afternoon brings the 西北雨 (short, violent, thunder); other hours a long grey drizzle
+    const hr = (gameMin / 60) % 24;
+    const storm = hr >= 13 && hr < 19;
+    WX.int = storm ? 0.82 + rnd() * 0.18 : 0.3 + rnd() * 0.25;
+    WX.rainUntil = gameMin + 60 * (storm ? 1 + rnd() * 1.5 : 2 + rnd() * 4);
     WX.rainNext = WX.rainUntil + 60 * (8 + rnd() * 28);
     log(
-      tr('🌧 開始下雨了。外面的水桶會接到雨水。', '🌧 It has started raining. Buckets outside will collect rainwater.'),
+      storm
+        ? tr(
+            '⛈ 午後的西北雨說來就來，雨大到看不清對街。外面的水桶會接到雨水。',
+            '⛈ The afternoon downpour comes all at once; you can barely see across the street. Buckets outside will collect rainwater.',
+          )
+        : tr(
+            '🌧 開始飄起毛毛雨。外面的水桶會接到雨水。',
+            '🌧 A fine drizzle begins. Buckets outside will collect rainwater.',
+          ),
       '#9fd0ff',
     );
   }
   const r = raining();
-  WX.amt += ((r ? 1 : 0) - WX.amt) * Math.min(1, dt * 0.5);
-  WX.wet = clamp(WX.wet + (r ? gm * 1.5 : -gm * 0.25), 0, 1);
+  WX.amt += ((r ? WX.int : 0) - WX.amt) * Math.min(1, dt * 0.5);
+  WX.wet = clamp(WX.wet + (r ? gm * 1.5 * (0.4 + 0.6 * WX.int) : -gm * 0.25), 0, 1);
   if (r)
     for (const c of conts)
       if (c.label === '雨水桶') {
@@ -2664,15 +2698,27 @@ function updateWeather(dt: number, gm: number) {
         w.visible = !!c.items.rainwater;
       }
     }
-  (rainMesh.material as THREE.LineBasicMaterial).opacity = WX.amt * 0.45;
-  rainMesh.visible = WX.amt > 0.02;
+  (rainMesh.material as THREE.LineBasicMaterial).opacity = WX.amt * 0.5;
+  // v24.11 no rain falling inside an upstairs room or a metro station
+  const street = onStreet();
+  rainMesh.visible = WX.amt > 0.02 && street;
   if (rainMesh.visible) {
     rainMesh.position.set(player.pos.x, 0, player.pos.z);
-    const fall = dt * 22;
+    // drizzle: fewer, slower drops; the downpour slants in gusts
+    rainG.setDrawRange(0, Math.round(NR * (0.25 + 0.75 * WX.int)) * 2);
+    const fall = dt * (12 + 10 * WX.int);
+    const gust = Math.sin(performance.now() * 0.00013) * 2.6 * WX.int,
+      dx = gust * dt,
+      lean = 0.05 - gust * 0.06;
     for (let i = 0; i < NR; i++) {
       const o = i * 6;
       rainPos[o + 1] -= fall;
       rainPos[o + 4] -= fall;
+      let x = rainPos[o] + dx;
+      if (x > 35) x -= 70;
+      else if (x < -35) x += 70;
+      rainPos[o] = x;
+      rainPos[o + 3] = x + lean;
       if (rainPos[o + 1] < 0) {
         rainPos[o + 1] += 30;
         rainPos[o + 4] += 30;
@@ -2680,6 +2726,7 @@ function updateWeather(dt: number, gm: number) {
     }
     rainG.attributes.position.needsUpdate = true;
   }
+  rainFx.update(dt, WX.amt, WX.int, player.pos.x, player.pos.z, street);
   const wet = WX.wet;
   roadMat.roughness = 0.95 - wet * 0.65;
   roadMat.metalness = wet * 0.25;
@@ -2688,6 +2735,65 @@ function updateWeather(dt: number, gm: number) {
   groundMat.color.setScalar(1 - wet * 0.3);
   decay?.setWet(WX.wet);
   if (rainAudio) rainAudio.g.gain.value = WX.amt * 0.12;
+}
+/** v24.11 the clear umbrella opens over your head when you are out in the rain (it closes while you fight) */
+function umbrellaTick() {
+  const r = player.rig;
+  if (!r) return;
+  if (umbrella.parent !== r.body) r.body.add(umbrella);
+  // real time: closed for 1.2 s after the last shot / swing / shove / vault
+  if (r.shootT > 0 || r.meleeT > 0 || r.shoveT > 0 || r.vaultT > 0) umbHold = performance.now() + 1200;
+  umbOpen =
+    !!player.inv.umbrella &&
+    WX.amt > 0.12 &&
+    !dead &&
+    !player.sleeping &&
+    !drive.cur &&
+    performance.now() > umbHold &&
+    player.anim !== 'loot' &&
+    onStreet() &&
+    !indoorAt(player.pos.x, player.pos.z);
+  umbrella.visible = umbOpen;
+  if (!umbOpen) return;
+  umbrella.position.set(0.2, 2.02, 0.2);
+  // left forearm raised to hold the shaft
+  r.uaL.rotation.x = -0.5;
+  r.uaL.rotation.z = -0.08;
+  r.laL.rotation.x = -2.2;
+}
+/** v24.11 out in the rain you get soaked; soaked you tire faster, and at night you shiver and sneeze */
+function soakTick(dt: number, gm: number) {
+  const out = onStreet() && !indoorAt(player.pos.x, player.pos.z) && !drive.cur;
+  const home = surv.home && Math.hypot(player.pos.x - surv.home[0], player.pos.z - surv.home[1]) < 14;
+  if (raining() && out) {
+    const gear = (umbOpen ? 0.2 : 1) * (player.inv.poncho ? 0.25 : 1);
+    WX.soak = Math.min(1, WX.soak + gm * 3 * WX.int * gear);
+  } else WX.soak = Math.max(0, WX.soak - gm * (home ? 2.5 : out ? 0.5 : 1));
+  if (WX.soak >= 0.6) {
+    player.fatigue += gm * 2;
+    if (!soakTold) {
+      soakTold = true;
+      log(
+        player.inv.umbrella || player.inv.poncho
+          ? tr(
+              '你全身濕透了。進騎樓或屋簷下躲一下吧。',
+              'You are soaked through. Get under an arcade or a roof for a while.',
+            )
+          : tr(
+              '你全身濕透了。進騎樓躲雨，或到便利商店找把傘、一件輕便雨衣。',
+              'You are soaked through. Shelter under an arcade, or find an umbrella or a poncho in a convenience store.',
+            ),
+        '#9fd0ff',
+      );
+    }
+  } else if (WX.soak < 0.3) soakTold = false;
+  // shivering: a sneeze now and then, and the occupation troops can hear it
+  if (WX.soak >= 0.6 && (isNight() || WX.soak > 0.9) && !player.sleeping && (sneezeT -= dt) <= 0) {
+    sneezeT = 25 + Math.random() * 35;
+    sneezes++;
+    log(tr('哈啾！——你冷得直打哆嗦。', 'Achoo! You are shivering with cold.'), '#9cf');
+    noise(player.pos.x, player.pos.z, 14, true);
+  }
 }
 // ---------- airdrop ----------
 let smoke: THREE.Points | null = null;
@@ -3195,7 +3301,9 @@ function taipeiSounds(_dt: number) {
   // thunder in a downpour
   if (WX.amt > 0.6 && (SND.thunderT -= dt) <= 0) {
     SND.thunderT = 20 + Math.random() * 25;
-    AU.thunder(indoor);
+    // v24.11 the flash comes first, the thunder a moment later
+    rainFx.flash(indoor ? 0.45 : 1);
+    setTimeout(() => AU.thunder(indoor), 400 + Math.random() * 2200);
   }
 }
 // ---------- v24.4 日本支援: a JSDF liaison (fictional) with a field radio; airdrops, F-2 strikes, AH-64DJ cover ----------
@@ -4332,6 +4440,7 @@ function upToggle() {
   return !!s && goUp(s.b, s.P);
 }
 function noise(x: number, z: number, r: number, quiet = false) {
+  r *= 1 - WX.amt * 0.25; // v24.11 the rain covers sounds
   // quiet: soldiers still hear it, but it does not interrupt fast-forward (v24.3 allied gunfire further off)
   if (started && r >= 10 && !quiet) {
     const d = Math.hypot(player.pos.x - x, player.pos.z - z);
@@ -6608,6 +6717,7 @@ function update(dt: number) {
   player.hunger -= gm * 2.2;
   player.thirst -= gm * 3.2;
   player.fatigue += player.sleeping ? -gm * 14 * (ROLE.skills.rest ?? 1) : gm * 2.6;
+  soakTick(dt, gm);
   if (player.sleeping && player.fatigue <= 0) {
     player.sleeping = false;
     log(tr('你醒了', 'You wake up'), '#aaf');
@@ -6828,6 +6938,7 @@ function update(dt: number) {
   setWeapon(player.rig, player.equip);
   setLodFocus(player.pos);
   animate(player.rig, player.anim, player.moving, dt);
+  umbrellaTick();
   if (!drive.cur) {
     player.mesh.position.copy(player.pos);
     player.mesh.position.y += roofB ? roofB.h : walkH(player.pos.x, player.pos.z); // v21.4 stand on the raised walk (v22.5 or a roof)
@@ -6875,6 +6986,7 @@ function update(dt: number) {
     // vision
     let range = (night ? 11 : 20) * (player.sneak ? 0.55 : 1) * (player.light && night ? 2 : 1);
     if (inside) range *= 0.6;
+    else range *= 1 - WX.amt * 0.3; // v24.11 a downpour hides you
     const facing =
       Math.abs(Math.atan2(Math.sin(Math.atan2(dz, dx) - s.dir), Math.cos(Math.atan2(dz, dx) - s.dir))) < Math.PI / 5;
     const sees =
@@ -7222,6 +7334,7 @@ function update(dt: number) {
     .lerp(new THREE.Color(0xd99a6c), warmF * 0.45)
     .lerp(new THREE.Color(0x5a6068).multiplyScalar(0.3 + dayF * 0.7), WX.amt * 0.5);
   sun.intensity *= 1 - WX.amt * 0.55;
+  if (rainFx.flashK > 0) hemi.intensity += rainFx.flashK * 1.8; // v24.11 lightning
   (scene.fog as THREE.Fog).color.copy(fogC);
   renderer.setClearColor(fogC);
   hemi.color.setHSL(0.6, 0.5, 0.35 + dayF * 0.45);
@@ -7322,6 +7435,8 @@ function drawHud(inside: Bld | null) {
   if (player.hp < 30) m.push(tr('重傷', 'Severely injured'));
   if (player.hp < 100 && regenRate() >= 18) m.push(tr('飽足・回血中', 'Well fed · Healing'));
   if (player.sneak) m.push(tr('潛行中', 'Sneaking'));
+  if (WX.soak >= 0.6) m.push(tr('濕透・發冷', 'Soaked · Cold'));
+  else if (WX.soak >= 0.25) m.push(tr('淋濕', 'Wet'));
   if (player.sleeping) m.push(tr('睡眠中', 'Sleeping'));
   if (sols.some(s => s.state === 'combat' && s.mesh.visible)) m.push(tr('被追捕', 'Being pursued'));
   $('stats').innerHTML =
@@ -7943,6 +8058,9 @@ async function boot() {
   for (const q of segs) nav.markSeg(q.a, q.b, 1);
   spawnSoldiers(new Set(sv?.dead || []));
   scene.add(rainMesh);
+  scene.add(rainFx.group);
+  rainFx.setFronts(arcFronts);
+  renderer.domElement.insertAdjacentElement('afterend', rainFx.flashEl);
   setupInformant(start.c as V2, !(sv && sv.inf));
   {
     let best: V2 | null = null;
@@ -8855,6 +8973,7 @@ async function boot() {
     },
     parks: () => parks,
     simRain: (h: number) => {
+      WX.int = 1; // tests: a full downpour, as before v24.11
       for (let i = 0; i < h * 20; i++) updateWeather(0.05, 0.05);
     },
     camera,
@@ -8991,6 +9110,29 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.11 rain hooks
+    rainfx: () => ({ ...rainFx.stats, flashK: rainFx.flashK, vis: rainFx.group.visible }),
+    rainState: () => ({ amt: WX.amt, int: WX.int, soak: WX.soak, umb: umbOpen, sneezes, raining: raining() }),
+    lightning: () => rainFx.flash(1),
+    /** nearest 騎樓 front to the player: its middle and outward normal */
+    arcSpot: () => {
+      let best: (typeof arcFronts)[number] | null = null,
+        bd = 1e18;
+      for (const A of arcFronts) {
+        const d = (A.mid[0] - player.pos.x) ** 2 + (A.mid[1] - player.pos.z) ** 2;
+        if (d < bd && A.dl > 8) ((bd = d), (best = A));
+      }
+      return best && { mid: best.mid, nx: best.nx, nz: best.nz, dl: best.dl, n: arcFronts.length };
+    },
+    soakSim: (n: number, dt = 0.05, gm = 0.05) => {
+      for (let i = 0; i < n; i++) soakTick(dt, gm);
+      return WX.soak;
+    },
+    startRain: (int: number, hours = 2) => {
+      WX.int = WX.amt = int; // tests: no ramp
+      WX.rainUntil = gameMin + 60 * hours;
+      WX.rainNext = WX.rainUntil + 600;
+    },
     // v24.7 sound counters (garbage truck, temple, thunder)
     sounds: () => ({
       ...AU.auStats,
