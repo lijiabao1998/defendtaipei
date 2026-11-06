@@ -185,6 +185,10 @@ export class RemnantSystem {
       });
     });
   }
+  /** v24.14 the unit still standing in a district, for the line when that district is reclaimed */
+  heldIn(inDistrict: (p: V2) => boolean) {
+    return this.squads.find(s => inDistrict(s.p) && this.alive(s) > 0)?.unit ?? null;
+  }
   alive(q: Squad) {
     const sv = this.d.store()[q.id];
     return q.men.filter((_, k) => sv.hp[k] > 0).length;

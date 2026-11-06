@@ -20,7 +20,7 @@ import { SPEC, DriveSystem, type DKind } from '../systems/drive';
 import { ROLES, roleById, type Role } from '../player/roles';
 import type { FPV } from '../systems/fpv';
 import type { GameMap } from '../map/map';
-import { RocSystem, ROC_NAME, flagPole, type RocKind } from '../npc/roc';
+import { RocSystem, ROC_NAME, flagPole, rocFlagTex, type RocKind } from '../npc/roc';
 import { placeRooftop, dressRoof, pickRoofMat, setShackNight, roofClass, roofStats } from '../map/rooftin';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeLampBatches } from './lamps';
@@ -38,6 +38,7 @@ import {
   arcFronts,
 } from '../map/arcade';
 import { RainFx, makeUmbrella } from '../systems/rain';
+import { Reclaim, reclaimTitle } from '../systems/reclaim';
 import { RemnantSystem, type RemSave } from '../npc/remnant';
 import { JapanSupport, JP_LABEL, type JpKind } from '../systems/japan';
 import { buildWreckage, wreckStats } from '../map/wreckage';
@@ -6317,6 +6318,85 @@ function checkSectors(silent = false) {
   rocCheck(silent);
 }
 
+// ---------- v24.14 奪回: a reclaimed district changes on the street, and it pays ----------
+let reclaim: Reclaim | null = null;
+let reclaimSynced = false;
+const RECLAIM_LINES: [string, string][] = [
+  [
+    '鐵捲門一扇一扇拉起來。有人把藏了好幾天的國旗掛上陽台。',
+    'One by one the shutters roll up. Someone hangs out a flag hidden for days.',
+  ],
+  [
+    '巷口的阿伯點起一串鞭炮，這一次沒有人叫他小聲一點。',
+    'An old man at the corner lights a string of firecrackers. Nobody tells him to keep it down.',
+  ],
+  [
+    '街坊端著熱湯走出來，塞給你就走，不肯收錢。',
+    'Neighbours come out with hot soup, press it on you and will not take money.',
+  ],
+  ['廟裡的鐘響了。這條街，是我們自己的了。', 'The temple bell rings. This street is ours again.'],
+];
+const RECLAIM_GIFTS: Record<string, number>[] = [
+  { bento: 2, water: 2, bandage: 1 },
+  { hotnoodle: 2, boiled: 2, can: 1 },
+  { mantou: 3, driedtofu: 2, water: 1 },
+  { roufong: 1, can: 2, bandage: 2 },
+];
+function reclaimTick() {
+  if (!reclaim) return;
+  const fresh = reclaim.sync(liberated);
+  if (!reclaimSynced) {
+    reclaimSynced = true; // districts already reclaimed in a loaded save: no party, but the crowd is where it was
+    const at = (surv as any).libAt as Record<number, V2> | undefined;
+    if (at) for (const k of Object.keys(at)) reclaim.gather(+k, at[+k][0], at[+k][1]);
+    return;
+  }
+  if (MP) return;
+  for (const i of fresh) reclaimParty(i);
+}
+function reclaimParty(i: number) {
+  const name = SECTOR_LABEL(i);
+  // the neighbours come out around you, wherever you are when the district falls
+  const here = mapPos();
+  reclaim?.gather(i, here[0], here[1]);
+  ((surv as any).libAt ||= {})[i] = here;
+  const L = RECLAIM_LINES[i % RECLAIM_LINES.length];
+  // soldiers who held out here get the last word
+  const held = rem?.heldIn(q => sectorOf(q[0], q[1]) === i);
+  const line = held
+    ? getLanguage() === 'en'
+      ? `${held}: they lower their rifles at last and salute the neighbours coming out into the street.`
+      : `${held}的弟兄終於放下槍，向走上街頭的街坊敬了一個禮。`
+    : tr(L[0], L[1]);
+  reclaimTitle(getLanguage() === 'en' ? `★ ${name} is ours again` : `★ ${name} 奪回來了`, line);
+  AU.firecrackers();
+  AU.temple(30);
+  const gift = RECLAIM_GIFTS[i % RECLAIM_GIFTS.length];
+  const giftKeys = Object.keys(gift);
+  for (const k of giftKeys) addItem(k, gift[k]);
+  log(
+    getLanguage() === 'en'
+      ? `🎁 The neighbours press things into your hands: ${giftKeys.map(k => `${ITEMS[k]?.name} ×${gift[k]}`).join(', ')}`
+      : `🎁 街坊把東西塞到你手上：${giftKeys.map(k => `${ITEMS[k]?.name}×${gift[k]}`).join('、')}`,
+    '#ffd27a',
+  );
+  surv.karma += 1;
+  surv.group.forEach(g => (g.mood = Math.min(100, g.mood + 8)));
+}
+/** 06:00: the reclaimed districts look after the shelter (before the day's meals are counted) */
+function reclaimDawn() {
+  const rice = Math.floor(liberated.size / 2),
+    water = Math.floor(liberated.size / 3);
+  if (!rice && !water) return;
+  surv.stash.rice = (surv.stash.rice || 0) + rice;
+  surv.stash.water = (surv.stash.water || 0) + water;
+  log(
+    getLanguage() === 'en'
+      ? `🍚 Neighbours from the reclaimed districts left food at the shelter: rice ×${rice}, water ×${water}`
+      : `🍚 奪回街區的街坊送來吃的到避難所：米×${rice}、水×${water}`,
+    '#ffd27a',
+  );
+}
 // ---------- save (localStorage I/O lives in systems/save.ts; keys and JSON stay defendtaipei-save-v1 + dt.tiles) ----------
 // ---------- story: utilities timeline (有電有水 → 斷電 → 斷水) ----------
 const UT = { power: true, water: true, ev: {} as Record<string, 1> };
@@ -6705,6 +6785,7 @@ function update(dt: number) {
     if (survDay < 0) survDay = dn;
     else if (dn > survDay) {
       survDay = dn;
+      reclaimDawn();
       const out = SV.dayTick(surv, WX.amt > 0.2, {
         power: on => (UT.power = on),
         water: on => (UT.water = on),
@@ -7293,6 +7374,7 @@ function update(dt: number) {
   if (started) wreckTick();
   if (started && !PRO.on) taipeiSounds(dt);
   if (started && !PRO.on && !MP) rescueTick();
+  if (started && !PRO.on) reclaimTick();
   if (rescueRig) animate(rescueRig.rig, 'idle', 0, dt);
   if (liaison) {
     const d = Math.hypot(player.pos.x - liaison.p[0], player.pos.z - liaison.p[1]);
@@ -8061,6 +8143,19 @@ async function boot() {
   spawnSoldiers(new Set(sv?.dead || []));
   scene.add(rainMesh);
   scene.add(rainFx.group);
+  reclaim = new Reclaim({
+    scene,
+    blds: blds as any,
+    roads,
+    roadW: ROADW,
+    bldAt,
+    pip,
+    blocked: (x, z) => !!placeAt(x, z),
+    groundY: (x, z) => walkH(x, z),
+    sectorOf,
+    nSec: NSEC,
+    flagTex: rocFlagTex(),
+  });
   rainFx.setFronts(arcFronts);
   renderer.domElement.insertAdjacentElement('afterend', rainFx.flashEl);
   setupInformant(start.c as V2, !(sv && sv.inf));
@@ -9112,6 +9207,14 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.14 奪回
+    reclaim: () =>
+      reclaim
+        ? {
+            ...reclaim.stats,
+            s: SECTORS.map((_, i) => ({ ...reclaim!.visible(i), spot: reclaim!.spot(i), wall: reclaim!.wall(i) })),
+          }
+        : null,
     // v24.12 招牌牆 counts
     signs: () => decay?.signs ?? null,
     // v24.11 rain hooks
