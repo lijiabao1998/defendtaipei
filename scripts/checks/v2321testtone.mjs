@@ -65,7 +65,7 @@ const ok =
   r.afterClear.active &&
   r.afterClear.test === r.afterTest.test;
 console.log(JSON.stringify({ ...r, errs, ok }, null, 2));
-await page.screenshot({ path: shot('alert-routing-specialist.png') });
+await page.screenshot({ path: shot('alert-routing-specialist.png'), timeout: 120000 });
 await ctx.close();
 await b.close();
 srv?.stop();
