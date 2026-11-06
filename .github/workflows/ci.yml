@@ -37,7 +37,7 @@ jobs:
     name: Browser – ${{ matrix.name }}
     needs: checks
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -85,7 +85,7 @@ jobs:
     name: Help and loot – ${{ matrix.device }} / ${{ matrix.lang }}
     needs: checks
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

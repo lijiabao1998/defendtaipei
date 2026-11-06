@@ -128,7 +128,7 @@ type Sec = {
   crowd: THREE.BufferGeometry[];
 };
 export class Reclaim {
-  readonly stats = { banners: 0, crossings: 0, flags: 0, people: 0, ms: 0, freeMs: 0 };
+  readonly stats = { banners: 0, crossings: 0, flags: 0, people: 0, ms: 0, freeMs: 0, tiles: 0 };
   private secs: Sec[] = [];
   private flagMat!: THREE.Material;
   private crowdMat!: THREE.Material;
@@ -165,6 +165,73 @@ export class Reclaim {
       if (s?.free) s.free.visible = on;
     }
     return fresh;
+  }
+  /**
+   * v24.18 a streamed tile in a reclaimed district: flags on its street fronts, and (outer districts, which have no
+   * ready-made crowd) neighbours along its streets. Returns meshes for the caller to add and drop with the tile.
+   */
+  dressTile(
+    key: string,
+    fronts: { x: number; z: number; nx: number; nz: number; ux: number; uz: number; len: number }[],
+    roads: { p: V2[]; t: string }[],
+    withCrowd: boolean,
+  ) {
+    let rs = 7;
+    for (let i = 0; i < key.length; i++) rs = Math.imul(rs, 31) + key.charCodeAt(i);
+    const r = () => (rs = (Math.imul(rs, 1664525) + 1013904223) >>> 0) / 4294967296;
+    const flags: THREE.BufferGeometry[] = [],
+      crowd: THREE.BufferGeometry[] = [];
+    const stride = Math.max(1, Math.floor(fronts.length / 34));
+    for (let i = 0; i < fronts.length; i += stride) {
+      const f = fronts[i];
+      if (r() < 0.25) continue;
+      const seed = r() * 6.28;
+      const fl = new THREE.PlaneGeometry(1.05, 0.7, 4, 1).translate(0.525, 0, 0);
+      swayOf(fl, x => [seed, 0.1 * (x / 1.05), 0.03 * (x / 1.05)]);
+      const s = (r() - 0.5) * f.len * 0.7;
+      const wx = f.x - f.nx * 1.38 + f.ux * s,
+        wz = f.z - f.nz * 1.38 + f.uz * s;
+      flags.push(
+        tagB(place(fl, wx, 5.2 + Math.floor(r() * 2) * 3.2, wz, Math.atan2(-f.nz, f.nx), 0, -0.32), [1e6, 1e6]),
+      );
+    }
+    if (withCrowd) {
+      let groups = 0;
+      for (const q of roads) {
+        const w = this.D.roadW[q.t.replace('_link', '')] ?? 3;
+        if (w < 4 || groups >= 14) continue;
+        for (let i = 0; i < q.p.length - 1 && groups < 14; i++) {
+          const a = q.p[i],
+            e = q.p[i + 1];
+          const L = Math.hypot(e[0] - a[0], e[1] - a[1]);
+          if (L < 1) continue;
+          const ux = (e[0] - a[0]) / L,
+            uz = (e[1] - a[1]) / L;
+          for (let s = 4 + r() * 14; s < L && groups < 14; s += 16 + r() * 22) {
+            const side = r() < 0.5 ? 1 : -1;
+            const x0 = a[0] + ux * s - uz * side * (w / 2 + 1.1),
+              z0 = a[1] + uz * s + ux * side * (w / 2 + 1.1);
+            if (this.D.blocked(x0, z0)) continue;
+            this.group(crowd, x0, z0, 2 + Math.floor(r() * 3), 1.8, 5, 12, r);
+            groups++;
+          }
+        }
+      }
+    }
+    const out: THREE.Mesh[] = [];
+    const mk = (L: THREE.BufferGeometry[], keep: string[], m: THREE.Material) => {
+      if (!L.length) return;
+      const me = new THREE.Mesh(merged(L, keep), m);
+      me.castShadow = false;
+      me.receiveShadow = true;
+      me.userData.noChunk = true;
+      me.userData.ownGeo = true;
+      out.push(me);
+    };
+    mk(flags, ['position', 'normal', 'uv', 'aBld', 'aSway'], this.flagMat);
+    mk(crowd, ['position', 'normal', 'color', 'aSway'], this.crowdMat);
+    this.stats.tiles++;
+    return out;
   }
   /** the crowd that comes out around the player the moment district i falls, wherever on the map that is */
   gather(i: number, x: number, z: number) {

@@ -49,7 +49,7 @@ const FOOD: Record<string, number>[] = [
   { snack: 2, sport: 1 },
   { roufong: 1, coffee: 1 },
 ];
-const tintG = (g: Geo, hex: number, jitter = 0, r = Math.random) => {
+export const tintG = (g: Geo, hex: number, jitter = 0, r = Math.random) => {
   const c = new THREE.Color(hex);
   if (jitter) c.offsetHSL(0, 0, (r() - 0.5) * jitter);
   const n = g.attributes.position.count,
@@ -58,7 +58,7 @@ const tintG = (g: Geo, hex: number, jitter = 0, r = Math.random) => {
   g.setAttribute('color', new THREE.BufferAttribute(a, 3));
   return g;
 };
-const merged = (L: Geo[], keep: string[]) =>
+export const merged = (L: Geo[], keep: string[]) =>
   mergeGeometries(
     L.map(g => {
       const q = g.index ? g.toNonIndexed() : g;
@@ -67,8 +67,8 @@ const merged = (L: Geo[], keep: string[]) =>
     }),
   );
 /** a frame on the street: position, along (u) and across (n); local +z runs along, local +x across */
-type Frame = { x: number; z: number; ux: number; uz: number; nx: number; nz: number; ry: number };
-function frames(road: V2[], step: number) {
+export type Frame = { x: number; z: number; ux: number; uz: number; nx: number; nz: number; ry: number };
+export function frames(road: V2[], step: number) {
   const out: Frame[] = [];
   let carry = 0;
   for (let i = 0; i < road.length - 1; i++) {
@@ -385,6 +385,7 @@ export function buildHuaxi(d: HuaxiDeps) {
     roughness: 0.42,
     side: THREE.DoubleSide,
   });
+  for (const m of [steelMat, lampMat, glassMat, tileMat]) m.userData.cut = true;
   const add = (g: Geo, m: THREE.Material, receive = true) => {
     const me = new THREE.Mesh(g, m);
     me.castShadow = false;
@@ -404,6 +405,18 @@ export function buildHuaxi(d: HuaxiDeps) {
   return {
     conts,
     bays: F.length,
+    /** walking in lifts the roof and whatever hides the lane from the camera, as in any building (occlusion.ts) */
+    cut(x: number, z: number) {
+      if (!this.covers(x, z)) return null;
+      const a = F[0],
+        b = F[F.length - 1];
+      const L = Math.hypot(b.x - a.x, b.z - a.z);
+      return {
+        O: [a.x, a.z] as V2,
+        U: [(b.x - a.x) / L, (b.z - a.z) / L] as V2,
+        ub: [-2.5, L + 2.5, -HW + 0.8, HW + 0.8] as [number, number, number, number],
+      };
+    },
     /** on the covered street, or under its gates */
     covers(x: number, z: number) {
       return F.some(f => Math.hypot(f.x - x, f.z - z) < HW + 2.6);
