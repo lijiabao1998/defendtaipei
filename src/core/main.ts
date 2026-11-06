@@ -241,7 +241,10 @@ function roadDist(x: number, z: number) {
   }
   return best;
 }
+/** v24.15 true while a building that stands on a temple square is generated: it leaves no walls behind */
+let segOff = false;
 function addSeg(s: Seg, low = false) {
+  if (segOff) return;
   if (low) s.low = true;
   if (low && s.h == null) s.h = 1.0; // sandbags / jersey barriers / hedges: chest-high cover
   segs.push(s);
@@ -742,15 +745,19 @@ const mapPos = (): V2 => (up ? up.anchor : [player.pos.x, player.pos.z]);
 const BG = 20;
 let bgN = -1;
 const bGrid = new Map<number, Bld[]>();
+/** every core building that is actually in the world (v24.15) */
+const liveBlds = () => blds.filter(b => !(b as any).ghost);
 function bldAt(x: number, z: number) {
   if (bgN !== blds.length) {
     bGrid.clear();
-    for (const b of blds)
+    for (const b of blds) {
+      if ((b as any).ghost) continue; // v24.15 not in the world
       for (let i = Math.floor(b.minx / BG); i <= Math.floor(b.maxx / BG); i++)
         for (let j = Math.floor(b.minz / BG); j <= Math.floor(b.maxz / BG); j++) {
           const k = i * 4096 + j;
           (bGrid.get(k) || bGrid.set(k, []).get(k)!).push(b);
         }
+    }
     bgN = blds.length;
   }
   const L = bGrid.get(Math.floor(x / BG) * 4096 + Math.floor(z / BG));
@@ -763,7 +770,7 @@ function placeAt(x: number, z: number): Bld | DEnter | null {
 }
 /** v23.3 indoors for player-facing checks (sleep, shelter, drones, muffled sound): core or district building */
 function indoorAt(x: number, z: number) {
-  return UP.isUp(x) || !!placeAt(x, z);
+  return UP.isUp(x) || !!placeAt(x, z) || district.landmarkRoofAt(x, z);
 }
 
 // ---------- sectors ----------
@@ -1449,6 +1456,7 @@ function buildMap(data: any) {
   setArcadeDeps({ roadDist, pip: pip as any, addSeg });
   let seed0: number | null = null;
   const fillFloors: THREE.BufferGeometry[] = [];
+  const squares = district.ix ? District.squares(district.ix) : [];
   data.buildings.forEach((ob: any, id: number) => {
     // v23.9 infill lots come last and use their own RNG stream, so OSM buildings, loot and soldiers stay put
     if (ob.fill && seed0 === null) ((seed0 = seed), (seed = 0x5f11));
@@ -1475,8 +1483,12 @@ function buildMap(data: any) {
     const type = shopType(ob.s, ob.n);
     const cx = xs.reduce((a, b) => a + b) / xs.length,
       cz = zs.reduce((a, b) => a + b) / zs.length;
+    // v24.15 a building on the temple square is generated as usual, so ids and rnd() stay as they were and infill keeps
+    // off its plot, but it is never placed in the world: no meshes, no walls, no door, no containers
+    const ghost = squares.some(r => cx > r[0] && cx < r[2] && cz > r[1] && cz < r[3]);
+    segOff = ghost;
     const group = new THREE.Group();
-    scene.add(group);
+    if (!ghost) scene.add(group);
     const b: Bld = {
       id,
       pts,
@@ -1594,10 +1606,10 @@ function buildMap(data: any) {
         }
         const door: Door = { b, p: mid, a: da, c: dc, barricaded: false };
         b.door = door;
-        doors.push(door);
+        if (!ghost) doors.push(door);
         // v19.3 騎樓: built inside the footprint — columns on the street edge under the upper floors,
         // shopfront recessed ARC m behind them, continuous ceiling; only on edges facing a road
-        if (arcOk) buildArcade(arcOk, b.roof);
+        if (arcOk && !ghost) buildArcade(arcOk, b.roof);
         // v23.9 infill: no per-house fascia sign (decay.ts hangs vertical signs on the street fronts)
         if ((h > 6 && rnd() < 0.6 && !ob.fill) || type !== 'home') {
           const tex = type !== 'home' ? signTex[type] : pick(shopSignTex);
@@ -1703,6 +1715,7 @@ function buildMap(data: any) {
     }
     group.add(b.roof);
     blds.push(b);
+    if (ghost) (b as any).ghost = true;
     (b as any).nm = ob.n || '';
     // containers
     if (b.door) {
@@ -1713,11 +1726,16 @@ function buildMap(data: any) {
         const p: V2 = [b.minx + rnd() * (b.maxx - b.minx), b.minz + rnd() * (b.maxz - b.minz)];
         if (pip(p, pts) && Math.hypot(p[0] - b.door.p[0], p[1] - b.door.p[1]) > 1.8) {
           makeCont(`b${id}_${k}`, p, type, b);
+          if (ghost) {
+            const gc = conts.pop()!;
+            gc.mesh.parent?.remove(gc.mesh);
+          }
           k++;
         }
       }
     }
   });
+  segOff = false;
   if (seed0 !== null) seed = seed0;
   if (fillFloors.length) {
     const fl = new THREE.Mesh(mergeGeometries(fillFloors), floorMat);
@@ -3149,6 +3167,7 @@ function rescueTick() {
   const P: V2 = mapPos(); // upstairs: the stairwell's spot on the map
   const home = bldAt(surv.home?.[0] ?? P[0], surv.home?.[1] ?? P[1]);
   const cand = blds.filter(b => {
+    if ((b as any).ghost) return false;
     const pl = (b as any).clut as CL.Plan | undefined;
     if (!pl?.stair || b === home || storeys(b) < 3) return false;
     const d = Math.hypot(b.c[0] - P[0], b.c[1] - P[1]);
@@ -4104,7 +4123,7 @@ function clutterTick(dt: number) {
   const cand: [Bld, number][] = [];
   for (const b of blds) {
     const C = (b as any).clut as CL.Plan | undefined;
-    if (!C) continue;
+    if (!C || (b as any).ghost) continue;
     const d = Math.max(b.minx - P.x, P.x - b.maxx, b.minz - P.z, P.z - b.maxz, 0);
     const g = (b as any).clutG as THREE.Group | undefined;
     if (g) {
@@ -7028,7 +7047,11 @@ function update(dt: number) {
   updateOcclusion(player.pos.x, player.pos.y, player.pos.z);
   // v23.3 inside an enterable district building: cut its upper floors and roof away (core blocks lower their walls)
   setBuildingCut(
-    up ? up.room.box : player.pos.z < -6000 || roofB ? null : district.enterAt(player.pos.x, player.pos.z),
+    up
+      ? up.room.box
+      : player.pos.z < -6000 || roofB
+        ? null
+        : (district.enterAt(player.pos.x, player.pos.z) ?? district.landmarkCut(player.pos.x, player.pos.z)),
   );
   // buildings cutaway
   const inside = bldAt(player.pos.x, player.pos.z);
@@ -8066,7 +8089,8 @@ async function boot() {
   }
   // v23.0 lived-in interiors for every other enterable building (plan + cover now, meshes lazily)
   for (const b of blds) {
-    if (b.detailed || !b.door) continue;
+    // a ghost's furniture would be invisible walls on the temple square (plans are seeded per building: no shared rnd())
+    if (b.detailed || !b.door || (b as any).ghost) continue;
     const P = CL.plan(b, { pip, onRoad: (x, z) => roadDist(x, z) < 5 });
     if (!P) continue;
     (b as any).clut = P;
@@ -8085,6 +8109,12 @@ async function boot() {
   }
   if (bestR) nightMarket(bestR.p, bestR.t === 'tertiary' ? 9 : 6, fx, 'nm');
   setupArmor(start!.c as V2);
+  // v24.15 what can be searched in the temple: the altars are part of its model, so the crates themselves stay unseen
+  for (const c of district.landConts) {
+    const ct = makeCont(c.id, c.p, 'crate', undefined, { ...c.items });
+    ct.label = c.label;
+    (ct.mesh as THREE.Object3D).visible = false;
+  }
   setupRemnants(start!.c as V2);
   setupJapan(start!.c as V2);
   spawnDrivables(start!.c as V2);
@@ -8099,7 +8129,7 @@ async function boot() {
     addSeg: (q, low) => addSeg(q, low),
     merge: mergeGeometries,
     roads,
-    blds,
+    blds: liveBlds(),
     RW: ROADW,
     center: start.c,
     R: 140,
@@ -8119,13 +8149,23 @@ async function boot() {
     addSeg: (q, low) => addSeg(q, low),
     merge: mergeGeometries,
     roads,
-    blds,
+    blds: liveBlds(),
     RW: ROADW,
     center: start.c,
     R: 85,
     doors: doors.map(d => d.p),
   });
-  facade = buildFacade({ scene, pip, bldAt, merge: mergeGeometries, roads, blds, RW: ROADW, center: start.c, R: 110 });
+  facade = buildFacade({
+    scene,
+    pip,
+    bldAt,
+    merge: mergeGeometries,
+    roads,
+    blds: liveBlds(),
+    RW: ROADW,
+    center: start.c,
+    R: 110,
+  });
   console.log('facade', JSON.stringify(facade.stats));
   parks = buildParks({
     scene,
@@ -8145,7 +8185,7 @@ async function boot() {
   scene.add(rainFx.group);
   reclaim = new Reclaim({
     scene,
-    blds: blds as any,
+    blds: liveBlds() as any,
     roads,
     roadW: ROADW,
     bldAt,
@@ -8221,7 +8261,7 @@ async function boot() {
   (window as any).__roofLeft = () => roofJobs.length;
   import('../map/map').then(({ GameMap }) => {
     gmap = new GameMap({
-      blds: blds as any,
+      blds: liveBlds() as any,
       roads: roads as any,
       bounds: WORLD,
       sectors: SECTORS,
@@ -9207,6 +9247,25 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.15 the temple: where it is, how heavy, and whether a straight walk is clear of its walls
+    temple: () => ({
+      ...district.templeStats,
+      at: district.ix?.landmarks.find(l => l.kind === 'temple') ?? null,
+      conts: conts
+        .filter(c => c.label === '供桌' || c.label === '功德箱')
+        .map(c => ({ id: c.id, label: c.label, items: c.items })),
+    }),
+    walkLine: (ax: number, az: number, bx: number, bz: number) => {
+      const n = Math.ceil(Math.hypot(bx - ax, bz - az) / 0.25);
+      for (let i = 0; i <= n; i++) {
+        const x = ax + ((bx - ax) * i) / n,
+          z = az + ((bz - az) * i) / n;
+        if (!walkable(x, z)) return [x, z];
+      }
+      return true;
+    },
+    cutY: () => CUT.y.value,
+    indoorHere: () => indoorAt(player.pos.x, player.pos.z),
     // v24.14 奪回
     reclaim: () =>
       reclaim
