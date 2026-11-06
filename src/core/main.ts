@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { FAST, fastCull, fastShowAll } from './fastscene';
 import { buildFacade } from '../map/facade';
 import { buildParks } from '../map/park';
+import { dressLots, lotMaterial, LOT_SHADOW, type LotResult } from '../map/lots';
 import { ArmorSystem, type ArmorKind } from '../systems/armor';
 import { Recon, boom, setBoomFx } from '../systems/drone';
 import { BlastFX } from '../systems/blastfx';
@@ -3306,6 +3307,7 @@ function spawnDrivables(c: V2) {
 }
 let lastHp = 100;
 let parks: any = null;
+let coreLots: LotResult | null = null;
 let gmap: GameMap | null = null;
 function mapIntelOutposts(lbl: string) {
   if (!gmap) return;
@@ -9011,6 +9013,34 @@ async function boot() {
     R: 110,
   });
   console.log('parks', JSON.stringify(parks));
+  // v24.25 what grows on the core's open ground, before the navigation grid so that it knows about the fences
+  {
+    const L = dressLots({
+      x0: CORE.minx,
+      x1: CORE.maxx,
+      z0: CORE.minz,
+      z1: CORE.maxz,
+      roads: roads.map(r => ({ p: r.p, w: ROADW[r.t.replace('_link', '')] ?? 3 })),
+      seed: 11,
+      maxTris: 110000,
+      taken: (x, z) =>
+        !!bldAt(x, z) ||
+        onLandmark(x, z) ||
+        parks.covers(x, z) ||
+        !!huaxi?.covers(x, z) ||
+        !!market?.covers(x, z) ||
+        Math.hypot(x - start.c[0], z - start.c[1]) < 14,
+    });
+    coreLots = L;
+    if (L.geo) {
+      const lm = new THREE.Mesh(L.geo, lotMaterial());
+      lm.castShadow = LOT_SHADOW;
+      lm.receiveShadow = true;
+      lm.userData.front = false;
+      scene.add(lm);
+    }
+    for (const q of L.segs) addSeg({ a: q.a, b: q.b }, q.low);
+  }
   // navigation grid (built after all collision geometry exists)
   nav = new Nav(start.c[0] - 170, start.c[1] - 170, start.c[0] + 170, start.c[1] + 170, 0.5);
   for (const q of segs) nav.markSeg(q.a, q.b, 1);
@@ -10082,6 +10112,17 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.25 the empty lots
+    lots: () => ({ core: coreLots?.stats ?? null, tiles: district.lotStats }),
+    /** one of each kind, for looking at */
+    lotStops: () => {
+      const seen = new Map<string, number>();
+      return (coreLots?.stops ?? []).filter(q => {
+        const n = seen.get(q.kind) ?? 0;
+        seen.set(q.kind, n + 1);
+        return n < 2;
+      });
+    },
     // v24.24 helicopters
     heli: () => heli,
     heliStat,

@@ -16,6 +16,8 @@ import { lotTex, ARCADE_MATS, worldUV } from './paving';
 import { stair, leanTo, ac, brickPatch, brickMat, vsign, vsignMat, VSN } from './walkup';
 import { useOf, specialKind, type Use } from './clutter';
 import { Forest } from './trees';
+import { dressLots, lotMaterial, LOT_SHADOW } from './lots';
+const LOT_MAT = lotMaterial();
 import { placeRooftop, dressRoof, pickRoofMat, roofClass, roofDetMat, roofConc } from './rooftin';
 import { VehicleSystem, type VehicleKind } from '../systems/vehicles';
 import { readDistrictTiles, writeDistrictTiles } from '../systems/save';
@@ -563,6 +565,9 @@ export class District {
     return e;
   }
   /** distance to nearest loaded/cached district road edge (centre distance minus half width) */
+  private kept: ReturnType<typeof District.keepOut> | null = null;
+  /** v24.25 how much of the open ground has been given something to be */
+  lotStats = { veg: 0, weeds: 0, park: 0, corner: 0, slab: 0, cells: 0, tris: 0 };
   roadDist(x: number, z: number) {
     let best = 1e9;
     const G = 20;
@@ -1184,6 +1189,38 @@ export class District {
     );
     inst(LAMP, lampMat, lamps, detail);
     forest.build(detail, true);
+    // v24.25 what grows on the open ground of this tile; a margin at its edges, where a neighbour's building may stand
+    {
+      const M = 12;
+      const keep = (this.kept ||= District.keepOut(this.ix));
+      const L = dressLots({
+        x0: cx - T / 2 + M,
+        x1: cx + T / 2 - M,
+        z0: cz - T / 2 + M,
+        z1: cz + T / 2 - M,
+        roads: [],
+        seed: Math.floor(cx * 3 + cz * 7),
+        taken: (x, z) =>
+          this.d.inCore(x, z) ||
+          this.roadDist(x, z) < 3.5 ||
+          enter.some(e => x > e.minx && x < e.maxx && z > e.minz && z < e.maxz && pip([x, z], e.pts)) ||
+          this.ix.park.some(pk => pip([x, z], pk.p)) ||
+          keep.some(r => x > r[0] && z > r[1] && x < r[2] && z < r[3]),
+      });
+      for (const k of ['veg', 'weeds', 'park', 'corner', 'slab', 'cells', 'tris'] as const)
+        this.lotStats[k] += L.stats[k];
+      if (L.geo) {
+        const lm = new THREE.Mesh(L.geo, LOT_MAT);
+        lm.castShadow = LOT_SHADOW;
+        lm.receiveShadow = true;
+        detail.add(lm);
+      }
+      for (const q of L.segs) {
+        const sg = q as Seg;
+        segs.push(sg);
+        this.d.addSeg(sg);
+      }
+    }
     // v23.3 keep parked scooters out of the street doors
     const vehOk = veh.filter(v => !doorOut.some(q => Math.hypot(v.x - q[0], v.z - q[1]) < 1.6));
     if (vehOk.length) {
