@@ -4,6 +4,7 @@ import { tr } from '../i18n';
 import * as THREE from 'three';
 import { makeMesh, type ArmorKind } from './armor';
 import { AV_LOADOUT, avState, type AvState } from './avgun';
+import { makeHeli, spinRotor, HELI_NAME } from './heli';
 type V2 = [number, number];
 export type DKind =
   | 'scooter'
@@ -22,7 +23,9 @@ export type DKind =
   | 'zbl08'
   | 'zbd05'
   | 'ztd05'
-  | 'mengshi';
+  | 'mengshi'
+  // v24.24 it flies
+  | 'uh60';
 export type DSpec = {
   name: string;
   drive: boolean;
@@ -42,8 +45,28 @@ export type DSpec = {
   seatY: number;
   /** v24.22 PLA armour: the model comes from armor.ts, and it has guns */
   armored?: boolean;
+  /** v24.24 it flies: no collisions, an altitude, and you land it before you get out */
+  air?: boolean;
 };
 export const SPEC: Record<DKind, DSpec> = {
+  // v24.24 the real machine cruises near 280 km/h on about 1360 L: speed and range are scaled down like everything here
+  uh60: {
+    name: HELI_NAME.uh60,
+    drive: true,
+    two: false,
+    L: 15,
+    W: 3.4,
+    vmax: 30,
+    acc: 6,
+    turn: 1.5,
+    noise: 130,
+    fuelCap: 1360,
+    burn: 1.6,
+    key: false,
+    cargo: 400,
+    seatY: 1.6,
+    air: true,
+  },
   // v24.22 speeds are the published road speeds scaled the way the other vehicles here are; fuel and burn likewise
   zbl08: {
     name: tr('ZBL-08 輪式步兵戰車', 'ZBL-08 wheeled IFV'),
@@ -329,6 +352,15 @@ export type DV = {
   /** v24.22 PLA armour */
   tur?: THREE.Object3D;
   gun?: AvState;
+  /** v24.24 flying */
+  alt?: number;
+  rotor?: number;
+  vx?: number;
+  vz?: number;
+  landing?: boolean;
+  spin?: THREE.Object3D;
+  blur?: THREE.Object3D;
+  tail?: THREE.Object3D;
 };
 const MS = new Map<string, THREE.MeshStandardMaterial>();
 const M = (c: number, r = 0.55, m = 0.1) => {
@@ -588,6 +620,11 @@ export type DriveDeps = {
   inv: () => Record<string, number>;
   hurt: (n: number) => void;
   roadW: (x: number, z: number) => number;
+  /** v24.24 for flying */
+  roofAt: (x: number, z: number) => number;
+  canLand: (x: number, z: number) => boolean;
+  inMap: (x: number, z: number) => boolean;
+  rotorSound?: (rate: number, dt: number) => void;
 };
 export class DriveSystem {
   list: DV[] = [];
@@ -599,23 +636,31 @@ export class DriveSystem {
   spawn(kind: DKind, x: number, z: number, hd: number, r: () => number, o: Partial<DV> = {}) {
     const s = SPEC[kind];
     let tur: THREE.Object3D | undefined;
-    const m: { g: THREE.Group; wheels: THREE.Object3D[] } = s.armored
+    let air: Partial<DV> = {};
+    const m: { g: THREE.Group; wheels: THREE.Object3D[] } = s.air
       ? (() => {
-          // the model faces +x, a driven vehicle faces +z; with this turn, yaw = hd + tur.rotation.y
-          const q = makeMesh(kind as ArmorKind);
-          q.g.rotation.y = -Math.PI / 2;
-          const h = new THREE.Group();
-          h.add(q.g);
-          tur = q.tur;
-          return { g: h, wheels: [] as THREE.Object3D[] };
+          const q = makeHeli('uh60');
+          tur = q.gun;
+          air = { spin: q.spin, blur: q.blur, tail: q.tail, alt: 0, rotor: 0, vx: 0, vz: 0, landing: false };
+          return { g: q.g, wheels: [] as THREE.Object3D[] };
         })()
-      : s.two
-        ? kind === 'moto'
-          ? motoModel(r)
-          : kind === 'ubike' || kind === 'basket'
-            ? bikeModel(kind, r)
-            : scooterModel(kind, r)
-        : carModel(kind, r);
+      : s.armored
+        ? (() => {
+            // the model faces +x, a driven vehicle faces +z; with this turn, yaw = hd + tur.rotation.y
+            const q = makeMesh(kind as ArmorKind);
+            q.g.rotation.y = -Math.PI / 2;
+            const h = new THREE.Group();
+            h.add(q.g);
+            tur = q.tur;
+            return { g: h, wheels: [] as THREE.Object3D[] };
+          })()
+        : s.two
+          ? kind === 'moto'
+            ? motoModel(r)
+            : kind === 'ubike' || kind === 'basket'
+              ? bikeModel(kind, r)
+              : scooterModel(kind, r)
+          : carModel(kind, r);
     if (kind === 'sedan' && r() < 0.7)
       m.g.traverse(q => {
         const mm = (q as THREE.Mesh).material as THREE.MeshStandardMaterial;
@@ -644,9 +689,10 @@ export class DriveSystem {
       dust: 0,
       plate: '',
       wheels: m.wheels,
-      ...(s.armored
+      ...(s.armored || s.air
         ? { tur, gun: avState(AV_LOADOUT[kind as keyof typeof AV_LOADOUT], 0.6 + r() * 0.4), tyre: 1, key: true }
         : {}),
+      ...(s.air ? { ...air, bat: 1, eng: 0.8 + r() * 0.2, fuel: s.fuelCap * (0.35 + r() * 0.35) } : {}),
       ...o,
     };
     if (s.two && !s.pedal) v.g.rotation.z = 0.12; // on side stand
@@ -667,6 +713,13 @@ export class DriveSystem {
   }
   status(v: DV) {
     const s = v.s;
+    if (s.air)
+      return tr(
+        `${s.name}｜油 ${v.fuel.toFixed(0)}/${s.fuelCap}L｜引擎 ${Math.round(v.eng * 100)}%｜高度 ${Math.round(v.alt ?? 0)}m` +
+          ((v.rotor ?? 0) < 1 ? `｜旋翼 ${Math.round((v.rotor ?? 0) * 100)}%` : ''),
+        `${s.name}｜Fuel ${v.fuel.toFixed(0)}/${s.fuelCap} L｜Engine ${Math.round(v.eng * 100)}%｜Altitude ${Math.round(v.alt ?? 0)} m` +
+          ((v.rotor ?? 0) < 1 ? `｜Rotor ${Math.round((v.rotor ?? 0) * 100)}%` : ''),
+      );
     const f = s.pedal
       ? ''
       : s.elec
@@ -769,6 +822,7 @@ export class DriveSystem {
     for (const o of this.list)
       if (
         o !== v &&
+        !(o.alt && o.alt > 3) &&
         Math.hypot(o.pos.x - x, o.pos.z - z) < (o.s.L + s.L) * 0.32 &&
         Math.hypot(o.pos.x - x, o.pos.z - z) < (o.s.W + s.W) * 0.9 + 0.5
       )
@@ -787,9 +841,16 @@ export class DriveSystem {
     }
     for (const v of this.list)
       if (v.s.elec && power && v !== this.cur) v.fuel = Math.min(v.s.fuelCap, v.fuel + dt * 0.0005); // trickle charge only while grid is up (parked at home outlet)
+    // a machine left on the ground winds down
+    for (const q of this.list)
+      if (q.s.air && q !== this.cur && (q.rotor ?? 0) > 0) {
+        q.rotor = Math.max(0, q.rotor! - dt * 0.18);
+        spinRotor(q, q.rotor, dt);
+      }
     const v = this.cur;
     if (!v) return;
     const s = v.s;
+    if (s.air) return this.fly(v, dt, want);
     const m = Math.min(1, want.length());
     const sk = this.d.skills();
     const vmax = s.vmax * (s.two ? (sk.ride ?? 1) : 1) * (0.45 + 0.55 * v.tyre) * (s.pedal ? 1 : 0.5 + 0.5 * v.eng);
@@ -863,6 +924,120 @@ export class DriveSystem {
         v.pos.z -= (a.z - v.pos.z) * 0.5;
       }
     }
+  }
+  /** v24.24 start coming down, if there is somewhere to come down to; a message if not */
+  land(v: DV): string {
+    if (v.landing) return '';
+    const { x, z } = v.pos;
+    const R = 5;
+    for (const [dx, dz] of [
+      [0, 0],
+      [R, 0],
+      [-R, 0],
+      [0, R],
+      [0, -R],
+    ])
+      if (!this.d.canLand(x + dx, z + dz))
+        return tr('下面不能降落：要找一塊空地或大馬路。', 'You cannot land here. Find an open lot or a wide road.');
+    v.landing = true;
+    return '';
+  }
+  /** v24.24 the controls of a helicopter: the stick moves it the way you push, the altitude looks after itself */
+  private fly(v: DV, dt: number, want: THREE.Vector3) {
+    const s = v.s;
+    const d = this.d;
+    const m = Math.min(1, want.length());
+    const out = v.fuel <= 0 || v.eng < 0.1;
+    v.rotor = THREE.MathUtils.clamp((v.rotor ?? 0) + dt * (out ? -0.08 : 0.22), 0, 1);
+    spinRotor(v, v.rotor, dt);
+    let alt = v.alt ?? 0;
+    const up = alt > 0.05;
+    // push the stick while it is on the ground, and once the rotor is up to speed it lifts off
+    if (!up && !out && m > 0.1) v.landing = false;
+    const lift = !out && !v.landing && (up || (m > 0.1 && v.rotor >= 1));
+    let vx = v.vx ?? 0,
+      vz = v.vz ?? 0;
+    const roof = (a: number) => d.roofAt(v.pos.x + vx * a, v.pos.z + vz * a);
+    const under = roof(0);
+    const ahead = Math.max(under, roof(1.2), roof(2.4));
+    const CRUISE = 24;
+    const target = lift ? Math.max(CRUISE, ahead + 5) : under > 0 ? under : 0;
+    alt += THREE.MathUtils.clamp(target - alt, -(out ? 4 : 6) * dt, 8 * dt);
+    // only once it is clear of the ground does the stick move it, and not while it is settling
+    const free = alt > 2.5 && !v.landing;
+    const vmax = s.vmax * (0.5 + 0.5 * v.eng);
+    const tx = free && !out ? want.x * vmax : 0,
+      tz = free && !out ? want.z * vmax : 0;
+    let ax = tx - vx,
+      az = tz - vz;
+    const al = Math.hypot(ax, az);
+    const lim = s.acc * dt;
+    if (al > lim) ((ax *= lim / al), (az *= lim / al));
+    vx += ax;
+    vz += az;
+    const nx = v.pos.x + vx * dt,
+      nz = v.pos.z + vz * dt;
+    if (alt < d.roofAt(nx, nz) + 1) {
+      // into the side of a tower: the climb could not keep up
+      const hit = Math.hypot(vx, vz);
+      if (hit > 5) {
+        v.eng = Math.max(0, v.eng - hit * 0.012);
+        d.hurt(hit * 0.3);
+        d.log(
+          tr(
+            `💥 擦撞大樓！引擎 ${Math.round(v.eng * 100)}%`,
+            `💥 You clip a building! Engine ${Math.round(v.eng * 100)}%`,
+          ),
+          '#f88',
+        );
+      }
+      vx *= -0.3;
+      vz *= -0.3;
+    } else if (d.inMap(nx, nz)) {
+      v.pos.x = nx;
+      v.pos.z = nz;
+    } else ((vx = 0), (vz = 0));
+    v.vx = vx;
+    v.vz = vz;
+    v.v = Math.hypot(vx, vz);
+    v.alt = alt;
+    if (v.landing && alt <= 0.02) {
+      v.landing = false;
+      v.alt = alt = 0;
+      d.log(tr('落地了。', 'Touched down.'), '#9f9');
+    }
+    // it comes down on a roof with no fuel: that is the end of the flight
+    if (out && under > 0 && alt <= under + 0.05 && under > 1) {
+      v.eng = 0;
+      d.hurt(30);
+    }
+    if (v.v > 3) {
+      const wh = Math.atan2(vx, vz);
+      const dh = Math.atan2(Math.sin(wh - v.hd), Math.cos(wh - v.hd));
+      v.hd += THREE.MathUtils.clamp(dh, -s.turn * dt, s.turn * dt);
+      v.g.rotation.z = THREE.MathUtils.lerp(
+        v.g.rotation.z,
+        THREE.MathUtils.clamp(dh, -0.6, 0.6) * 0.5,
+        Math.min(1, dt * 2.5),
+      );
+    } else v.g.rotation.z = THREE.MathUtils.lerp(v.g.rotation.z, 0, Math.min(1, dt * 2.5));
+    v.g.rotation.y = v.hd;
+    v.g.rotation.x = THREE.MathUtils.lerp(v.g.rotation.x, (v.v / s.vmax) * 0.2, Math.min(1, dt * 2));
+    v.g.position.y = alt;
+    if ((lift || up) && v.fuel > 0) {
+      v.fuel = Math.max(0, v.fuel - s.burn * dt * (0.5 + v.v / s.vmax));
+      if (v.fuel <= 0)
+        d.log(
+          tr('⛽ 沒油了！引擎停了，它開始往下掉。', '⛽ Out of fuel! The engine has stopped and you are coming down.'),
+          '#f66',
+        );
+    }
+    this.acc += dt;
+    if (this.acc > 0.6 && v.rotor > 0.3) {
+      this.acc = 0;
+      d.noise(v.pos.x, v.pos.z, s.noise * v.rotor);
+    }
+    d.rotorSound?.(v.rotor, dt);
   }
   siphon(from: DV): string {
     const inv = this.d.inv();

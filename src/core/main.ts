@@ -42,6 +42,7 @@ import { RainFx, makeUmbrella } from '../systems/rain';
 import { Reclaim, reclaimTitle } from '../systems/reclaim';
 import { buildHuaxi } from '../map/huaxi';
 import { AV_LOADOUT, avTick, avFire, avReload, avStatus } from '../systems/avgun';
+import { HeliPatrols, HELI_NAME, makeHeli, type HeliKind } from '../systems/heli';
 import { buildMarket } from '../map/market';
 import { RemnantSystem, type RemSave } from '../npc/remnant';
 import { JapanSupport, JP_LABEL, type JpKind } from '../systems/japan';
@@ -1047,8 +1048,180 @@ function updateShells(dt: number) {
   }
 }
 let lastShellHit = 0;
+// ---------- v24.24 helicopters ----------
+let heli: HeliPatrols | null = null;
+const flyingNow = () => !!drive.cur?.s.air && (drive.cur.alt ?? 0) > 2;
+let camLift = 0,
+  rotorT = 0;
+const heliStat = { wrecks: 0 };
+/** a wide road long enough to fly along, or an empty lot big enough to land on */
+function setupHeli() {
+  const len = (r: { p: V2[] }) =>
+    r.p.reduce((a, q, i) => (i ? a + Math.hypot(q[0] - r.p[i - 1][0], q[1] - r.p[i - 1][1]) : 0), 0);
+  const routes = roads.filter(r => /^(primary|secondary|trunk)/.test(r.t) && len(r) > 90).map(r => r.p);
+  heli = new HeliPatrols({
+    scene,
+    player: () => player.pos,
+    hidden: () => !flyingNow() && (!!up || heliCover()),
+    night: () => isNight(),
+    routes: () => routes,
+    roofAt,
+    log,
+    alert: (x, z) => {
+      noise(x, z, 60, true);
+      radio([x, z], null, tr('直升機回報目標位置', 'A helicopter is reporting a target'));
+    },
+    hurt: n => {
+      player.hp -= n;
+      player.rig.hurtT = 0.3;
+      if (n > 9 && !player.bleed && Math.random() < 0.3) {
+        player.bleed = true;
+        log(tr('被機槍打中，流血了！', 'A round from above hits you. You are bleeding!'), '#f66');
+      }
+    },
+    gun: dist => AU.gunshot('mg', dist, !!up || indoorAt(player.pos.x, player.pos.z)),
+    rotor: dist => AU.rotor(dist, 1.2),
+    salvo: (x, z) => warBarrage(2, [x, z]),
+    smoke: (x, y, z, fire) => {
+      blastFx.smoke.spawn({ k: 2, x, y, z, vy: 1, life: 2.6, s0: 1.2, s1: 3.6, a0: 0.5 });
+      if (fire) blastFx.fire.spawn({ k: 0, x, y, z, vy: 0.5, life: 0.5, s0: 1.2, s1: 2.2, a0: 0.9 });
+    },
+    crash: heliCrash,
+  });
+}
+/** indoors, or close under a wall, where nobody up there can see you */
+function heliCover() {
+  const P = player.pos;
+  return (
+    indoorAt(P.x, P.z) ||
+    [
+      [1.6, 0],
+      [-1.6, 0],
+      [0, 1.6],
+      [0, -1.6],
+    ].some(([dx, dz]) => bldAt(P.x + dx, P.z + dz))
+  );
+}
+function roofAt(x: number, z: number) {
+  return Math.max(bldAt(x, z)?.h ?? 0, district.enterAt(x, z)?.h ?? 0);
+}
+function heliCrash(x: number, z: number, kind: HeliKind) {
+  const p = new THREE.Vector3(x, 0.5, z);
+  boom(scene, p, 2.4);
+  noise(x, z, 90);
+  for (const s of sols) {
+    if (s.state === 'dead') continue;
+    const d = Math.hypot(s.pos.x - x, s.pos.z - z);
+    if (d < 14) damageSol(s, 240 * (1 - d / 18), true);
+  }
+  const dp = Math.hypot(mapPos()[0] - x, mapPos()[1] - z);
+  if (dp < 14) {
+    player.hp -= 60 * (1 - dp / 14);
+    player.rig.hurtT = 0.4;
+  }
+  warFires.push({ x, z, r: 3, t: 60 });
+  if (warFires.length > 5) warFires.shift();
+  // what is left: burnt out, on its side, with whatever was on board
+  const w = makeHeli(kind);
+  w.g.position.set(x, 0.35, z);
+  w.g.rotation.set(0.12, Math.random() * 6.28, 0.5);
+  w.g.traverse(o => {
+    const m = o as THREE.Mesh;
+    if (m.isMesh) {
+      m.material = heliBurnt;
+      m.castShadow = true;
+    }
+  });
+  w.blur.visible = false;
+  scene.add(w.g);
+  heliStat.wrecks++;
+  player.kills++;
+  const items = rollLoot('armory', Math.random);
+  const c = makeCont('hw' + heliStat.wrecks, [x + 3, z], 'crate', undefined, items);
+  c.label = tr('墜毀直升機的殘骸', 'Wreck of a downed helicopter');
+  log(
+    getLanguage() === 'en'
+      ? `💥 The ${HELI_NAME[kind]} has come down! Search the wreck if you dare.`
+      : `💥 ${HELI_NAME[kind]}墜毀了！敢的話去翻翻殘骸。`,
+    '#ffd76a',
+  );
+}
+const heliBurnt = new THREE.MeshStandardMaterial({ color: 0x17140f, roughness: 1 });
+heliBurnt.userData.noOcc = true;
+/** an empty lot well away from the start, big enough for the rotor; failing that, the middle of a wide road */
+function heliSpots(c: V2) {
+  const free = (x: number, z: number, r: number) => {
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * 6.283;
+      if (bldAt(x + Math.cos(a) * r, z + Math.sin(a) * r) || onLandmark(x + Math.cos(a) * r, z + Math.sin(a) * r))
+        return false;
+    }
+    return !bldAt(x, z) && !onLandmark(x, z);
+  };
+  const lots: { x: number; z: number; d: number; off: number }[] = [];
+  for (let x = c[0] - 480; x <= c[0] + 480; x += 12)
+    for (let z = c[1] - 480; z <= c[1] + 480; z += 12) {
+      const d = Math.hypot(x - c[0], z - c[1]);
+      // (the roles start up to a hundred metres or so from this point)
+      if (d < 300 || d > 480 || !free(x, z, 9) || !free(x, z, 5)) continue;
+      lots.push({ x, z, d, off: roadDist(x, z) });
+    }
+  // off the road if it can be, and not all in one place
+  lots.sort((a, b) => b.off - a.off);
+  const out: { x: number; z: number }[] = [];
+  for (const q of lots) {
+    if (out.every(o => Math.hypot(o.x - q.x, o.z - q.z) > 220)) out.push(q);
+    if (out.length === 2) break;
+  }
+  return out;
+}
+function spawnAbandonedHeli(c: V2) {
+  let sd = 90210;
+  const r = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+  for (const q of heliSpots(c)) {
+    const v = drive.spawn('uh60', q.x, q.z, r() * 6.28, r);
+    heliLots.push({ v, seen: false });
+  }
+}
+const heliLots: { v: NonNullable<typeof drive.cur>; seen: boolean; moved?: boolean }[] = [];
+/** word of them gets around when you come near; and only then are the outer blocks loaded, so that is when it gets a place */
+function heliLotsTick() {
+  for (const q of heliLots) {
+    if (q.seen) continue;
+    const d = Math.hypot(q.v.pos.x - player.pos.x, q.v.pos.z - player.pos.z);
+    if (d > 200) continue;
+    if (drive.cur !== q.v && !q.moved) {
+      // a real clearing if there is one nearby, or at least room for the rotor
+      const clear = (x: number, z: number, R: number) => {
+        if (roofAt(x, z) > 0 || !walkable(x, z)) return false;
+        for (const k of [0.55, 1])
+          for (let i = 0; i < 12; i++)
+            if (roofAt(x + Math.cos(i * 0.5236) * R * k, z + Math.sin(i * 0.5236) * R * k) > 0) return false;
+        return true;
+      };
+      const { x, z } = q.v.pos;
+      if (!clear(x, z, 16))
+        search: for (const R of [16, 11, 8.5])
+          for (let r = 4; r < 110; r += 4)
+            for (let i = 0; i < r; i++) {
+              const a = (i / r) * 6.283;
+              if (clear(x + Math.cos(a) * r, z + Math.sin(a) * r, R)) {
+                q.v.pos.x = x + Math.cos(a) * r;
+                q.v.pos.z = z + Math.sin(a) * r;
+                break search;
+              }
+            }
+      // settled for good once it has been seen close to
+      if (d < 90) q.moved = true;
+    }
+    if (d > 70) continue;
+    q.seen = true;
+    gmap?.intel('heli' + q.v.id, q.v.pos.x, q.v.pos.z, 'sup', tr('棄置的黑鷹直升機', 'Abandoned Black Hawk'));
+    log(tr('前面的空地上停著一架沒人的黑鷹直升機。', 'An empty Black Hawk stands on the lot ahead.'), '#9f9');
+  }
+}
 // ---------- v24.22 fighting from captured armour: the turret follows the mouse, a shot goes to the first thing it meets ----------
-const avStat = { shots: 0, kills: 0, hullHits: 0 };
+const avStat = { shots: 0, kills: 0, hullHits: 0, airHits: 0 };
 let avHpAt = 100;
 const avTracer = new THREE.LineSegments(
   new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3)),
@@ -1065,10 +1238,14 @@ function avControl(v: NonNullable<typeof drive.cur>, dt: number) {
   // the turret traverses at its own speed towards the mouse (or the nearest foe on a phone)
   ray.setFromCamera(mouse, camera);
   ray.ray.intersectPlane(plane, aimPt);
+  // v24.24 a helicopter under the cursor is what you are aiming at
+  let hc = heli?.pick(ray.ray) ?? null;
   if (MB.fire) {
     const e = nearestFoe(60);
     if (e) aimPt.set(e.pos.x, 0, e.pos.z);
+    else hc = heli?.nearestTo(v.pos.x, v.pos.z, 60) ?? null;
   }
+  if (hc) aimPt.set(hc.g.position.x, 0, hc.g.position.z);
   const want = Math.atan2(aimPt.x - v.pos.x, aimPt.z - v.pos.z);
   const L = AV_LOADOUT[v.kind as keyof typeof AV_LOADOUT];
   const tur = v.tur!;
@@ -1082,9 +1259,29 @@ function avControl(v: NonNullable<typeof drive.cur>, dt: number) {
     const yaw = v.hd + tur.rotation.y;
     const ux = Math.sin(yaw),
       uz = Math.cos(yaw);
-    const o: V2 = [v.pos.x + ux * (v.s.L * 0.5), v.pos.z + uz * (v.s.L * 0.5)];
-    // walls and cover stop it first (the muzzle is at 1.9 m, so it clears a parked car close by)
-    let reach = w.range * shotRay(o, [o[0] + ux * w.range, o[1] + uz * w.range], 1.9, 1.2, 1.5);
+    const flying = !!v.s.air && (v.alt ?? 0) > 2;
+    const o: V2 = v.s.air ? [v.pos.x, v.pos.z] : [v.pos.x + ux * (v.s.L * 0.5), v.pos.z + uz * (v.s.L * 0.5)];
+    const muzzleY = flying ? v.alt! + 1.4 : 1.9;
+    if (hc) {
+      // up, along the barrel's bearing: it has to be pointing the right way
+      const dh = Math.atan2(hc.g.position.x - o[0], hc.g.position.z - o[1]) - yaw;
+      const off = Math.abs(Math.atan2(Math.sin(dh), Math.cos(dh)));
+      if (off < 0.14 && Math.hypot(hc.g.position.x - o[0], hc.g.position.z - o[1]) < w.range) {
+        heli!.hit(hc, w.air);
+        avStat.airHits++;
+        const a = avTracer.geometry.attributes.position as THREE.BufferAttribute;
+        a.setXYZ(0, o[0], muzzleY, o[1]);
+        a.setXYZ(1, hc.g.position.x, hc.g.position.y, hc.g.position.z);
+        a.needsUpdate = true;
+        avTracer.visible = true;
+        avTracerT = 0.09;
+        AU.gunshot(w.sound, 0, false);
+        noise(v.pos.x, v.pos.z, w.noise, true);
+        return;
+      }
+    }
+    // walls and cover stop it first (the muzzle is at 1.9 m, so it clears a parked car close by; from the air they do not)
+    let reach = flying ? w.range : w.range * shotRay(o, [o[0] + ux * w.range, o[1] + uz * w.range], 1.9, 1.2, 1.5);
     let target: Sol | null = null;
     for (const s of sols) {
       if (s.state === 'dead' || !s.mesh.visible) continue;
@@ -1123,7 +1320,7 @@ function avControl(v: NonNullable<typeof drive.cur>, dt: number) {
     }
     // tracer
     const a = avTracer.geometry.attributes.position as THREE.BufferAttribute;
-    a.setXYZ(0, o[0], 1.9, o[1]);
+    a.setXYZ(0, o[0], muzzleY, o[1]);
     a.setXYZ(1, end.x, end.y, end.z);
     a.needsUpdate = true;
     avTracer.visible = true;
@@ -1449,6 +1646,20 @@ function fireAT(k: string, d: (typeof ITEMS)[string], dir: THREE.Vector3) {
   const P = player.pos;
   let end = P.clone().addScaledVector(dir, d.range!),
     hitA: any = null;
+  // v24.24 at a helicopter under the cursor (on a phone, the nearest one)
+  const hc = heli && (heli.pick(ray.ray) ?? (MOBILE ? heli.nearestTo(P.x, P.z, d.range!) : null));
+  if (hc && Math.hypot(hc.g.position.x - P.x, hc.g.position.z - P.z) < d.range!) {
+    tracer(P, hc.g.position);
+    boom(scene, hc.g.position.clone(), 1.2);
+    noise(P.x, P.z, 50);
+    heli!.hit(hc, 100);
+    if (k === 'at4') {
+      delete player.inv.at4;
+      player.equip = '';
+      log(tr('AT4 已射出——空筒拋棄', 'AT4 fired—empty tube discarded'), '#ccc');
+    }
+    return;
+  }
   if (armor)
     for (const a of armor.list) {
       if (a.dead) continue;
@@ -2707,6 +2918,16 @@ const drive = new DriveSystem({
     player.hp -= n;
   },
   roadW: roadWAt,
+  roofAt: (x, z) => roofAt(x, z),
+  canLand: (x, z) => walkable(x, z) && roofAt(x, z) <= 0,
+  inMap: (x, z) => Math.hypot(x - 0, z - 0) < 2400 && z > -6000,
+  rotorSound: (rate, dt) => {
+    rotorT -= dt;
+    if (rotorT <= 0 && rate > 0.2) {
+      rotorT = 1.05;
+      AU.rotor(0, 1.2);
+    }
+  },
 });
 const roadT = new RoadTiles({
   scene,
@@ -6404,6 +6625,12 @@ function rideTo(i: number, j: number) {
   }, 3000);
 }
 function interact() {
+  // v24.24 in the air, E brings you down
+  if (drive.cur?.s.air && (drive.cur.alt ?? 0) > 0.3) {
+    const m = drive.land(drive.cur);
+    if (m) log(m, '#fc8');
+    return;
+  }
   if (coopActive()) {
     const loot = Object.entries(net!.s!.loot || {}).find(
       ([id, l]) => !net!.s!.looted[id] && Math.hypot(l.x - player.pos.x, l.z - player.pos.z) <= 2.2,
@@ -7570,12 +7797,13 @@ function update(dt: number) {
   }
   // v21.2 shader cutaway around the camera→player line (see occlusion.ts); camera itself unchanged
   OCC.r.value = up || indoorAt(player.pos.x, player.pos.z) ? 3 : 6; // v24.16 outdoors: see the street behind the block
-  updateOcclusion(player.pos.x, player.pos.y, player.pos.z);
+  const aloft = flyingNow(); // v24.24 the city from above: nothing is cut away, nothing counts as being inside
+  updateOcclusion(player.pos.x, player.pos.y, player.pos.z, !aloft);
   // v23.3 inside an enterable district building: cut its upper floors and roof away (core blocks lower their walls)
   setBuildingCut(
     up
       ? up.room.box
-      : player.pos.z < -6000 || roofB
+      : player.pos.z < -6000 || roofB || aloft
         ? null
         : (district.enterAt(player.pos.x, player.pos.z) ??
           district.landmarkCut(player.pos.x, player.pos.z) ??
@@ -7584,12 +7812,12 @@ function update(dt: number) {
           null),
   );
   // buildings cutaway
-  const inside = bldAt(player.pos.x, player.pos.z);
+  const inside = aloft ? null : bldAt(player.pos.x, player.pos.z);
   for (const b of blds) {
     const dx = b.c[0] - player.pos.x,
       dz = b.c[1] - player.pos.z;
     const near = Math.abs(dx) < 40 && Math.abs(dz) < 40;
-    const front = near && dx + dz > -4 && dx + dz < 30 && Math.abs(dx - dz) < 22 && b.h > 4;
+    const front = !aloft && near && dx + dz > -4 && dx + dz < 30 && Math.abs(dx - dz) < 22 && b.h > 4;
     const mi = (b as any).mi;
     b.walls.material = front || b === inside ? wallMatsT[mi] : wallMats[mi];
     b.roof.visible = b !== inside && !front;
@@ -7931,6 +8159,10 @@ function update(dt: number) {
   if (grenades.length) grenadeTick(dt);
   avArmorShield();
   if (started && !PRO.on && !MP) warTick(dt);
+  if (started && !PRO.on && !MP) {
+    heli?.update(dt, warLevel());
+    heliLotsTick();
+  }
   if (rescueRig) animate(rescueRig.rig, 'idle', 0, dt);
   if (liaison) {
     const d = Math.hypot(player.pos.x - liaison.p[0], player.pos.z - liaison.p[1]);
@@ -8004,6 +8236,17 @@ function update(dt: number) {
   // camera
   camera.position.copy(player.pos).add(CAM_OFF);
   camera.lookAt(player.pos);
+  {
+    // v24.24 in the air the view follows you up and takes in a little more of the city
+    const altNow = drive.cur?.s.air ? (drive.cur.alt ?? 0) : 0;
+    camLift += (altNow * 0.45 - camLift) * Math.min(1, dt * 2.5);
+    camera.position.y += camLift;
+    const z = 1 / (1 + (MOBILE ? 0.12 : 0.28) * Math.min(1, altNow / 24));
+    if (Math.abs(camera.zoom - z) > 0.002) {
+      camera.zoom += (z - camera.zoom) * Math.min(1, dt * 2);
+      camera.updateProjectionMatrix();
+    }
+  }
   // v22.9 blast shake: offset only (rig / angle / zoom untouched), re-copied every frame so it never drifts
   blastFx.update(dt, camera, renderer.domElement.height);
   camera.position.add(blastFx.shake);
@@ -8193,9 +8436,11 @@ function drawHud(inside: Bld | null) {
     pr.textContent =
       getLanguage() === 'en'
         ? `[E] Exit vehicle | ${drive.status(drive.cur)} | ${Math.round(Math.abs(drive.cur.v) * 3.6)} km/h` +
-          (drive.cur.gun ? ` | ${avStatus(drive.cur.gun)} | [V] Change gun [R] Reload` : '')
+          (drive.cur.gun ? ` | ${avStatus(drive.cur.gun)} | [V] Change gun [R] Reload` : '') +
+          (drive.cur.s.air && (drive.cur.alt ?? 0) > 0.3 ? ' | [E] Land' : '')
         : `[E] 下車｜${drive.status(drive.cur)}｜${Math.round(Math.abs(drive.cur.v) * 3.6)} km/h` +
-          (drive.cur.gun ? `｜${avStatus(drive.cur.gun)}｜[V] 換武器 [R] 換箱` : '');
+          (drive.cur.gun ? `｜${avStatus(drive.cur.gun)}｜[V] 換武器 [R] 換箱` : '') +
+          (drive.cur.s.air && (drive.cur.alt ?? 0) > 0.3 ? '｜[E] 降落' : '');
   } else if (!panelOpen && drive.nearest(player.pos)) {
     const v = drive.nearest(player.pos)!;
     pr.style.display = 'block';
@@ -8705,6 +8950,8 @@ async function boot() {
   setupJapan(start!.c as V2);
   spawnDrivables(start!.c as V2);
   spawnAbandonedArmor(start!.c as V2);
+  spawnAbandonedHeli(start!.c as V2);
+  setupHeli();
   buildJunctions();
   setupWreckage(start!.c as V2);
   await roadT.init();
@@ -9835,6 +10082,12 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.24 helicopters
+    heli: () => heli,
+    heliStat,
+    heliSpots: () => heliLots.map(q => ({ id: q.v.id, x: q.v.pos.x, z: q.v.pos.z })),
+    camLift: () => camLift,
+    roofAt,
     // v24.22 captured armour
     avStat,
     /** how far along a-b a round gets, 0..1 */
