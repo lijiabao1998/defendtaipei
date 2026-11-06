@@ -842,7 +842,9 @@ export class District {
       }
       if (Math.abs(A / 2) < 12 || Math.abs(A / 2) > 8000) continue;
       const big = Math.abs(A / 2) > 1500;
-      const lv = Math.max(1, Math.min(14, b.l || (big ? 6 + Math.floor(rnd() * 4) : 3 + Math.floor(rnd() * 3))));
+      // v24.19 no sticks: however many storeys the data asks for, a narrow footprint cannot carry them
+      const lvMax = Math.max(2, Math.floor(Math.sqrt(Math.abs(A / 2)) / 1.5) + 1);
+      const lv = Math.max(1, Math.min(14, lvMax, b.l || (big ? 6 + Math.floor(rnd() * 4) : 3 + Math.floor(rnd() * 3))));
       const h = GF + (lv - 1) * FH;
       const tint = WALLTINT[Math.floor(rnd() * WALLTINT.length)];
       const awn = AWN[Math.floor(rnd() * AWN.length)];
@@ -1196,7 +1198,15 @@ export class District {
     });
     this.d.scene.add(g);
     void m4;
-    return { key, cx, cz, g, detail, segs, info: { key, cx, cz, fronts, roads: td.r, rnd, enter, nB } };
+    return {
+      key,
+      cx,
+      cz,
+      g,
+      detail,
+      segs,
+      info: { key, cx, cz, fronts, roads: td.r, rnd: seeded('dtL:' + key), enter, nB },
+    };
   }
   // ---------- v24.15 the walk-in temple ----------
   /** what can be searched in the landmarks (world positions), for the game to turn into containers */

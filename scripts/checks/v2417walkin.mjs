@@ -40,7 +40,8 @@ const routes = [
   ['Red House: round the counter', R, 34.5, 3.6, 24, 3.6],
   ['Red House: to the hall door', R, 24, 3.6, 21, 0.6],
   ['Red House: through into the hall', R, 21, 0.6, 16, 0.6],
-  ['Red House: down the hall, past the display tables, to the end door', R, 16, 1.5, -21, 1.5],
+  ['Red House: down the hall, past the display tables', R, 16, 1.5, -15, 1.5],
+  ['Red House: out of the end door', R, -15, 1.5, -21, 0.2],
   ['Red House: out through the north arm', R, 0, 0, 0, -13.5],
   ['Red House: out through the south arm', R, 0, 0, 0, 13.5],
 ];

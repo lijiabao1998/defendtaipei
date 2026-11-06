@@ -168,7 +168,7 @@ export function blockInfill(buildings: { p: P2[]; fill?: 1 }[], roads: BlockRoad
   }
   // candidates: march in from every road side, row by row (centre depth from the road edge, road direction)
   const depth = o.depth ?? 75;
-  const cand: { x: number; z: number; d: number; ux: number; uz: number }[] = [];
+  const cand: { x: number; z: number; d: number; ux: number; uz: number; nx: number; nz: number }[] = [];
   for (const r of roads) {
     const hw = hwOf(r);
     for (let i = 0; i < r.p.length - 1; i++) {
@@ -185,7 +185,7 @@ export function blockInfill(buildings: { p: P2[]; fill?: 1 }[], roads: BlockRoad
               z = az + tz * s + tx * side * (hw + dd);
             const c = cell(x, z);
             if (c < 0 || band[c] || obs[c]) continue;
-            cand.push({ x, z, d: dd, ux: tx, uz: tz });
+            cand.push({ x, z, d: dd, ux: tx, uz: tz, nx: -tz * side, nz: tx * side });
           }
     }
   }
@@ -214,14 +214,37 @@ export function blockInfill(buildings: { p: P2[]; fill?: 1 }[], roads: BlockRoad
     if (o.max != null && out.length >= o.max) break;
     if (obs[cell(c.x, c.z)]) continue;
     if (hash(c.x * 0.7, c.z * 1.3) < 0.08) continue; // the odd courtyard / car park left open
-    const w = 4.5 + hash(c.x, c.z * 2) * 2.5,
-      d = 9 + hash(c.z, c.x * 2) * 5;
-    const q = rectQ(c.x, c.z, c.ux, c.uz, w / 2, d / 2);
-    if (!clear(q)) continue;
-    poly(obs, rectQ(c.x, c.z, c.ux, c.uz, w / 2, d / 2, 1.6)); // 1.6 m 防火巷 to everything placed later
+    // v24.19 floors first, then a footprint that can carry them: a tall building is a big building, not a stick.
+    // Three in four are 3-4 storey houses, one in six a 5-6 storey block of flats, the rest 7-12 storey towers.
     const tall = hash(c.x * 3, c.z * 5);
-    const l = tall < 0.08 ? 7 + Math.floor(hash(c.z * 7, c.x) * 6) : 3 + Math.floor(hash(c.x * 11, c.z * 13) * 4);
-    out.push({ p: q, l, n: '', s: '', g: 1 });
+    const want =
+      tall < 0.09
+        ? 7 + Math.floor(hash(c.z * 7, c.x) * 6)
+        : tall < 0.26
+          ? 5 + Math.floor(hash(c.x * 5, c.z * 9) * 2)
+          : 3 + Math.floor(hash(c.x * 11, c.z * 13) * 2);
+    const hw0 = hash(c.x, c.z * 2),
+      hd0 = hash(c.z, c.x * 2);
+    const w0 = want >= 7 ? 15 + hw0 * 9 : want >= 5 ? 10 + hw0 * 5 : 7 + hw0 * 3,
+      d0 = want >= 7 ? 15 + hd0 * 7 : want >= 5 ? 12 + hd0 * 6 : 11 + hd0 * 5;
+    // if the plot is tight, the building shrinks and loses storeys with it
+    let placed = false;
+    for (const k of [1, 0.85, 0.7]) {
+      const w = Math.max(5, w0 * k),
+        d = Math.max(9, d0 * k);
+      // deeper lots start further from the road, so the first row can still hold them
+      const push = Math.max(0, d / 2 - 7);
+      const x = c.x + c.nx * push,
+        z = c.z + c.nz * push;
+      const q = rectQ(x, z, c.ux, c.uz, w / 2, d / 2);
+      if (!clear(q)) continue;
+      poly(obs, rectQ(x, z, c.ux, c.uz, w / 2, d / 2, 1.6)); // 1.6 m 防火巷 to everything placed later
+      const l = Math.max(2, Math.min(want, Math.floor(Math.min(w, d) / 1.7) + 1));
+      out.push({ p: q, l, n: '', s: '', g: 1 });
+      placed = true;
+      break;
+    }
+    if (!placed) continue;
   }
   return out;
 }
