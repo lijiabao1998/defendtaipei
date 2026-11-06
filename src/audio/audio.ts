@@ -668,6 +668,24 @@ export function temple(dist: number) {
   // chanting drone (a fifth, slowly swelling)
   for (const f of [110, 165]) tone(c, o, 'triangle', f, f, { at: 0.8, a: 1.5, d: 4.5, v: 0.12 });
 }
+/** v24.14 a string of firecrackers: a run of sharp cracks over a few seconds, then it stops */
+export function firecrackers() {
+  const c = ctx(true);
+  if (!c || c.state !== 'running') return;
+  cnt('firecrackers');
+  const o = ambOut(c, 0.5);
+  let at = 0.1;
+  for (let i = 0; i < 46; i++) {
+    at += 0.03 + Math.random() * Math.random() * 0.22;
+    burst(
+      c,
+      o,
+      { type: 'highpass', hz: 900 + Math.random() * 1400 },
+      { at, a: 0.001, d: 0.05, v: 0.5 + Math.random() * 0.5 },
+      0.2,
+    );
+  }
+}
 /** thunder rolling across the city during a downpour */
 export function thunder(indoor: boolean) {
   const c = ctx(true);

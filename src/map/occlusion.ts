@@ -13,6 +13,8 @@ export const OCC = {
   p: { value: new THREE.Vector3() },
   r: { value: 3.0 },
   on: { value: 1 },
+  /** seconds, for the v24.14 sway (flags, people) */
+  t: { value: 0 },
   /** test hook: 0/1 overrides the per-frame state */
   force: null as number | null,
 };
@@ -27,6 +29,14 @@ export const CUT = {
 // that building's walls see-through (main.ts: near && dx + dz in -4..30 && |dx - dz| < 22), so a sign fades exactly when
 // its own wall does, instead of floating solid. Materials opt in with userData.front and customProgramCacheKey.
 const NL = String.fromCharCode(10);
+// v24.14 cloth and people: moved in the vertex shader, so a whole district of them costs nothing per frame on the CPU.
+// aSway = (seed, sideways amplitude, vertical amplitude). Materials opt in with userData.sway and customProgramCacheKey.
+const GLSL_SWAY = /* glsl */ `
+  float swP = uOccT * 2.3 + aSway.x + position.x * 1.7 + position.z * 1.7;
+  transformed.x += sin(swP) * aSway.y;
+  transformed.z += cos(swP * 0.8) * aSway.y;
+  transformed.y += sin(swP * 1.3) * aSway.z;
+`;
 const GLSL_FRONT = /* glsl */ `
     if (occW.y > 0.35) {
       vec2 frD = vBld - uOccP.xz;
@@ -82,14 +92,18 @@ THREE.Material.prototype.onBeforeCompile = function (
       return m.userData?.cut ? 1 : 0;
     },
   };
-  const fr = !!m.userData?.front;
-  if (fr)
+  const fr = !!m.userData?.front,
+    sw = !!m.userData?.sway;
+  if (fr || sw) {
+    sh.uniforms.uOccT = OCC.t;
     sh.vertexShader =
-      'attribute vec2 aBld;' +
-      NL +
-      'varying vec2 vBld;' +
-      NL +
-      sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>' + NL + 'vBld = aBld;');
+      (fr ? 'attribute vec2 aBld;' + NL + 'varying vec2 vBld;' + NL : '') +
+      (sw ? 'attribute vec3 aSway;' + NL + 'uniform float uOccT;' + NL : '') +
+      sh.vertexShader.replace(
+        '#include <begin_vertex>',
+        '#include <begin_vertex>' + NL + (fr ? 'vBld = aBld;' + NL : '') + (sw ? GLSL_SWAY : ''),
+      );
+  }
   sh.fragmentShader =
     'uniform vec3 uOccP;\nuniform float uOccR;\nuniform float uOccOn;\n' +
     'uniform vec4 uCutF;\nuniform vec4 uCutB;\nuniform float uCutY;\nuniform float uCutMe;\n' +
@@ -103,6 +117,7 @@ THREE.Material.prototype.onBeforeCompile = function (
 export function updateOcclusion(px: number, py: number, pz: number, on = true) {
   OCC.p.value.set(px, py + 1.1, pz);
   OCC.on.value = OCC.force ?? (on ? 1 : 0);
+  OCC.t.value = performance.now() / 1000;
 }
 /** v23.3 cut everything above y inside an oriented box (O, U, [umin, umax, vmin, vmax]); null turns it off */
 export function setBuildingCut(

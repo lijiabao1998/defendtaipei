@@ -47,6 +47,8 @@ function flagTex() {
   return t;
 }
 let FLAG: THREE.Texture | null = null;
+/** v24.14 the same flag cloth for the flags that go up over a reclaimed district */
+export const rocFlagTex = () => (FLAG = FLAG || flagTex());
 /** v24.3 a 國旗 on a steel pole (remnant positions): pole 3.2 m, flag 1.2 × 0.8 m, double-sided */
 export function flagPole() {
   FLAG = FLAG || flagTex();
