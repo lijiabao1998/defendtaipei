@@ -15,7 +15,18 @@ async function run(ctxOpts, label, budget, snap) {
   const p = await ctx.newPage();
   p.on('pageerror', e => errs.push(String(e)));
   await p.goto(url);
-  await pickRole(p, { g: 'm', role: 'courier', skipIntro: true });
+  await pickRole(p, { g: 'f', skipIntro: true });
+  // dressing must not move anything else: no garrison lands on the spawn while the first tiles stream in
+  const nearest = await p.evaluate(async () => {
+    const g = window.__game;
+    let m = 1e9;
+    for (let i = 0; i < 6; i++) {
+      await new Promise(r => setTimeout(r, 2500));
+      for (const q of g.sols) if (q.state !== 'dead' && q.mesh.visible) m = Math.min(m, q.pos.distanceTo(g.player.pos));
+    }
+    return Math.round(m);
+  });
+  check(nearest >= 25, `${label}: no soldier on top of the spawn in the first 15 s (nearest ${nearest} m)`);
   const s = await p.evaluate(() => window.__game.signs());
   console.log('  ', label, JSON.stringify(s));
   check(s && s.blades > 500, `${label}: vertical blades across the core (${s?.blades})`);
