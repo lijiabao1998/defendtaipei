@@ -40,6 +40,7 @@ import {
 import { RainFx, makeUmbrella } from '../systems/rain';
 import { Reclaim, reclaimTitle } from '../systems/reclaim';
 import { buildHuaxi } from '../map/huaxi';
+import { buildMarket } from '../map/market';
 import { RemnantSystem, type RemSave } from '../npc/remnant';
 import { JapanSupport, JP_LABEL, type JpKind } from '../systems/japan';
 import { buildWreckage, wreckStats } from '../map/wreckage';
@@ -777,7 +778,9 @@ function placeAt(x: number, z: number): Bld | DEnter | null {
 }
 /** v23.3 indoors for player-facing checks (sleep, shelter, drones, muffled sound): core or district building */
 function indoorAt(x: number, z: number) {
-  return UP.isUp(x) || !!placeAt(x, z) || district.landmarkRoofAt(x, z);
+  return (
+    UP.isUp(x) || !!placeAt(x, z) || district.landmarkRoofAt(x, z) || !!huaxi?.covers(x, z) || !!market?.covers(x, z)
+  );
 }
 
 // ---------- sectors ----------
@@ -2196,6 +2199,7 @@ function onTileLoad(t: TileInfo) {
       rec.sols.push(ds);
     }
   }
+  reclaimDressTile(t); // v24.18
 }
 function onTileUnload(key: string) {
   const rec = dTile.get(key);
@@ -2215,7 +2219,10 @@ function onTileUnload(key: string) {
     if (i >= 0) conts.splice(i, 1);
   }
   if (rec.conts.length) district.save(key, 'c', c);
-  for (const m of rec.marks) scene.remove(m);
+  for (const m of rec.marks) {
+    scene.remove(m);
+    if (m.userData.ownGeo) (m as THREE.Mesh).geometry.dispose(); // v24.18 reclaimed-district dressing
+  }
   for (const cp of rec.cps) {
     const i = checkpoints.indexOf(cp);
     if (i >= 0) checkpoints.splice(i, 1);
@@ -3143,7 +3150,7 @@ function setupWreckage(sc: V2) {
     bldAt: (x, z) => bldAt(x, z),
     blocked: (x, z) => nearDoor(x, z) || Math.hypot(x - sc[0], z - sc[1]) < 14,
     // v24.16 no abandoned cars on a pedestrian market street
-    keepOff: (x, z) => !!huaxi?.covers(x, z) || onLandmark(x, z),
+    keepOff: (x, z) => !!huaxi?.covers(x, z) || !!market?.covers(x, z) || onLandmark(x, z),
     addSeg: (a, b, h) => wreckSegs.push({ a, b, h } as Seg),
     rnd,
   });
@@ -5097,8 +5104,8 @@ function cookOne(k?: string) {
   }
   const order =
     player.thirst < player.hunger
-      ? ['rainwater', 'rawrice', 'mianxian', 'rawegg', 'noodle']
-      : ['rawrice', 'mianxian', 'rawegg', 'noodle', 'rainwater'];
+      ? ['rainwater', 'rawrice', 'mianxian', 'rawfish', 'rawpork', 'rawegg', 'cabbage', 'sweetpotato', 'noodle']
+      : ['rawpork', 'rawfish', 'rawrice', 'mianxian', 'rawegg', 'cabbage', 'sweetpotato', 'noodle', 'rainwater'];
   const what = k ?? order.find(q => (player.inv[q] || 0) > 0);
   if (!what || !ITEMS[what]?.cook || !player.inv[what]) {
     log(
@@ -6351,6 +6358,7 @@ function checkSectors(silent = false) {
 }
 
 let huaxi: ReturnType<typeof buildHuaxi> | null = null;
+let market: ReturnType<typeof buildMarket> | null = null;
 // ---------- v24.14 奪回: a reclaimed district changes on the street, and it pays ----------
 let reclaim: Reclaim | null = null;
 let reclaimSynced = false;
@@ -6378,6 +6386,7 @@ const RECLAIM_GIFTS: Record<string, number>[] = [
 function reclaimTick() {
   if (!reclaim) return;
   const fresh = reclaim.sync(liberated);
+  if (fresh.length) for (const t of district.loadedInfos()) reclaimDressTile(t);
   if (!reclaimSynced) {
     reclaimSynced = true; // districts already reclaimed in a loaded save: no party, but the crowd is where it was
     const at = (surv as any).libAt as Record<number, V2> | undefined;
@@ -6386,6 +6395,18 @@ function reclaimTick() {
   }
   if (MP) return;
   for (const i of fresh) reclaimParty(i);
+}
+/** v24.18 a tile in a reclaimed district: flags on its walls, and neighbours if the district has no core crowd */
+function reclaimDressTile(t: TileInfo) {
+  if (!reclaim) return;
+  const sec = sectorOf(t.cx, t.cz);
+  const rec = dTile.get(t.key) as any;
+  if (!rec || rec.dressed || !liberated.has(sec)) return;
+  rec.dressed = true;
+  for (const m of reclaim.dressTile(t.key, t.fronts, t.roads as any, outerSector(sec))) {
+    scene.add(m);
+    rec.marks.push(m);
+  }
 }
 function reclaimParty(i: number) {
   const name = SECTOR_LABEL(i);
@@ -7066,7 +7087,11 @@ function update(dt: number) {
       ? up.room.box
       : player.pos.z < -6000 || roofB
         ? null
-        : (district.enterAt(player.pos.x, player.pos.z) ?? district.landmarkCut(player.pos.x, player.pos.z)),
+        : (district.enterAt(player.pos.x, player.pos.z) ??
+          district.landmarkCut(player.pos.x, player.pos.z) ??
+          huaxi?.cut(player.pos.x, player.pos.z) ??
+          market?.cut(player.pos.x, player.pos.z) ??
+          null),
   );
   // buildings cutaway
   const inside = bldAt(player.pos.x, player.pos.z);
@@ -7475,6 +7500,7 @@ function update(dt: number) {
   updateLamps((1 - dayF) * PW, dt);
   decay?.update(dt, (1 - dayF) * PW, player.pos.x, player.pos.z);
   huaxi?.update((1 - dayF) * PW);
+  market?.update((1 - dayF) * PW);
   facade?.update(1 - dayF, PW);
   alley?.update(dt, (1 - dayF) * PW, player.pos.x, player.pos.z, PW);
   roadMat.roughness = 0.95 - (1 - dayF) * 0.55;
@@ -8142,6 +8168,26 @@ async function boot() {
         crossing: (x, z) => others.some(q => q.p.some((p: V2) => Math.abs(p[0] - x) < 5 && Math.abs(p[1] - z) < 5)),
       });
       for (const c of huaxi.conts) {
+        const ct = makeCont(c.id, c.p, 'crate', undefined, { ...c.items });
+        ct.label = c.label;
+        (ct.mesh as THREE.Object3D).visible = false;
+      }
+    }
+  }
+  // v24.18 東三水街市場: the unnamed lane south of 桂林路, between 西昌街 and 康定路, where the real one is
+  {
+    const lane = roads.find(
+      q => q.t === 'footway' && Math.hypot(q.p[0][0] + 136, q.p[0][1] - 296) < 4 && q.p.length >= 2,
+    );
+    if (lane) {
+      const others = roads.filter(q => q !== lane);
+      market = buildMarket({
+        scene,
+        road: lane.p as V2[],
+        addSeg: (a, b) => addSeg({ a, b }),
+        crossing: (x, z) => others.some(q => q.p.some((p: V2) => Math.abs(p[0] - x) < 3 && Math.abs(p[1] - z) < 3)),
+      });
+      for (const c of market.conts) {
         const ct = makeCont(c.id, c.p, 'crate', undefined, { ...c.items });
         ct.label = c.label;
         (ct.mesh as THREE.Object3D).visible = false;
@@ -9286,6 +9332,14 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.18 東三水街市場
+    market: () =>
+      market && {
+        bays: market.bays,
+        frames: market.frames,
+        conts: conts.filter(c => /^sm\d/.test(c.id)).map(c => ({ id: c.id, label: c.label, p: c.p, items: c.items })),
+      },
+    sectorAt: (i: number) => [SECTORS[i].x, SECTORS[i].z, outerSector(i)],
     // v24.17 紅樓、剝皮寮
     landmarks: () => ({
       ghosts: blds.filter(b => (b as any).ghost).map(b => [b.id, b.c]),
