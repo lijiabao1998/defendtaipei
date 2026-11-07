@@ -263,10 +263,16 @@ if (wall) {
     window.__s.pos.set(s.x, 0, s.z);
     window.__s.hp = 400;
     window.__shots0 = window.__game.avStat.shots;
+    // soldiers walk round walls now: keep this one where the check put it, behind the wall, while the gun fires
+    window.__pin = setInterval(() => {
+      window.__s.pos.set(s.x, 0, s.z);
+      window.__s.mesh.position.copy(window.__s.pos);
+    }, 16);
   }, wall);
   await p.mouse.down();
   await p.waitForTimeout(1500);
   await p.mouse.up();
+  await p.evaluate(() => clearInterval(window.__pin));
   const r = await p.evaluate(() => ({ hp: window.__s.hp, shots: window.__game.avStat.shots - window.__shots0 }));
   console.log('  ', JSON.stringify(r));
   check(r.shots > 0, 'it did fire');

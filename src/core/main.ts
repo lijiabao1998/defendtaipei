@@ -216,6 +216,13 @@ const CELL = 8;
 const grid = new Map<string, Seg[]>();
 const gk = (x: number, z: number) => `${Math.floor(x / CELL)},${Math.floor(z / CELL)}`;
 let nav: Nav | null = null;
+// v24.26 quarter-metre cells, around the player. Soldiers further than 120 m are dormant, and the window moves once the player is
+// 40 m from its centre, so anyone awake is on it unless they are at the far end of that and well out of sight.
+const NAV_HALF = 130,
+  NAV_CELL = 0.25,
+  NAV_MOVE = 40,
+  /** the collision radius is 0.35: a path along cell centres clears it */
+  NAV_BODY = 0.36;
 // v21: hand-built core = the original 1.1 × 1.0 km bbox (西門町–龍山寺); the rest of 萬華區 streams via district.ts
 const CORE = { minx: -555, maxx: 555, minz: -497, maxz: 497 };
 const inCore = (x: number, z: number) => x > CORE.minx && x < CORE.maxx && z > CORE.minz && z < CORE.maxz;
@@ -1316,7 +1323,9 @@ function avControl(v: NonNullable<typeof drive.cur>, dt: number) {
       for (const s of sols) {
         if (s === target || s.state === 'dead') continue;
         const d = Math.hypot(s.pos.x - end.x, s.pos.z - end.z);
-        if (d < w.splash) damageSol(s, w.dmg * 0.5 * (1 - d / w.splash), false);
+        // from just in front of where it burst: a wall it hit shelters whoever is behind it
+        if (d < w.splash && blastReach([end.x - ux * 0.3, end.z - uz * 0.3], [s.pos.x, s.pos.z]))
+          damageSol(s, w.dmg * 0.5 * (1 - d / w.splash), false);
       }
     }
     // tracer
@@ -2560,7 +2569,24 @@ type Sol = {
   post?: V2;
   path?: V2[];
   pi?: number;
-  repath?: number;
+  /** v24.26 not getting anywhere: see solUnstick */
+  prog?: {
+    x: number;
+    z: number;
+    t: number;
+    stage: number;
+    tries: number;
+    best: number;
+    gx: number;
+    gz: number;
+    since: number;
+  };
+  good?: V2;
+  detour?: V2;
+  detourT?: number;
+  holdT?: number;
+  navQ?: boolean;
+  navG?: V2;
   pgoal?: V2;
   speed?: number;
   aiming?: boolean;
@@ -7024,6 +7050,162 @@ function meleeResolve(d: any, dir: THREE.Vector3): Sol | null {
   }
   return null;
 }
+const navStat = { rethink: 0, detours: 0, giveUps: 0, waited: 0, requeued: 0 };
+const navQ: Sol[] = [];
+let navCur: Sol | null = null,
+  navEpoch = 0;
+/** v24.26 a few milliseconds a frame for finding paths, one soldier at a time: a long search simply takes a few frames */
+function navPump(ms: number) {
+  const N = nav;
+  if (!N) return;
+  const t0 = performance.now();
+  // the grid moved under a search in progress: start that one again
+  if (navCur && N.epoch !== navEpoch) {
+    navQ.unshift(navCur);
+    navCur = null;
+    navStat.requeued++;
+  }
+  while (performance.now() - t0 < ms) {
+    if (!navCur) {
+      const s = navQ.shift();
+      if (!s) return;
+      s.navQ = false;
+      if (s.state === 'dead' || !s.pgoal) continue;
+      const me: V2 = [s.pos.x, s.pos.z];
+      const G = N.snap(s.pgoal);
+      if (N.clear(me, G)) {
+        s.path = [G];
+        s.pi = 0;
+        continue;
+      }
+      if (!N.begin(me, G)) {
+        // off the grid, far from anyone who could see: as the crow flies
+        s.path = [G];
+        s.pi = 0;
+        continue;
+      }
+      navCur = s;
+      navEpoch = N.epoch;
+      s.navG = G;
+    }
+    const r = N.advance(Math.max(0.5, ms - (performance.now() - t0)));
+    if (r === undefined) {
+      navStat.waited++;
+      return;
+    }
+    const s = navCur;
+    navCur = null;
+    s.path = r ? smooth(r, (a, b) => N.clear(a, b), 120) : [s.navG!];
+    s.pi = 0;
+  }
+}
+/** v24.26 can a body stand exactly here? What collide() would say, without moving anything */
+function bodyFits(x: number, z: number) {
+  const R = 0.345,
+    R2 = R * R;
+  const i0 = Math.floor((x - R) / CELL),
+    i1 = Math.floor((x + R) / CELL),
+    j0 = Math.floor((z - R) / CELL),
+    j1 = Math.floor((z + R) / CELL);
+  for (let i = i0; i <= i1; i++)
+    for (let j = j0; j <= j1; j++) {
+      const a = grid.get(i + ',' + j);
+      if (!a) continue;
+      for (const s of a) {
+        const ax = s.a[0],
+          az = s.a[1],
+          dx = s.b[0] - ax,
+          dz = s.b[1] - az;
+        const l2 = dx * dx + dz * dz || 1;
+        const t = clamp(((x - ax) * dx + (z - az) * dz) / l2, 0, 1);
+        const ex = ax + dx * t - x,
+          ez = az + dz * t - z;
+        if (ex * ex + ez * ez < R2) return false;
+      }
+    }
+  return true;
+}
+/**
+ * v24.26 somebody who wants to go somewhere and is not getting there. After a moment think again; a little later go back to the
+ * last place that worked and try from there; and if that has not helped twice, stop wanting it. Returns where to head now, or
+ * null to stand still for the moment.
+ */
+function solUnstick(s: Sol, goal: V2, dt: number): V2 | null {
+  const x = s.pos.x,
+    z = s.pos.z;
+  if (s.holdT && s.holdT > 0) {
+    s.holdT -= dt;
+    return null;
+  }
+  const P = (s.prog ||= { x, z, t: 0, stage: 0, tries: 0, best: 1e9, gx: goal[0], gz: goal[1], since: 0 });
+  // a new goal is a clean slate
+  if (Math.hypot(goal[0] - P.gx, goal[1] - P.gz) > 2 && !s.detour) {
+    P.gx = goal[0];
+    P.gz = goal[1];
+    P.tries = 0;
+    P.best = 1e9;
+    P.t = 0;
+    P.stage = 0;
+    P.since = 0;
+  }
+  const dg = Math.hypot(goal[0] - x, goal[1] - z);
+  // really getting nearer forgives everything so far
+  if (dg < P.best - 1.5) {
+    P.best = dg;
+    P.tries = 0;
+    P.since = 0;
+  } else if (dg > 1.2) P.since += dt;
+  if (Math.hypot(x - P.x, z - P.z) > 0.5) {
+    P.x = x;
+    P.z = z;
+    P.t = 0;
+    P.stage = 0;
+    if (nav!.freeAt(x, z)) s.good = [x, z];
+  } else if (dg > 1.2) P.t += dt;
+  if (s.detour) {
+    s.detourT = (s.detourT ?? 0) - dt;
+    if (s.detourT <= 0 || Math.hypot(s.detour[0] - x, s.detour[1] - z) < 0.6) {
+      s.detour = undefined;
+      s.path = undefined;
+    } else return s.detour;
+  }
+  if (P.t > 1.5 && P.stage < 1) {
+    P.stage = 1;
+    s.path = undefined;
+    navStat.rethink++;
+  }
+  if (P.t > 3 && P.stage < 2) {
+    P.stage = 2;
+    P.tries++;
+    if (s.good && P.tries < 3 && Math.hypot(s.good[0] - x, s.good[1] - z) > 0.8) {
+      s.detour = s.good;
+      s.detourT = 2.5;
+      s.path = undefined;
+      navStat.detours++;
+      return s.detour;
+    }
+  }
+  // (the way round may well lead away from the goal for a while: as long as that takes, but not for ever)
+  if (P.t > 6 || P.tries >= 3 || P.since > 25) {
+    P.t = 0;
+    P.stage = 0;
+    P.tries = 0;
+    P.best = 1e9;
+    P.since = 0;
+    s.path = undefined;
+    navStat.giveUps++;
+    if (s.post) s.post = [x, z];
+    else if (s.state === 'patrol') {
+      if (s.route?.length) s.wi = (s.wi + 1) % s.route.length;
+    } else if (s.state === 'investigate') s.timer = 0;
+    else {
+      s.cov = null;
+      s.holdT = 3;
+    }
+    return null;
+  }
+  return goal;
+}
 function damageSol(s: Sol, dmg: number, stealth: boolean) {
   s.hp -= dmg;
   if (stealth) log(tr('偷襲！', 'Sneak attack!'), '#ff9');
@@ -7628,6 +7810,11 @@ function update(dt: number) {
     const [mx, mz] = mapPos(); // v23.4 upstairs: keep streaming around the building
     roadT.update(mx, mz, dt);
     district.update(mx, mz);
+    if (nav) {
+      if (!nav.building && !offMap(mx, mz) && Math.hypot(mx - nav.cx, mz - nav.cz) > NAV_MOVE)
+        nav.recenter(mx, mz, segs);
+      nav.step(2);
+    }
   }
   traffic.update(dt);
   if (drive.cur) {
@@ -7829,7 +8016,6 @@ function update(dt: number) {
   // soldiers
   const night = isNight();
   const pp: V2 = [player.pos.x, player.pos.z];
-  let pathBudget = 4;
   assignSquads(night);
   updateGrenades(dt, night);
   for (const s of sols) {
@@ -8070,41 +8256,54 @@ function update(dt: number) {
     }
     if (goal) {
       let tgt = goal;
-      if (nav && (s.state !== 'patrol' || s.post || true)) {
-        s.repath = (s.repath || 0) - dt;
-        const need = !s.path || !s.pgoal || Math.hypot(goal[0] - s.pgoal[0], goal[1] - s.pgoal[1]) > 2 || s.repath <= 0;
-        if (need && pathBudget > 0) {
-          pathBudget--;
-          s.repath = s.state === 'patrol' ? 4 : 1.5;
-          s.pgoal = goal.slice() as V2;
-          const me: V2 = [s.pos.x, s.pos.z];
-          if (los(me, goal)) s.path = [goal];
-          else {
-            const pth = nav.find(me, goal);
-            s.path = pth ? smooth(pth, los) : [goal];
+      if (nav) {
+        goal = solUnstick(s, goal, dt);
+        if (goal) {
+          tgt = goal;
+          // a path stands until the goal moves or it stops working (solUnstick): thinking again every so often only flips between
+          // routes of about the same length, and whoever does that dithers on the spot
+          const need = !s.path || !s.pgoal || Math.hypot(goal[0] - s.pgoal[0], goal[1] - s.pgoal[1]) > 2;
+          if (need && !s.navQ) {
+            s.pgoal = goal.slice() as V2;
+            const me: V2 = [s.pos.x, s.pos.z];
+            const G = nav.snap(goal);
+            // a straight walk needs no search; anything else waits its turn, and whoever waits goes on with the path they have
+            if (nav.clear(me, G)) {
+              s.path = [G];
+              s.pi = 0;
+            } else {
+              s.navQ = true;
+              navQ.push(s);
+            }
           }
-          s.pi = 0;
-        }
-        if (s.path) {
-          while (s.pi! < s.path.length - 1 && Math.hypot(s.path[s.pi!][0] - s.pos.x, s.path[s.pi!][1] - s.pos.z) < 0.8)
-            s.pi!++;
-          tgt = s.path[s.pi!];
-        }
+          if (s.path) {
+            // on to the next point once it can be walked to straight from here
+            const me: V2 = [s.pos.x, s.pos.z];
+            while (s.pi! < s.path.length - 1) {
+              const d = Math.hypot(s.path[s.pi!][0] - s.pos.x, s.path[s.pi!][1] - s.pos.z);
+              if (d < 0.35 || (d < 1.2 && nav.clear(me, s.path[s.pi! + 1]))) s.pi!++;
+              else break;
+            }
+            tgt = s.path[s.pi!];
+          } else tgt = [s.pos.x, s.pos.z]; // waiting for a path: a frame or two
+        } else s.path = undefined;
       } else s.path = undefined;
-      const gx = tgt[0] - s.pos.x,
-        gz = tgt[1] - s.pos.z;
-      const gl = Math.hypot(gx, gz);
-      if (gl > 0.3) {
-        const td = Math.atan2(gz, gx);
-        let dd = Math.atan2(Math.sin(td - s.dir), Math.cos(td - s.dir));
-        if (!s.aiming) s.dir += clamp(dd, -dt * 6, dt * 6);
-        s.vs = (s.vs || 0) + (sp - (s.vs || 0)) * Math.min(1, dt * 4);
-        const ox = s.pos.x,
-          oz = s.pos.z;
-        s.pos.x += (gx / gl) * s.vs * dt;
-        s.pos.z += (gz / gl) * s.vs * dt;
-        collide(s.pos, 0.35);
-        moved = Math.hypot(s.pos.x - ox, s.pos.z - oz) / dt;
+      if (goal) {
+        const gx = tgt[0] - s.pos.x,
+          gz = tgt[1] - s.pos.z;
+        const gl = Math.hypot(gx, gz);
+        if (gl > 0.3) {
+          const td = Math.atan2(gz, gx);
+          let dd = Math.atan2(Math.sin(td - s.dir), Math.cos(td - s.dir));
+          if (!s.aiming) s.dir += clamp(dd, -dt * 6, dt * 6);
+          s.vs = (s.vs || 0) + (sp - (s.vs || 0)) * Math.min(1, dt * 4);
+          const ox = s.pos.x,
+            oz = s.pos.z;
+          s.pos.x += (gx / gl) * s.vs * dt;
+          s.pos.z += (gz / gl) * s.vs * dt;
+          collide(s.pos, 0.35);
+          moved = Math.hypot(s.pos.x - ox, s.pos.z - oz) / dt;
+        }
       }
     }
     if (!moved) s.vs = (s.vs || 0) * Math.max(0, 1 - dt * 6);
@@ -8136,6 +8335,7 @@ function update(dt: number) {
     cm.color.set(s.state === 'combat' ? 0xff3030 : s.state === 'investigate' ? 0xffa030 : night ? 0xfff6c0 : 0xffee88);
     cm.opacity = night ? 0.22 : 0.12;
   }
+  navPump(3);
   // lighting by time of day
   const hr = (gameMin / 60) % 24;
   // v24.0: Taipei daylight. The old sin(06–19) curve left 07:30 at a third of daylight (the city looked like
@@ -9059,8 +9259,18 @@ async function boot() {
     coreLots = all;
   }
   // navigation grid (built after all collision geometry exists)
-  nav = new Nav(start.c[0] - 170, start.c[1] - 170, start.c[0] + 170, start.c[1] + 170, 0.5);
-  for (const q of segs) nav.markSeg(q.a, q.b, 1);
+  nav = new Nav(
+    start.c[0] - NAV_HALF,
+    start.c[1] - NAV_HALF,
+    start.c[0] + NAV_HALF,
+    start.c[1] + NAV_HALF,
+    NAV_CELL,
+    NAV_BODY,
+  );
+  nav.fitAt = bodyFits;
+  navQ.length = 0;
+  navCur = null;
+  nav.rebuild(segs);
   spawnSoldiers(new Set(sv?.dead || []));
   scene.add(rainMesh);
   scene.add(rainFx.group);
@@ -10129,6 +10339,26 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.26 pathfinding
+    navStat,
+    /** walk this path with a real body: how far along does it get? */
+    navWalk: (path: V2[]) => {
+      const q = new THREE.Vector3(path[0][0], 0, path[0][1]);
+      collide(q, 0.35);
+      for (let i = 1; i < path.length; i++) {
+        for (let k = 0; k < 400; k++) {
+          const dx = path[i][0] - q.x,
+            dz = path[i][1] - q.z;
+          const L = Math.hypot(dx, dz);
+          if (L < 0.4) break;
+          q.x += (dx / L) * 0.1;
+          q.z += (dz / L) * 0.1;
+          collide(q, 0.35);
+        }
+        if (Math.hypot(path[i][0] - q.x, path[i][1] - q.z) >= 0.4) return i;
+      }
+      return path.length;
+    },
     // v24.25 the empty lots
     lots: () => ({ core: coreLots?.stats ?? null, tiles: district.lotStats }),
     /** one of each kind, for looking at */
