@@ -2181,19 +2181,22 @@ function onTileLoad(t: TileInfo) {
       rec.sols.push(dSoldier(t.key, k, [post, cp], gs, post));
     }
   }
+  // v24.19 a patrol never starts on top of where the player began
+  const farFromSpawn = (q: { p: V2[] }) =>
+    !spawnC || q.p.slice(0, 6).every(v => Math.hypot(v[0] - spawnC![0], v[1] - spawnC![1]) > 40);
   // patrols (bounded globally)
   const live = sols.filter(q => q.tile && q.state !== 'dead').length;
   const nP =
     big.length && live < DBUDGET.solCap ? Math.min(DBUDGET.patrol, (r() < 0.6 ? 1 : 0) + (r() < 0.3 ? 1 : 0)) : 0;
   for (let j = 0; j < nP; j++) {
     const q = big[Math.floor(r() * big.length)];
-    if (dead[GARRISON + j] || q.p.length < 2) continue;
+    if (dead[GARRISON + j] || q.p.length < 2 || !farFromSpawn(q as any)) continue;
     rec.sols.push(dSoldier(t.key, GARRISON + j, q.p.slice(0, 6) as V2[], -1));
   }
   // v22.11 daytime: one extra patrol per tile (inactive during curfew, when flashlights + drones take over)
   if (big.length && live + nP < DBUDGET.solCap && r() < 0.55) {
     const q = big[Math.floor(r() * big.length)];
-    if (!dead[GARRISON + 2] && q.p.length >= 2) {
+    if (!dead[GARRISON + 2] && q.p.length >= 2 && farFromSpawn(q as any)) {
       const ds = dSoldier(t.key, GARRISON + 2, q.p.slice(0, 6).reverse() as V2[], -1);
       ds.day = true;
       rec.sols.push(ds);
@@ -6358,6 +6361,7 @@ function checkSectors(silent = false) {
 }
 
 let huaxi: ReturnType<typeof buildHuaxi> | null = null;
+let spawnC: V2 | null = null;
 let market: ReturnType<typeof buildMarket> | null = null;
 // ---------- v24.14 奪回: a reclaimed district changes on the street, and it pays ----------
 let reclaim: Reclaim | null = null;
@@ -8077,6 +8081,7 @@ async function boot() {
     }
   }
   if (!start) start = homes[0] || blds.find(b => b.door)!;
+  spawnC = start.c as V2;
   const near = blds
     .filter(
       b =>
