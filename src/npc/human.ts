@@ -128,6 +128,7 @@ export function makeRig(o: RigOpts): Rig {
     s?: [number, number, number],
   ) => P.add(j, g, c, false, p, r, s);
   const root = new THREE.Group();
+  root.userData.noCull = true; // people move, and the game asks whether they are visible
   const body = new THREE.Group();
   root.add(body);
   const hips = jt(body, 0, hipH, 0);

@@ -11,6 +11,7 @@ import { translateLabel } from '../labels';
 // Test/debug hooks are exposed on window.__game at the end of boot().
 import { buildEvacZone, playEvac, cine } from '../story/events/evac';
 import * as THREE from 'three';
+import { FAST, fastCull, fastShowAll } from './fastscene';
 import { buildFacade } from '../map/facade';
 import { buildParks } from '../map/park';
 import { ArmorSystem, type ArmorKind } from '../systems/armor';
@@ -8256,16 +8257,21 @@ function die() {
 function loop() {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (cine.on) {
+    fastShowAll(scene);
     requestAnimationFrame(loop);
     return;
   }
   if (rocCine) {
     rocCineStep(dt);
+    fastShowAll(scene);
     renderer.render(scene, camera);
     requestAnimationFrame(loop);
     return;
   }
   update(dt);
+  // v24.23 only the street camera can hide what it does not see: the drone and the scope look further
+  if (fpv?.active || scope.on) fastShowAll(scene);
+  else fastCull(scene, camera, sun.castShadow ? sun.shadow.camera : null);
   if (fpv?.active) {
     fpv.update(dt);
     if (fpv.active) fpv.render(renderer);
@@ -9468,6 +9474,7 @@ async function boot() {
       : {}),
     roofStats,
     // v23.9 draw calls / triangles of the last frame + core building counts (density checks)
+    fast: FAST,
     rinfo: () => ({
       calls: renderer.info.render.calls,
       tris: renderer.info.render.triangles,
