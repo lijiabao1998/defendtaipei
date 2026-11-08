@@ -22,6 +22,8 @@ export type AvWeapon = {
   range: number;
   /** can it hurt armour, and how much */
   antiArmor: number;
+  /** what a round does to a helicopter (they have 100 points) */
+  air: number;
   sound: 'mg' | 'rifle' | 'at';
   noise: number;
   /** turret traverse, radians per second */
@@ -40,6 +42,7 @@ const COAX762: AvWeapon = {
   splash: 0,
   range: 70,
   antiArmor: 0,
+  air: 0.6,
   sound: 'mg',
   noise: 70,
 };
@@ -55,10 +58,32 @@ const AC30: AvWeapon = {
   splash: 2.4,
   range: 90,
   antiArmor: 6,
+  air: 8,
   sound: 'at',
   noise: 95,
 };
-export const AV_LOADOUT: Record<'zbl08' | 'zbd05' | 'ztd05' | 'mengshi', AvLoadout> = {
+export const AV_LOADOUT: Record<'zbl08' | 'zbd05' | 'ztd05' | 'mengshi' | 'uh60', AvLoadout> = {
+  // v24.24 the door gun of the Black Hawk: about 750 rounds a minute off 200-round belts
+  uh60: {
+    main: {
+      name: tr('7.62 毫米艙門機槍', '7.62 mm door gun'),
+      cd: 0.08,
+      ready: 200,
+      reserve: 600,
+      reload: 7,
+      heat: 0.5,
+      cool: 1.7,
+      dmg: 60,
+      splash: 0,
+      range: 70,
+      antiArmor: 0,
+      air: 0.6,
+      sound: 'mg',
+      noise: 70,
+    },
+    coax: null,
+    traverse: 3.2,
+  },
   zbl08: { main: AC30, coax: COAX762, traverse: 1.1 },
   zbd05: { main: AC30, coax: COAX762, traverse: 1.1 },
   ztd05: {
@@ -74,6 +99,7 @@ export const AV_LOADOUT: Record<'zbl08' | 'zbd05' | 'ztd05' | 'mengshi', AvLoado
       splash: 8,
       range: 120,
       antiArmor: 70,
+      air: 34,
       sound: 'at',
       noise: 150,
     },
@@ -93,6 +119,7 @@ export const AV_LOADOUT: Record<'zbl08' | 'zbd05' | 'ztd05' | 'mengshi', AvLoado
       splash: 0,
       range: 85,
       antiArmor: 1,
+      air: 2.5,
       sound: 'mg',
       noise: 85,
     },
