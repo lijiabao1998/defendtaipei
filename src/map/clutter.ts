@@ -711,6 +711,8 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     for (let u = mid - 0.5, i = 0; u > uL && i < 4; u -= 0.95, i++)
       atBack(locker(0x4a5a6a), u, 0.25, 0.9, 0.45, 1.8, i < 2 ? { cont: { label: '警用置物櫃', loot: 'police' } } : {});
     put(filingCabinet(), uL + 0.3, D * 0.5, 1, 0.5, 0.6, 1.3, { cont: { label: '檔案櫃', loot: 'home' } });
+    for (let i = 0, u = uR - 0.6; i < 2 && u > mid + 1; i++, u -= 1.1)
+      atBack(locker(0x2a3038), u, 0.25, 1.0, 0.5, 1.9, { cont: { label: '警局槍櫃', loot: 'armory' } });
     rows(1.9, 2.1, 3.6, back - 2.2, Math.min(24, many), (u, v, i) =>
       put(officeDesk(r), u, v, 2, 1.25, 1.3, 0.8, i % 3 === 1 ? { cont: { label: '辦公桌抽屜', loot: 'home' } } : {}),
     );

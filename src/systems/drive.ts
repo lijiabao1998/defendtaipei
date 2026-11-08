@@ -2,6 +2,8 @@ import { tr } from '../i18n';
 // Drivable Taiwan-street vehicles. All names, liveries and plates are invented; shapes are generic by class
 // (no real brands, logos, grilles or signature design lines).
 import * as THREE from 'three';
+import { makeMesh, type ArmorKind } from './armor';
+import { AV_LOADOUT, avState, type AvState } from './avgun';
 type V2 = [number, number];
 export type DKind =
   | 'scooter'
@@ -15,7 +17,12 @@ export type DKind =
   | 'sedan'
   | 'van'
   | 'bus'
-  | 'garbage';
+  | 'garbage'
+  // v24.22 captured PLA armour
+  | 'zbl08'
+  | 'zbd05'
+  | 'ztd05'
+  | 'mengshi';
 export type DSpec = {
   name: string;
   drive: boolean;
@@ -33,8 +40,79 @@ export type DSpec = {
   key: boolean;
   cargo: number;
   seatY: number;
+  /** v24.22 PLA armour: the model comes from armor.ts, and it has guns */
+  armored?: boolean;
 };
 export const SPEC: Record<DKind, DSpec> = {
+  // v24.22 speeds are the published road speeds scaled the way the other vehicles here are; fuel and burn likewise
+  zbl08: {
+    name: tr('ZBL-08 輪式步兵戰車', 'ZBL-08 wheeled IFV'),
+    drive: true,
+    two: false,
+    L: 8,
+    W: 3,
+    vmax: 24,
+    acc: 2.4,
+    turn: 0.85,
+    noise: 70,
+    fuelCap: 450,
+    burn: 0.9,
+    key: false,
+    cargo: 300,
+    seatY: 1.6,
+    armored: true,
+  },
+  zbd05: {
+    name: tr('ZBD-05 兩棲步兵戰車', 'ZBD-05 amphibious IFV'),
+    drive: true,
+    two: false,
+    L: 9.5,
+    W: 3.4,
+    vmax: 18,
+    acc: 2,
+    turn: 1.05,
+    noise: 80,
+    fuelCap: 600,
+    burn: 1.3,
+    key: false,
+    cargo: 260,
+    seatY: 1.6,
+    armored: true,
+  },
+  ztd05: {
+    name: tr('ZTD-05 兩棲突擊車', 'ZTD-05 amphibious assault vehicle'),
+    drive: true,
+    two: false,
+    L: 9.5,
+    W: 3.4,
+    vmax: 17,
+    acc: 1.8,
+    turn: 1,
+    noise: 85,
+    fuelCap: 600,
+    burn: 1.4,
+    key: false,
+    cargo: 120,
+    seatY: 1.7,
+    armored: true,
+  },
+  mengshi: {
+    name: tr('東風猛士 輕型車', 'Dongfeng Mengshi light vehicle'),
+    drive: true,
+    two: false,
+    L: 4.9,
+    W: 2.1,
+    vmax: 26,
+    acc: 4,
+    turn: 1.35,
+    noise: 45,
+    fuelCap: 120,
+    burn: 0.22,
+    key: false,
+    cargo: 180,
+    seatY: 1.1,
+    armored: true,
+  },
   scooter: {
     name: tr('迅風 125', 'Swiftwind 125'),
     drive: true,
@@ -248,6 +326,9 @@ export type DV = {
   dust: number;
   plate: string;
   wheels: THREE.Object3D[];
+  /** v24.22 PLA armour */
+  tur?: THREE.Object3D;
+  gun?: AvState;
 };
 const MS = new Map<string, THREE.MeshStandardMaterial>();
 const M = (c: number, r = 0.55, m = 0.1) => {
@@ -517,13 +598,24 @@ export class DriveSystem {
   constructor(public d: DriveDeps) {}
   spawn(kind: DKind, x: number, z: number, hd: number, r: () => number, o: Partial<DV> = {}) {
     const s = SPEC[kind];
-    const m = s.two
-      ? kind === 'moto'
-        ? motoModel(r)
-        : kind === 'ubike' || kind === 'basket'
-          ? bikeModel(kind, r)
-          : scooterModel(kind, r)
-      : carModel(kind, r);
+    let tur: THREE.Object3D | undefined;
+    const m: { g: THREE.Group; wheels: THREE.Object3D[] } = s.armored
+      ? (() => {
+          // the model faces +x, a driven vehicle faces +z; with this turn, yaw = hd + tur.rotation.y
+          const q = makeMesh(kind as ArmorKind);
+          q.g.rotation.y = -Math.PI / 2;
+          const h = new THREE.Group();
+          h.add(q.g);
+          tur = q.tur;
+          return { g: h, wheels: [] as THREE.Object3D[] };
+        })()
+      : s.two
+        ? kind === 'moto'
+          ? motoModel(r)
+          : kind === 'ubike' || kind === 'basket'
+            ? bikeModel(kind, r)
+            : scooterModel(kind, r)
+        : carModel(kind, r);
     if (kind === 'sedan' && r() < 0.7)
       m.g.traverse(q => {
         const mm = (q as THREE.Mesh).material as THREE.MeshStandardMaterial;
@@ -551,6 +643,9 @@ export class DriveSystem {
       dust: 0,
       plate: '',
       wheels: m.wheels,
+      ...(s.armored
+        ? { tur, gun: avState(AV_LOADOUT[kind as keyof typeof AV_LOADOUT], 0.6 + r() * 0.4), tyre: 1, key: true }
+        : {}),
       ...o,
     };
     if (s.two && !s.pedal) v.g.rotation.z = 0.12; // on side stand

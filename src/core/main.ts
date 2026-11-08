@@ -40,6 +40,7 @@ import {
 import { RainFx, makeUmbrella } from '../systems/rain';
 import { Reclaim, reclaimTitle } from '../systems/reclaim';
 import { buildHuaxi } from '../map/huaxi';
+import { AV_LOADOUT, avTick, avFire, avReload, avStatus } from '../systems/avgun';
 import { buildMarket } from '../map/market';
 import { RemnantSystem, type RemSave } from '../npc/remnant';
 import { JapanSupport, JP_LABEL, type JpKind } from '../systems/japan';
@@ -883,15 +884,24 @@ let fpv: FPV | null = null,
   recon: Recon | null = null;
 // v22.9 artillery: realistic radii (old: 7 m linear, ±7 m spread, no telegraph, soldiers unhurt)
 const SHELL = { core: 6, wound: 18, spread: 4.5, lead: 6, gap: 1.3, n: 4, coreDmg: 85, woundDmg: 50 };
-const shells: { t: number; p: V2; w?: ReturnType<BlastFX['warn']>; wh?: boolean }[] = [];
+const shells: {
+  t: number;
+  p: V2;
+  w?: ReturnType<BlastFX['warn']>;
+  wh?: boolean;
+  /** v24.21 what is coming down (default: the old artillery shell) */
+  k?: WarWeapon;
+}[] = [];
 const blastFx = new BlastFX(scene, SET.quality, {
   wind: () => (raining() ? [2.2, 0.9] : [0.9, 0.35]),
 });
 setBoomFx((p, big) => {
-  const d = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
+  // upstairs you are on another part of the map: hear it from the foot of the stairs
+  const q = mapPos();
+  const d = Math.hypot(q[0] - p.x, q[1] - p.z);
   blastFx.explode(p, big);
   blastFx.kick(d, big);
-  AU.shellBoom(d, indoorAt(player.pos.x, player.pos.z), big);
+  AU.shellBoom(d, !!up || indoorAt(player.pos.x, player.pos.z), big);
 });
 /** shell damage factor at distance d: full lethal core, then quadratic falloff to the wounding radius */
 function shellDmg(d: number) {
@@ -1004,18 +1014,27 @@ function updateShells(dt: number) {
     shells.splice(i, 1);
     blastFx.unwarn(s.w);
     const p = new THREE.Vector3(s.p[0], 0.5, s.p[1]);
-    boom(scene, p, 1.4);
-    noise(p.x, p.z, 60);
+    const W = s.k;
+    boom(scene, p, W ? W.big : 1.4);
+    noise(p.x, p.z, W ? W.wound * 2 : 60, !!W);
+    if (W) warImpact(W, s.p);
+    const dmgAt = (d: number) => (W ? weaponDmg(W, d) : shellDmg(d));
+    const wound = W ? W.wound : SHELL.wound,
+      core = W ? W.core : SHELL.core;
     for (const o of sols) {
       if (o.state === 'dead') continue;
       const d = Math.hypot(o.pos.x - p.x, o.pos.z - p.z);
-      if (d < SHELL.wound) damageSol(o, d < SHELL.core ? 300 : shellDmg(d) * 1.5, true);
+      if (d < wound) damageSol(o, d < core ? 300 : dmgAt(d) * 1.5, true);
     }
-    const dp = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
-    let dmg = shellDmg(dp);
+    // on an upper floor you are in the building that stands at the foot of the stairs
+    const mp = mapPos();
+    const dp = Math.hypot(mp[0] - p.x, mp[1] - p.z);
+    if (W) blastFx.kick(dp, W.big);
+    let dmg = dmgAt(dp);
     if (dmg <= 0) continue;
     // indoors the walls stop almost all fragments; low walls / arcade pillars (cover) halve them
-    if (indoorAt(player.pos.x, player.pos.z)) dmg *= 0.15;
+    // (a missile is another matter: close in, the blast comes through the walls)
+    if (up || indoorAt(player.pos.x, player.pos.z)) dmg *= W ? (dp < core ? 0.6 : 0.25) : 0.15;
     else if (findCover(player.pos.x, player.pos.z, 1.4)) dmg *= 0.5;
     lastShellHit = Math.round(dmg);
     player.hp -= dmg;
@@ -1027,6 +1046,394 @@ function updateShells(dt: number) {
   }
 }
 let lastShellHit = 0;
+// ---------- v24.22 fighting from captured armour: the turret follows the mouse, a shot goes to the first thing it meets ----------
+const avStat = { shots: 0, kills: 0, hullHits: 0 };
+let avHpAt = 100;
+const avTracer = new THREE.LineSegments(
+  new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3)),
+  new THREE.LineBasicMaterial({ color: 0xffd98a, transparent: true, opacity: 0.95 }),
+);
+avTracer.frustumCulled = false;
+avTracer.visible = false;
+let avTracerT = 0;
+function avControl(v: NonNullable<typeof drive.cur>, dt: number) {
+  const gun = v.gun!;
+  if (!avTracer.parent) scene.add(avTracer);
+  if (avTracerT > 0 && (avTracerT -= dt) <= 0) avTracer.visible = false;
+  const can = avTick(gun, dt);
+  // the turret traverses at its own speed towards the mouse (or the nearest foe on a phone)
+  ray.setFromCamera(mouse, camera);
+  ray.ray.intersectPlane(plane, aimPt);
+  if (MB.fire) {
+    const e = nearestFoe(60);
+    if (e) aimPt.set(e.pos.x, 0, e.pos.z);
+  }
+  const want = Math.atan2(aimPt.x - v.pos.x, aimPt.z - v.pos.z);
+  const L = AV_LOADOUT[v.kind as keyof typeof AV_LOADOUT];
+  const tur = v.tur!;
+  const rel = want - v.hd;
+  const dr = Math.atan2(Math.sin(rel - tur.rotation.y), Math.cos(rel - tur.rotation.y));
+  tur.rotation.y += Math.sign(dr) * Math.min(Math.abs(dr), L.traverse * dt);
+  // a shot goes out along the barrel, not to the mouse: aim first, then fire
+  if ((clicking || MB.fire) && !panelOpen && can) {
+    const w = avFire(gun);
+    avStat.shots++;
+    const yaw = v.hd + tur.rotation.y;
+    const ux = Math.sin(yaw),
+      uz = Math.cos(yaw);
+    const o: V2 = [v.pos.x + ux * (v.s.L * 0.5), v.pos.z + uz * (v.s.L * 0.5)];
+    // walls and cover stop it first (the muzzle is at 1.9 m, so it clears a parked car close by)
+    let reach = w.range * shotRay(o, [o[0] + ux * w.range, o[1] + uz * w.range], 1.9, 1.2, 1.5);
+    let target: Sol | null = null;
+    for (const s of sols) {
+      if (s.state === 'dead' || !s.mesh.visible) continue;
+      const dx = s.pos.x - o[0],
+        dz = s.pos.z - o[1];
+      const along = dx * ux + dz * uz;
+      if (along < 0 || along > reach) continue;
+      if (Math.abs(dx * uz - dz * ux) < 0.75) ((reach = along), (target = s));
+    }
+    // and a hull in the way takes the round
+    let hull = false;
+    for (const a of armor?.list ?? []) {
+      if (a.dead) continue;
+      const dx = a.g.position.x - o[0],
+        dz = a.g.position.z - o[1];
+      const along = dx * ux + dz * uz;
+      if (along < 0 || along > reach) continue;
+      if (Math.abs(dx * uz - dz * ux) < 2.2) ((reach = along), (target = null), (hull = true));
+    }
+    const end = new THREE.Vector3(o[0] + ux * reach, 0.8, o[1] + uz * reach);
+    if (target) {
+      damageSol(target, w.dmg, false);
+      if (target.state === 'dead') avStat.kills++;
+    }
+    if (hull && w.antiArmor) {
+      avStat.hullHits++;
+      armor!.hit(end.x, end.z, w.antiArmor, true);
+    }
+    if (w.splash) {
+      if (w.splash > 4 || avStat.shots % 3 === 0) boom(scene, end, w.splash > 4 ? 2.2 : 0.5);
+      for (const s of sols) {
+        if (s === target || s.state === 'dead') continue;
+        const d = Math.hypot(s.pos.x - end.x, s.pos.z - end.z);
+        if (d < w.splash) damageSol(s, w.dmg * 0.5 * (1 - d / w.splash), false);
+      }
+    }
+    // tracer
+    const a = avTracer.geometry.attributes.position as THREE.BufferAttribute;
+    a.setXYZ(0, o[0], 1.9, o[1]);
+    a.setXYZ(1, end.x, end.y, end.z);
+    a.needsUpdate = true;
+    avTracer.visible = true;
+    avTracerT = 0.09;
+    AU.gunshot(w.sound, 0, false);
+    noise(v.pos.x, v.pos.z, w.noise, true);
+  }
+}
+/** v24.22 inside armour only one tenth of what would have hit you gets through; no bleeding */
+function avArmorShield() {
+  if (!drive.cur?.gun) {
+    avHpAt = player.hp;
+    return;
+  }
+  if (player.hp < avHpAt) player.hp = avHpAt - (avHpAt - player.hp) * 0.1;
+  player.bleed = false;
+  avHpAt = player.hp;
+}
+// ---------- v24.21 the war gets worse: distant gunfire, shelling, and now and then a rocket or a missile ----------
+// Radii and damage are rough game values scaled from public figures for warhead weight and tuned for play. Not a simulation.
+type WarWeapon = {
+  id: string;
+  name: string;
+  core: number;
+  wound: number;
+  coreDmg: number;
+  woundDmg: number;
+  big: number;
+  lead: number;
+};
+const WAR: Record<'mortar' | 'rocket' | 'srbm' | 'cruise', WarWeapon> = {
+  mortar: {
+    id: 'mortar',
+    name: tr('迫擊砲彈', 'Mortar round'),
+    core: 6,
+    wound: 18,
+    coreDmg: 85,
+    woundDmg: 50,
+    big: 1.4,
+    lead: 5,
+  },
+  rocket: {
+    id: 'rocket',
+    name: tr('遠程火箭彈', 'Long-range rocket'),
+    core: 16,
+    wound: 45,
+    coreDmg: 190,
+    woundDmg: 70,
+    big: 2.6,
+    lead: 8,
+  },
+  srbm: {
+    id: 'srbm',
+    name: tr('短程彈道飛彈', 'Short-range ballistic missile'),
+    core: 24,
+    wound: 70,
+    coreDmg: 240,
+    woundDmg: 80,
+    big: 4,
+    lead: 10,
+  },
+  cruise: {
+    id: 'cruise',
+    name: tr('巡弋飛彈', 'Cruise missile'),
+    core: 22,
+    wound: 62,
+    coreDmg: 230,
+    woundDmg: 75,
+    big: 3.6,
+    lead: 9,
+  },
+};
+const weaponDmg = (W: WarWeapon, d: number) =>
+  d < W.core
+    ? W.coreDmg * (1 - 0.4 * (d / W.core))
+    : d < W.wound
+      ? W.woundDmg * ((W.wound - d) / (W.wound - W.core))
+      : 0;
+const warStat = { level: 0, gunfire: 0, shells: 0, rockets: 0, missiles: 0, craters: 0 };
+/** the level at which shells start to fall: about the evening of the first day */
+const WAR_START = 0.1;
+let warGunT = 18,
+  warShellT = 160,
+  warBigT = 420,
+  warFireT = 0;
+/** 0 at the landing, 1 about a week in; a counter-offensive makes it hotter */
+const warLevel = () => clamp((gameMin / 1440 - 0.25) / 6 + liberated.size * 0.015, 0, 1);
+const warFires: { x: number; z: number; r: number; t: number }[] = [];
+/** where to bring it down: a ring around the player */
+function warSpot(minD: number, maxD: number): V2 {
+  const P = mapPos();
+  const a = Math.random() * Math.PI * 2,
+    d = minD + Math.random() * (maxD - minD);
+  return [P[0] + Math.cos(a) * d, P[1] + Math.sin(a) * d];
+}
+function warBarrage(n: number, p: V2) {
+  warStat.shells += n;
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283,
+      r = 3 + Math.random() * 16;
+    const q: V2 = [p[0] + Math.cos(a) * r, p[1] + Math.sin(a) * r];
+    shells.push({
+      t: WAR.mortar.lead + i * (0.9 + Math.random() * 1.2),
+      p: q,
+      k: WAR.mortar,
+      w: blastFx.warn(q[0], q[1], WAR.mortar.core, WAR.mortar.wound),
+    });
+  }
+}
+function warStrike(W: WarWeapon, p: V2) {
+  if (W.id === 'rocket') warStat.rockets++;
+  else warStat.missiles++;
+  shells.push({ t: W.lead, p, k: W, w: blastFx.warn(p[0], p[1], W.core, W.wound) });
+  siren(true, 'alert');
+  log(
+    getLanguage() === 'en'
+      ? `⚠ Air raid warning! ${W.name} incoming. Get indoors or out of the ring!`
+      : `⚠ 防空警報！${W.name}來襲，快躲進室內或離開紅圈！`,
+    '#f66',
+  );
+  slowDown(tr('防空警報', 'Air raid warning'));
+}
+/** what a big warhead leaves behind: a burning crater */
+function warImpact(W: WarWeapon, p: V2) {
+  if (W.id === 'mortar') return;
+  warStat.craters++;
+  // a big warhead throws fire and earth above the rooftops
+  const col = W.big * 5;
+  for (let i = 0; i < 26; i++) {
+    const a = Math.random() * 6.283,
+      r = Math.random() * W.core * 0.22,
+      y = 3 + Math.random() * col;
+    blastFx.fire.spawn({
+      k: 0,
+      x: p[0] + Math.cos(a) * r,
+      y,
+      z: p[1] + Math.sin(a) * r,
+      vy: 3 + Math.random() * 6,
+      life: 0.5 + Math.random() * 0.7,
+      s0: W.big * 1.1,
+      s1: W.big * 2.6,
+      a0: 0.85,
+    });
+    blastFx.smoke.spawn({
+      k: 2,
+      x: p[0] + Math.cos(a) * r,
+      y: y + 2,
+      z: p[1] + Math.sin(a) * r,
+      vy: 2 + Math.random() * 5,
+      age: -0.3 - Math.random() * 0.5,
+      life: 6 + Math.random() * 5,
+      s0: W.big * 1.2,
+      s1: W.big * 4,
+      a0: 0.9,
+    });
+  }
+  warFires.push({ x: p[0], z: p[1], r: W.core * 0.35, t: 45 });
+  if (warFires.length > 5) warFires.shift();
+  const d = Math.hypot(mapPos()[0] - p[0], mapPos()[1] - p[1]);
+  log(
+    getLanguage() === 'en'
+      ? `💥 ${W.name} hit about ${Math.round(d)} m from you. The ground shakes and windows blow in.`
+      : `💥 ${W.name}落在約 ${Math.round(d)} 公尺外，地面在晃，玻璃全碎了。`,
+    '#fa8',
+  );
+}
+function warTick(dt: number) {
+  const L = (warStat.level = warLevel());
+  // the war in the distance: bursts of small arms, more often as it goes on
+  if ((warGunT -= dt) <= 0) {
+    warGunT = (40 - 32 * L) * (0.6 + Math.random() * 0.8);
+    warStat.gunfire++;
+    const dist = 140 + Math.random() * 380;
+    const kind = Math.random() < 0.3 ? 'mg' : 'rifle';
+    const n = 3 + Math.floor(Math.random() * (5 + 10 * L));
+    const indoors = !!up || indoorAt(player.pos.x, player.pos.z);
+    for (let i = 0; i < n; i++)
+      setTimeout(() => AU.gunshot(kind as any, dist, indoors), i * (kind === 'mg' ? 90 : 170 + Math.random() * 240));
+  }
+  // burning craters
+  if (warFires.length && (warFireT -= dt) <= 0) {
+    warFireT = 0.28;
+    for (let i = warFires.length - 1; i >= 0; i--) {
+      const f = warFires[i];
+      f.t -= 0.28;
+      if (f.t <= 0) {
+        warFires.splice(i, 1);
+        continue;
+      }
+      const a = Math.random() * 6.283,
+        r = Math.random() * f.r;
+      const x = f.x + Math.cos(a) * r,
+        z = f.z + Math.sin(a) * r;
+      blastFx.fire.spawn({ k: 0, x, y: 0.5, z, vy: 1.6, life: 0.8, s0: 1.2, s1: 2.2, a0: 0.8 });
+      blastFx.smoke.spawn({ k: 2, x, y: 1.2, z, vy: 1.8, life: 4.5, s0: 1.8, s1: 6, a0: 0.42 });
+    }
+  }
+  // nothing falls on the first day, or while you are asleep with nobody on watch
+  if (L < WAR_START || player.sleeping) return;
+  if ((warShellT -= dt) <= 0) {
+    warShellT = (260 - 190 * L) * (0.7 + Math.random() * 0.6);
+    warBarrage(2 + Math.floor(Math.random() * (2 + 3 * L)), warSpot(30, 130));
+  }
+  if (L > 0.3 && (warBigT -= dt) <= 0) {
+    warBigT = (900 - 600 * L) * (0.7 + Math.random() * 0.6);
+    const r = Math.random();
+    const W = r < 0.55 ? WAR.rocket : r < 0.8 ? WAR.cruise : WAR.srbm;
+    // inside the wound ring only once the war is at its worst
+    warStrike(W, warSpot(W.core + 8 + (1 - L) * 60, 240));
+  }
+}
+// ---------- v24.20 hand grenades: thrown the way you face, a four-second-ish fuse, about 5 m lethal, 15 m wounding ----------
+const GREN = { core: 5, wound: 15, fuse: 3.5, range: 13, coreDmg: 95, woundDmg: 42, oldDud: 0.3 };
+const grenades: {
+  m: THREE.Mesh;
+  t: number;
+  fly: number;
+  flyT: number;
+  a: V2;
+  b: V2;
+  dud: boolean;
+  indoorP: boolean;
+}[] = [];
+let grenadeMat: THREE.Material | null = null;
+function playerThrow(k: string) {
+  if (!player.inv[k]) return;
+  player.inv[k]--;
+  if (player.inv[k] <= 0) delete player.inv[k];
+  const P = player.pos;
+  // it lands where you aim, as far as an arm can throw; it sails over low cover and stops at the first wall
+  const ax = aimPt.x - P.x,
+    az = aimPt.z - P.z,
+    al = Math.hypot(ax, az) || 1;
+  const ux = ax / al,
+    uz = az / al;
+  const want = clamp(al, 4, GREN.range);
+  const clear = shotRay([P.x, P.z], [P.x + ux * want, P.z + uz * want], 1.7, 1.7, 0.4);
+  const d = clear < 1 ? Math.max(1, want * clear - 0.4) : want;
+  grenadeMat ||= new THREE.MeshStandardMaterial({ color: 0x3a4a2e, roughness: 0.6 });
+  const m = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 6), grenadeMat);
+  m.scale.set(1, 1.25, 1);
+  m.castShadow = true;
+  scene.add(m);
+  grenades.push({
+    m,
+    t: GREN.fuse,
+    fly: 0.25 + d * 0.055,
+    flyT: 0,
+    a: [P.x, P.z],
+    b: [P.x + ux * d, P.z + uz * d],
+    dud: k === 'oldgrenade' && Math.random() < GREN.oldDud,
+    indoorP: false,
+  });
+  log(tr('你把手榴彈丟了出去！', 'You throw the grenade!'), '#ffd27a');
+  noise(P.x, P.z, 6);
+}
+/** can a blast reach q from p? A wall stops it, but low cover is blown over and a trunk or a post hides nobody */
+function blastReach(p: V2, q: V2) {
+  const dx = q[0] - p[0],
+    dz = q[1] - p[1],
+    L = Math.hypot(dx, dz) || 1;
+  const nx = (-dz / L) * 0.8,
+    nz = (dx / L) * 0.8;
+  return (
+    shotRay(p, q, 1.5, 1.5, 0) >= 1 ||
+    shotRay(p, [q[0] + nx, q[1] + nz], 1.5, 1.5, 0) >= 1 ||
+    shotRay(p, [q[0] - nx, q[1] - nz], 1.5, 1.5, 0) >= 1
+  );
+}
+function grenadeTick(dt: number) {
+  for (let i = grenades.length - 1; i >= 0; i--) {
+    const g = grenades[i];
+    g.t -= dt;
+    g.flyT = Math.min(g.fly, g.flyT + dt);
+    const f = g.flyT / g.fly;
+    g.m.position.set(
+      g.a[0] + (g.b[0] - g.a[0]) * f,
+      0.12 + 1.5 * 4 * f * (1 - f) + (1 - f) * 1.2,
+      g.a[1] + (g.b[1] - g.a[1]) * f,
+    );
+    if (g.t > 0) continue;
+    grenades.splice(i, 1);
+    scene.remove(g.m);
+    if (g.dud) {
+      log(tr('……沒有炸。放了太多年，它啞了。', '...Nothing. After so many years, it is a dud.'), '#ccc');
+      continue;
+    }
+    const p = new THREE.Vector3(g.b[0], 0.4, g.b[1]);
+    boom(scene, p, 0.9);
+    noise(p.x, p.z, 45);
+    for (const o of sols) {
+      if (o.state === 'dead') continue;
+      const dd = Math.hypot(o.pos.x - p.x, o.pos.z - p.z);
+      if (dd < GREN.wound && blastReach([p.x, p.z], [o.pos.x, o.pos.z]))
+        damageSol(o, dd < GREN.core ? 240 : GREN.woundDmg * 1.6 * ((GREN.wound - dd) / (GREN.wound - GREN.core)), true);
+    }
+    const dp = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
+    if (dp < GREN.wound && blastReach([p.x, p.z], [player.pos.x, player.pos.z])) {
+      const dmg =
+        dp < GREN.core
+          ? GREN.coreDmg * (1 - 0.4 * (dp / GREN.core))
+          : GREN.woundDmg * ((GREN.wound - dp) / (GREN.wound - GREN.core));
+      player.hp -= dmg;
+      player.rig.hurtT = 0.4;
+      if (dmg > 15 && !player.bleed) {
+        player.bleed = true;
+        log(tr('被破片擊中，流血了！', 'Fragments hit you. You are bleeding!'), '#f66');
+      }
+    }
+  }
+}
 // ---------- 國軍 (ROC) support: weapons unlock, radio call-in, final counter-offensive ----------
 const ROC = { unlocked: false, cd: 0, offensive: false, ended: false, n: 0 };
 let roc: RocSystem | null = null;
@@ -1317,6 +1724,20 @@ function setupArmor(c: V2) {
     },
     log,
     player: () => player.pos,
+    // v24.22 badly hurt: the crew bails out and leaves it where it stands, and it can be taken
+    bail: a => {
+      const P = a.g.position;
+      let sd = Math.floor(P.x * 13 + P.z * 7) | 1;
+      const r = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+      const v = drive.spawn(a.kind as DKind, P.x, P.z, a.g.rotation.y + Math.PI / 2, r, { eng: 0.4 });
+      log(
+        getLanguage() === 'en'
+          ? `The crew bails out of the ${v.s.name}! It can still be driven.`
+          : `${v.s.name}的乘員棄車逃了！這台還能開。`,
+        '#9f9',
+      );
+      return true;
+    },
   });
   const len = (r: { p: V2[] }) =>
     r.p.reduce((s, q, i) => (i ? s + Math.hypot(q[0] - r.p[i - 1][0], q[1] - r.p[i - 1][1]) : 0), 0);
@@ -1517,6 +1938,11 @@ function buildMap(data: any) {
     if (ob.fill) (b as any).fill = 1;
     const kind = CL.specialKind('', ob.s, ob.n);
     if (kind) (b as any).kind = kind;
+    // v24.20 invented police stations: not at any real address, spread by position, big enough to hold the rooms
+    else if (!ob.fill && A > 180 && A < 900) {
+      const ph = Math.abs(Math.sin(cx * 3.1 + cz * 7.7) * 43758.5453) % 1;
+      if (ph < 0.035) (b as any).kind = 'police';
+    }
     // door: longest edge
     let di = 0,
       dl = 0;
@@ -2051,6 +2477,17 @@ function rollLoot(type: string, r: () => number) {
       }
     }
   }
+  if (type === 'armory') {
+    // v24.20 a station's locker always holds a gun, and rounds for it
+    if (!items.t75p && !items.t65k2 && !items.t93 && !items.huntsg) items.t75p = 1;
+    for (const [g, a, n] of [
+      ['t75p', 'a9', 12],
+      ['t65k2', 'a556n', 30],
+      ['t93', 'a762n', 10],
+      ['huntsg', 'a12', 4],
+    ] as const)
+      if (items[g] && !items[a]) items[a] = n;
+  }
   return spoilRolled(items, r);
 }
 /**
@@ -2515,6 +2952,39 @@ const WRECK_LOOT: [string, number][][] = [
   ],
   [['carbat', 1]],
 ];
+/** v24.22 PLA vehicles left where they stopped: on the wide roads, far enough from the start that it takes finding them */
+function spawnAbandonedArmor(c: V2) {
+  let sd = 4177;
+  const r = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+  const kinds: DKind[] = ['mengshi', 'zbl08', 'zbd05', 'ztd05', 'mengshi', 'zbl08'];
+  const spots: { x: number; z: number; hd: number; d: number }[] = [];
+  for (const rd of roads) {
+    const w = ROADW[rd.t.replace('_link', '')] ?? 3;
+    if (w < 9) continue;
+    for (let i = 0; i < rd.p.length - 1; i++) {
+      const [ax, az] = rd.p[i],
+        [bx, bz] = rd.p[i + 1];
+      const L = Math.hypot(bx - ax, bz - az);
+      if (L < 18) continue;
+      const ux = (bx - ax) / L,
+        uz = (bz - az) / L;
+      const x = (ax + bx) / 2 - uz * (w / 2 - 2),
+        z = (az + bz) / 2 + ux * (w / 2 - 2);
+      const d = Math.hypot(x - c[0], z - c[1]);
+      if (d > 130 && d < 560 && !bldAt(x, z) && !onLandmark(x, z)) spots.push({ x, z, hd: Math.atan2(ux, uz), d });
+    }
+  }
+  spots.sort((a, b) => a.d - b.d);
+  for (let i = 0; i < kinds.length && spots.length; i++) {
+    // spread out along the distance from the start
+    const q = spots[Math.floor(((i + r() * 0.8) / kinds.length) * spots.length)];
+    const v = drive.spawn(kinds[i], q.x, q.z, q.hd, r);
+    if (drive.blocked(v, q.x, q.z, v.hd)) {
+      scene.remove(v.g);
+      drive.list.pop();
+    }
+  }
+}
 function spawnDrivables(c: V2) {
   let sd = 977;
   const r = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
@@ -4575,6 +5045,17 @@ let clicking = false;
 // v21.5.1 portrait thumb buttons: 打 held = fire at the nearest target, 撤 = retreat sprint for a moment
 const MB = { fire: false, retreat: 0, rn: 0 };
 addEventListener('keydown', e => {
+  // v24.22 in captured armour: V changes gun, R brings up a fresh box
+  if (drive.cur?.gun && !panelOpen) {
+    if (e.code === 'KeyV' && drive.cur.gun.guns.length > 1) {
+      drive.cur.gun.sel = (drive.cur.gun.sel + 1) % drive.cur.gun.guns.length;
+      return;
+    }
+    if (e.code === 'KeyR') {
+      avReload(drive.cur.gun);
+      return;
+    }
+  }
   // v22.4: Esc backs out of whatever is on top (modal → shop/ride → shelter → map → panel), else opens the pause menu
   if (e.code === 'Escape') {
     e.preventDefault();
@@ -5265,6 +5746,9 @@ function useItem(k: string) {
       player.thirst = clamp(player.thirst - 12, 0, 100);
       log(tr('肚子一陣絞痛⋯⋯拉肚子了。下次煮過再吃。', 'Stomach cramps... diarrhoea. Cook it next time.'), '#f99');
     }
+  } else if (k === 'grenade' || k === 'oldgrenade') {
+    playerThrow(k);
+    return;
   } else if (k === 'bucket') {
     if (indoorAt(player.pos.x, player.pos.z)) {
       log(
@@ -6901,6 +7385,7 @@ function update(dt: number) {
     if (jm > 0.12) mv.addScaledVector(f, -joy.y).addScaledVector(r, joy.x);
     drive.update(dt, mv, UT.power);
     const v = drive.cur;
+    if (v?.gun) avControl(v, dt);
     if (v) {
       player.pos.set(v.pos.x, 0, v.pos.z);
       player.mesh.position.set(v.pos.x, v.s.seatY - 0.45, v.pos.z);
@@ -7442,6 +7927,9 @@ function update(dt: number) {
   if (started && !PRO.on) taipeiSounds(dt);
   if (started && !PRO.on && !MP) rescueTick();
   if (started && !PRO.on) reclaimTick();
+  if (grenades.length) grenadeTick(dt);
+  avArmorShield();
+  if (started && !PRO.on && !MP) warTick(dt);
   if (rescueRig) animate(rescueRig.rig, 'idle', 0, dt);
   if (liaison) {
     const d = Math.hypot(player.pos.x - liaison.p[0], player.pos.z - liaison.p[1]);
@@ -7703,8 +8191,10 @@ function drawHud(inside: Bld | null) {
     pr.style.display = 'block';
     pr.textContent =
       getLanguage() === 'en'
-        ? `[E] Exit vehicle | ${drive.status(drive.cur)} | ${Math.round(Math.abs(drive.cur.v) * 3.6)} km/h`
-        : `[E] 下車｜${drive.status(drive.cur)}｜${Math.round(Math.abs(drive.cur.v) * 3.6)} km/h`;
+        ? `[E] Exit vehicle | ${drive.status(drive.cur)} | ${Math.round(Math.abs(drive.cur.v) * 3.6)} km/h` +
+          (drive.cur.gun ? ` | ${avStatus(drive.cur.gun)} | [V] Change gun [R] Reload` : '')
+        : `[E] 下車｜${drive.status(drive.cur)}｜${Math.round(Math.abs(drive.cur.v) * 3.6)} km/h` +
+          (drive.cur.gun ? `｜${avStatus(drive.cur.gun)}｜[V] 換武器 [R] 換箱` : '');
   } else if (!panelOpen && drive.nearest(player.pos)) {
     const v = drive.nearest(player.pos)!;
     pr.style.display = 'block';
@@ -8208,6 +8698,7 @@ async function boot() {
   setupRemnants(start!.c as V2);
   setupJapan(start!.c as V2);
   spawnDrivables(start!.c as V2);
+  spawnAbandonedArmor(start!.c as V2);
   buildJunctions();
   setupWreckage(start!.c as V2);
   await roadT.init();
@@ -9337,6 +9828,32 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.22 captured armour
+    avStat,
+    /** how far along a-b a round gets, 0..1 */
+    shotClear: (a: V2, b: V2) => shotRay(a, b, 1.9, 1.2, 1.5),
+    avStatusNow: () => (drive.cur?.gun ? avStatus(drive.cur.gun) : ''),
+    avSpawn: (kind: DKind, x: number, z: number, hd = 0) => {
+      let sd = 77;
+      const r = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+      return drive.spawn(kind, x, z, hd, r);
+    },
+    // v24.21 the war gets worse
+    war: () => ({ ...warStat, pending: shells.length, fires: warFires.length }),
+    WAR,
+    warStrike: (id: 'mortar' | 'rocket' | 'srbm' | 'cruise', x: number, z: number) => warStrike(WAR[id], [x, z]),
+    warBarrage: (n: number, x: number, z: number) => warBarrage(n, [x, z]),
+    warTickNow: (dt: number) => warTick(dt),
+    weaponDmg,
+    // v24.20 hands and the stations
+    losTest: (a: V2, b: V2) => blastReach(a, b),
+    grenades: () => grenades.map(g => ({ t: g.t, b: g.b, dud: g.dud })),
+    gren: GREN,
+    policeBlds: () =>
+      liveBlds()
+        .filter(b => (b as any).kind === 'police')
+        .map(b => ({ id: b.id, c: b.c, door: b.door?.p ?? null })),
+    armoryConts: () => conts.filter(c => c.label === '警局槍櫃').map(c => ({ id: c.id, p: c.p, items: c.items })),
     // v24.18 東三水街市場
     market: () =>
       market && {

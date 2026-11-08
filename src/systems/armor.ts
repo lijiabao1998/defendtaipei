@@ -110,7 +110,7 @@ function trackedHull(P: G[], D: G[]) {
   D.push(bx(0.08, 0.5, 2.6, 4.75, 1.8, 0, DARK)); // trim vane
   for (let i = 0; i < 3; i++) D.push(bx(0.5, 0.2, 0.4, -4.2, 1.95, -1 + i, DARK)); // rear hatches
 }
-function makeMesh(kind: ArmorKind) {
+export function makeMesh(kind: ArmorKind) {
   const P: G[] = [],
     D: G[] = [],
     T: G[] = [];
@@ -148,6 +148,8 @@ function makeMesh(kind: ArmorKind) {
   }
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, map: camo(), roughness: 0.85, metalness: 0.15 });
   const dmat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0.3 });
+  // v24.22 never cut away by the see-through cylinder: you may be sitting inside this one
+  mat.userData.noOcc = dmat.userData.noOcc = true;
   const g = new THREE.Group();
   const hull = new THREE.Mesh(boxUV(mergeGeometries(P)), mat),
     dk = new THREE.Mesh(mergeGeometries(D), dmat);
@@ -168,6 +170,7 @@ function makeMesh(kind: ArmorKind) {
   x.font = 'bold 40px sans-serif';
   x.fillText(String(100 + Math.floor(Math.random() * 800)), 10, 40);
   const nm = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false });
+  nm.userData.noOcc = true;
   for (const s of [-1, 1]) {
     const pl = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.38), nm);
     pl.position.set(
@@ -224,6 +227,8 @@ export class ArmorSystem {
       alert: (x: number, z: number) => void;
       log: (m: string, c?: string) => void;
       player: () => THREE.Vector3;
+      /** v24.22 the crew has abandoned it: true if it should leave the fight as something the player can take */
+      bail?: (a: Armor) => boolean;
     },
   ) {
     const g = new THREE.BufferGeometry();
@@ -316,6 +321,10 @@ export class ArmorSystem {
       }
       a.hp -= dmg;
       if (a.hp <= 0) this.kill(a);
+      else if (a.hp <= 30 && this.deps.bail?.(a)) {
+        this.scene.remove(a.g);
+        this.list.splice(this.list.indexOf(a), 1);
+      }
       return true;
     }
     return false;

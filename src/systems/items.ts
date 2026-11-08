@@ -301,7 +301,36 @@ export const ITEMS: Record<string, ItemDef> = {
     name: tr('制式手榴彈', 'Service grenade'),
     w: 0.6,
     kind: 'tool',
-    desc: tr('解放軍制式破片手榴彈（投擲功能尚未開放）', 'PLA fragmentation grenade (throwing is not yet available).'),
+    desc: tr(
+      '解放軍制式破片手榴彈。使用：朝面向丟出去，約 3.5 秒後爆炸',
+      'PLA fragmentation grenade. Use: throw it the way you face; it goes off after about 3.5 seconds.',
+    ),
+  },
+  // v24.20 what ordinary families keep
+  oldgrenade: {
+    name: tr('阿公留下的手榴彈', "Grandpa's old grenade"),
+    w: 0.5,
+    kind: 'tool',
+    desc: tr(
+      '阿公當兵時留下來的，鎖在櫃子裡幾十年。使用：朝面向丟出去。放太久了，不一定會炸',
+      'Grandpa kept it from his army days, locked in a cupboard for decades. Use: throw it the way you face. After so long it may not go off.',
+    ),
+  },
+  huntsg: {
+    name: tr('獵用霰彈槍', 'Hunting shotgun'),
+    w: 3.1,
+    kind: 'gun',
+    dmg: 120,
+    range: 13,
+    ammo: 'a12',
+    cap: 2,
+    noise: 62,
+    cd: 0.85,
+    cal: tr('18.4mm／12 號', '18.4mm / 12-gauge'),
+    desc: tr(
+      '部落裡長輩打山豬用的雙管獵槍，上來台北工作的族人帶在身邊。裝兩發，近距離很有力',
+      'A double-barrelled gun that tribal elders hunt boar with, kept by a relative who came to Taipei for work. Two shells, very strong up close.',
+    ),
   },
   helmet: {
     name: tr('解放軍凱夫拉頭盔', 'PLA Kevlar helmet'),
@@ -889,6 +918,10 @@ export const LOOT: Record<string, [string, number, number][]> = {
     ['cloth', 2, 1],
     ['seeds', 1, 1],
     ['umbrella', 1, 1],
+    // v24.20 rare: a family keepsake, a relative's hunting gun
+    ['oldgrenade', 0.28, 1],
+    ['huntsg', 0.18, 1],
+    ['a12', 0.3, 3],
     ['tmap', 1, 1],
     ['hose', 1, 1],
     ['can', 3, 2],
@@ -921,6 +954,18 @@ export const LOOT: Record<string, [string, number, number][]> = {
     ['a9', 5, 12],
     ['bandage', 2, 2],
     ['bat', 1, 1],
+  ],
+  // v24.20 the station's gun locker
+  armory: [
+    ['t75p', 4, 1],
+    ['a9', 6, 15],
+    ['t65k2', 2.5, 1],
+    ['a556n', 4, 30],
+    ['huntsg', 1.2, 1],
+    ['a12', 2, 6],
+    ['t93', 0.8, 1],
+    ['a762n', 1.4, 10],
+    ['bandage', 1.5, 2],
   ],
   // detailed fixtures
   fridge: [
