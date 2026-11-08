@@ -14,6 +14,7 @@ import * as THREE from 'three';
 import { FAST, fastCull, fastShowAll } from './fastscene';
 import { buildFacade } from '../map/facade';
 import { buildParks } from '../map/park';
+import { dressLots, lotMaterial, LOT_SHADOW, type LotResult } from '../map/lots';
 import { ArmorSystem, type ArmorKind } from '../systems/armor';
 import { Recon, boom, setBoomFx } from '../systems/drone';
 import { BlastFX } from '../systems/blastfx';
@@ -3306,6 +3307,7 @@ function spawnDrivables(c: V2) {
 }
 let lastHp = 100;
 let parks: any = null;
+let coreLots: LotResult | null = null;
 let gmap: GameMap | null = null;
 function mapIntelOutposts(lbl: string) {
   if (!gmap) return;
@@ -9011,6 +9013,51 @@ async function boot() {
     R: 110,
   });
   console.log('parks', JSON.stringify(parks));
+  // v24.25 what grows on the core's open ground, before the navigation grid so that it knows about the fences.
+  // In blocks of a few hundred metres, each one draw call: fine enough to leave most of it out, coarse enough for a phone.
+  {
+    const NB = 4;
+    const W = (CORE.maxx - CORE.minx) / NB,
+      D = (CORE.maxz - CORE.minz) / NB;
+    const all: LotResult = {
+      geo: null,
+      segs: [],
+      stats: { veg: 0, weeds: 0, park: 0, corner: 0, slab: 0, cells: 0, tris: 0 },
+      stops: [],
+    };
+    const mat = lotMaterial();
+    for (let a = 0; a < NB; a++)
+      for (let b = 0; b < NB; b++) {
+        const L = dressLots({
+          x0: CORE.minx + a * W,
+          x1: CORE.minx + (a + 1) * W,
+          z0: CORE.minz + b * D,
+          z1: CORE.minz + (b + 1) * D,
+          roads: roads.map(r => ({ p: r.p, w: ROADW[r.t.replace('_link', '')] ?? 3 })),
+          seed: 11 + a * 5 + b,
+          maxTris: 10000,
+          taken: (x, z) =>
+            !!bldAt(x, z) ||
+            onLandmark(x, z) ||
+            parks.covers(x, z) ||
+            !!huaxi?.covers(x, z) ||
+            !!market?.covers(x, z) ||
+            Math.hypot(x - start.c[0], z - start.c[1]) < 14,
+        });
+        for (const k of ['veg', 'weeds', 'park', 'corner', 'slab', 'cells', 'tris'] as const)
+          all.stats[k] += L.stats[k];
+        all.stops.push(...L.stops);
+        if (L.geo) {
+          const lm = new THREE.Mesh(L.geo, mat);
+          lm.castShadow = LOT_SHADOW;
+          lm.receiveShadow = true;
+          lm.userData.noChunk = true;
+          scene.add(lm);
+        }
+        for (const q of L.segs) addSeg({ a: q.a, b: q.b }, q.low);
+      }
+    coreLots = all;
+  }
   // navigation grid (built after all collision geometry exists)
   nav = new Nav(start.c[0] - 170, start.c[1] - 170, start.c[0] + 170, start.c[1] + 170, 0.5);
   for (const q of segs) nav.markSeg(q.a, q.b, 1);
@@ -9157,7 +9204,7 @@ async function boot() {
   });
   // v24.6 split the big core-wide merged meshes into 60 m pieces so off-screen parts are culled (src/core/chunk.ts)
   if (new URLSearchParams(location.search).get('chunk') !== '0')
-    chunkStats = chunkify(scene, { instanced: true, icell: 80, iminTris: 20000 });
+    chunkStats = chunkify(scene, { instanced: true, icell: 80, iminTris: 42000 }); // v24.25 trees have about twice the triangles now
   await prog(1, tr('完成', 'Done'));
   // v22.7.1 watchdog: if the title menu has not appeared shortly after loading, offer a clean reload
   setTimeout(() => {
@@ -10082,6 +10129,17 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.25 the empty lots
+    lots: () => ({ core: coreLots?.stats ?? null, tiles: district.lotStats }),
+    /** one of each kind, for looking at */
+    lotStops: () => {
+      const seen = new Map<string, number>();
+      return (coreLots?.stops ?? []).filter(q => {
+        const n = seen.get(q.kind) ?? 0;
+        seen.set(q.kind, n + 1);
+        return n < 2;
+      });
+    },
     // v24.24 helicopters
     heli: () => heli,
     heliStat,

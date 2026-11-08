@@ -82,6 +82,8 @@ export function buildParks(c: PCtx) {
     }
     if (cl.length >= 10) clusters.push(cl);
   }
+  const all = new Set<string>();
+  for (const cl of clusters) for (const [i, j] of cl) all.add(key(i, j));
   const V: { g: THREE.BufferGeometry; col: number }[] = [];
   const va = (g: THREE.BufferGeometry, col: number) => V.push({ g, col });
   const brick: THREE.BufferGeometry[] = [],
@@ -234,5 +236,11 @@ export function buildParks(c: PCtx) {
     c.scene.add(me);
   }
   forest.build(c.scene);
-  return { parks, lots, clusters: clusters.map(cl => [cx + cl[0][0] * S, cz + cl[0][1] * S]) };
+  return {
+    parks,
+    lots,
+    clusters: clusters.map(cl => [cx + cl[0][0] * S, cz + cl[0][1] * S]),
+    /** v24.25 this ground is a park or a car park already */
+    covers: (x: number, z: number) => all.has(key(Math.round((x - cx) / S), Math.round((z - cz) / S))),
+  };
 }
