@@ -52,6 +52,10 @@ export type DEnter = {
   pts: V2[];
   h: number;
   type: 'home';
+  /** v24.28 shut in on every side: its door is in the wall it shares with this building (index in the tile data) */
+  via?: number;
+  /** v24.28 doorways other buildings have into this one, through a shared wall (world) */
+  holes?: [V2, V2][];
   /** v23.6 public building kind (school, clinic, temple, market, police, office) from the OSM tags, if any */
   kind?: Use;
   minx: number;
@@ -82,6 +86,7 @@ export type TileInfo = {
   enter: DEnter[];
   /** v24.1 footprints built in this tile / how many became enterable */
   nB: number;
+  noDoor: { bi: number; c: V2; why: string; area: number; n: number }[];
 };
 type Seg = { a: V2; b: V2; low?: boolean };
 export type DistrictDeps = {
@@ -126,6 +131,8 @@ export const LOAD_R = PHONE ? 340 : 520,
 export const ENTER_P = 1,
   ENTER_CAP = 400,
   DOOR_W = 1.4,
+  /** v24.28 the narrowest room that gets a door: a person is 0.7 m across */
+  ENTER_MIN = 1.2,
   CUT_M = 1.0;
 const DOOR_H = 2.4,
   INSET = 0.1,
@@ -453,6 +460,16 @@ export class District {
   *enterables() {
     for (const t of this.tiles.values()) yield* t.info.enter;
   }
+  /** why the last planEnter said no */
+  private whyNot = '';
+  /** would this door have been given before v24.28? (rooms of 3 m and more) */
+  private oldRule(e: DEnter) {
+    return e.ub[1] - e.ub[0] - 2 * CUT_M >= 3 && e.ub[3] - CUT_M >= 3;
+  }
+  /** v24.28 footprints of the loaded tiles that got no door, and why */
+  *noDoors() {
+    for (const t of this.tiles.values()) yield* t.info.noDoor;
+  }
   /** v24.1 coverage over the loaded tiles: footprints built, enterable, back doors */
   enterStats() {
     let n = 0,
@@ -473,6 +490,12 @@ export class District {
    * v23.3 decide whether a footprint becomes enterable and where its street door goes. Uses its own random stream
    * (er) so the rest of the tile's deterministic content keeps its sequence.
    */
+  /**
+   * the door of a building. First the way it has always been chosen (the longest street front, else the longest wall on open
+   * ground, at a place along it drawn from `er`), so that every door that was there stays where it was. v24.28: if that gives
+   * none, or one that `ok` turns down (it opens into the neighbour), every other wall and several places along each are tried,
+   * from the building's own random stream so that `er` is consumed exactly as before.
+   */
   private planEnter(
     key: string,
     bi: number,
@@ -483,11 +506,17 @@ export class District {
     er: () => number,
     kind: Use | null,
     free?: (x: number, z: number) => boolean,
-  ) {
+    ok?: (e: DEnter) => boolean,
+    retry = true,
+    party?: { edge: number; t0: number; into: number },
+  ): { e: DEnter; first: boolean } | null {
     // v23.6 public buildings (schools, hospitals, temples, markets, stations, offices) are always enterable,
     // and may be big; v24.1 so is every ordinary building (ENTER_P = 1), whatever its size or height
     const roll = er();
+    this.whyNot = 'small';
     if (area < 12 || roll >= ENTER_P) return null;
+    type Edge = { i: number; L: number; ux: number; uz: number; street: boolean; open: number };
+    const edges: Edge[] = [];
     let best = -1,
       bl = 0,
       back = -1,
@@ -496,7 +525,7 @@ export class District {
       const a = pts[i],
         c = pts[(i + 1) % pts.length];
       const L = Math.hypot(c[0] - a[0], c[1] - a[1]);
-      if (L < 2.4) continue;
+      if (L < DOOR_W + 0.2) continue;
       const ux = (c[0] - a[0]) / L,
         uz = (c[1] - a[1]) / L;
       let nx = uz,
@@ -504,68 +533,130 @@ export class District {
       const mx = (a[0] + c[0]) / 2,
         mz = (a[1] + c[1]) / 2;
       if (pip([mx + nx * 0.3, mz + nz * 0.3], pts)) ((nx = -nx), (nz = -nz));
-      if (L >= 3.6 && this.roadDist(mx + nx * 3, mz + nz * 3) <= 3) {
+      const street = this.roadDist(mx + nx * 3, mz + nz * 3) <= 3;
+      // open ground outside: 2 = room to spare (a 1.6 m 防火巷), 1 = enough to squeeze by, 0 = a wall
+      const open = !free
+        ? 0
+        : free(mx + nx * 0.8, mz + nz * 0.8) && free(mx + nx * 1.4, mz + nz * 1.4)
+          ? 2
+          : free(mx + nx * 0.45, mz + nz * 0.45) && free(mx + nx * 0.85, mz + nz * 0.85)
+            ? 1
+            : 0;
+      edges.push({ i, L, ux, uz, street, open });
+      if (L < 2.4) continue;
+      if (L >= 3.6 && street) {
         if (L > bl) ((bl = L), (best = i));
         continue;
       }
-      // v24.1 back door: an edge whose outside (0.8 m and 1.4 m out — a 1.6 m 防火巷 is enough) is open ground
-      if (free && free(mx + nx * 0.8, mz + nz * 0.8) && free(mx + nx * 1.4, mz + nz * 1.4) && L > backL)
-        ((backL = L), (back = i));
+      // v24.1 back door: an edge whose outside (0.8 m and 1.4 m out) is open ground
+      if (open === 2 && L > backL) ((backL = L), (back = i));
     }
     if (best < 0 && back >= 0) ((best = back), (bl = backL));
-    if (best < 0) return null;
-    const a = pts[best],
-      c = pts[(best + 1) % pts.length];
-    const ux = (c[0] - a[0]) / bl,
-      uz = (c[1] - a[1]) / bl;
-    const t0 = 0.7 + er() * Math.max(0, bl - DOOR_W - 1.4);
-    const d0: V2 = [a[0] + ux * t0, a[1] + uz * t0],
-      d1: V2 = [a[0] + ux * (t0 + DOOR_W), a[1] + uz * (t0 + DOOR_W)];
-    const O: V2 = [(d0[0] + d1[0]) / 2, (d0[1] + d1[1]) / 2];
-    let N: V2 = [-uz, ux];
-    if (!pip([O[0] + N[0] * 0.6, O[1] + N[1] * 0.6], pts)) N = [uz, -ux];
-    if (!pip([O[0] + N[0] * 0.6, O[1] + N[1] * 0.6], pts)) return null;
-    const U: V2 = [N[1], -N[0]]; // so that N = (-Uz, Ux), the planner's right-handed frame
-    let umin = 1e9,
-      umax = -1e9,
-      vmin = 1e9,
-      vmax = -1e9;
-    for (const q of pts) {
-      const du = (q[0] - O[0]) * U[0] + (q[1] - O[1]) * U[1],
-        dv = (q[0] - O[0]) * N[0] + (q[1] - O[1]) * N[1];
-      umin = Math.min(umin, du);
-      umax = Math.max(umax, du);
-      vmin = Math.min(vmin, dv);
-      vmax = Math.max(vmax, dv);
-    }
-    if (umax - umin < 3 || vmax < 3) return null;
     const xs = pts.map(q => q[0]),
       zs = pts.map(q => q[1]);
     const id = hash32('dt23e:' + key + ':' + bi);
-    const street = this.roadDist(O[0] - N[0] * 3, O[1] - N[1] * 3) < 5;
-    const e: DEnter = {
-      key,
-      bi,
-      id,
-      pts,
-      h,
-      type: 'home',
-      kind: kind ?? undefined,
-      minx: Math.min(...xs),
-      maxx: Math.max(...xs),
-      minz: Math.min(...zs),
-      maxz: Math.max(...zs),
-      c: [xs.reduce((s, v) => s + v, 0) / xs.length, zs.reduce((s, v) => s + v, 0) / zs.length],
-      door: { p: O, a: d0, c: d1 },
-      use: 'home',
-      street,
-      edge: best,
-      O,
-      U,
-      ub: [umin - CUT_M, umax + CUT_M, vmin - CUT_M, vmax + CUT_M],
+    /** a door on wall `ei`, starting `t0` along it */
+    const doorAt = (ei: number, t0: number, given = false): DEnter | null => {
+      const a = pts[ei],
+        c = pts[(ei + 1) % pts.length];
+      const L = Math.hypot(c[0] - a[0], c[1] - a[1]);
+      const ux = (c[0] - a[0]) / L,
+        uz = (c[1] - a[1]) / L;
+      const d0: V2 = [a[0] + ux * t0, a[1] + uz * t0],
+        d1: V2 = [a[0] + ux * (t0 + DOOR_W), a[1] + uz * (t0 + DOOR_W)];
+      const O: V2 = [(d0[0] + d1[0]) / 2, (d0[1] + d1[1]) / 2];
+      let N: V2 = [-uz, ux];
+      if (!pip([O[0] + N[0] * 0.6, O[1] + N[1] * 0.6], pts)) N = [uz, -ux];
+      this.whyNot = 'door not inside';
+      if (!pip([O[0] + N[0] * 0.6, O[1] + N[1] * 0.6], pts)) return null;
+      const U: V2 = [N[1], -N[0]]; // so that N = (-Uz, Ux), the planner's right-handed frame
+      let umin = 1e9,
+        umax = -1e9,
+        vmin = 1e9,
+        vmax = -1e9;
+      for (const q of pts) {
+        const du = (q[0] - O[0]) * U[0] + (q[1] - O[1]) * U[1],
+          dv = (q[0] - O[0]) * N[0] + (q[1] - O[1]) * N[1];
+        umin = Math.min(umin, du);
+        umax = Math.max(umax, du);
+        vmin = Math.min(vmin, dv);
+        vmax = Math.max(vmax, dv);
+      }
+      // v24.28 down to a shed a person can just stand in (was 3 m): clutter.ts gives those a carton and nothing else
+      this.whyNot = `thin ${(umax - umin).toFixed(1)}x${vmax.toFixed(1)}`;
+      if (umax - umin < ENTER_MIN || vmax < ENTER_MIN) return null;
+      const street = this.roadDist(O[0] - N[0] * 3, O[1] - N[1] * 3) < 5;
+      const e: DEnter = {
+        key,
+        bi,
+        id,
+        pts,
+        h,
+        type: 'home',
+        kind: kind ?? undefined,
+        minx: Math.min(...xs),
+        maxx: Math.max(...xs),
+        minz: Math.min(...zs),
+        maxz: Math.max(...zs),
+        c: [xs.reduce((q, v) => q + v, 0) / xs.length, zs.reduce((q, v) => q + v, 0) / zs.length],
+        door: { p: O, a: d0, c: d1 },
+        use: 'home',
+        street,
+        edge: ei,
+        O,
+        U,
+        ub: [umin - CUT_M, umax + CUT_M, vmin - CUT_M, vmax + CUT_M],
+      };
+      e.use = useOf(e, street, { seed: id });
+      if (!given && ok && !ok(e)) {
+        this.whyNot = 'door into a neighbour';
+        return null;
+      }
+      return e;
     };
-    e.use = useOf(e, street, { seed: id });
-    return e;
+    // as it has always been
+    if (best >= 0) {
+      const t0 = 0.7 + er() * Math.max(0, bl - DOOR_W - 1.4);
+      // (the old rule was 3 m: a door that only passes the new one is a new door, and says so)
+      const e = doorAt(best, t0);
+      if (e) return { e, first: true };
+    } else this.whyNot = 'no edge';
+    if (!retry) return null;
+    // every other wall: the street first, then open ground, then a gap wide enough to squeeze by; long walls first
+    const why = this.whyNot;
+    const lr = seeded('dt28:' + key + ':' + bi);
+    const rank = (q: Edge) => (q.street && q.open ? 3 : q.open === 2 ? 2 : q.open === 1 ? 1 : 0);
+    const cand = edges.filter(q => rank(q) > 0).sort((a, c) => rank(c) - rank(a) || c.L - a.L);
+    for (const q of cand) {
+      const slack = q.L - DOOR_W;
+      const ts =
+        slack < 1.4
+          ? [slack / 2]
+          : [
+              0.7 + lr() * (slack - 1.4),
+              slack / 2,
+              0.7,
+              slack - 0.7,
+              0.7 + lr() * (slack - 1.4),
+              0.7 + lr() * (slack - 1.4),
+            ];
+      for (const t0 of ts) {
+        const e = doorAt(q.i, t0);
+        if (e) return { e, first: false };
+      }
+    }
+    // v24.28 shut in by its neighbours on every side: through the wall it shares with one of them
+    if (party) {
+      const e = doorAt(party.edge, party.t0, true);
+      if (e) {
+        e.street = false;
+        e.via = party.into;
+        return { e, first: false };
+      }
+    }
+    if (!cand.length) this.whyNot = 'shut in' + (why.startsWith('no edge') ? '' : '; ' + why);
+    else this.whyNot += ` (${cand.length} walls tried)`;
+    return null;
   }
   /** distance to nearest loaded/cached district road edge (centre distance minus half width) */
   private kept: ReturnType<typeof District.keepOut> | null = null;
@@ -795,15 +886,153 @@ export class District {
           .map(o => {
             const xs = o.p.map(q => q[0]),
               zs = o.p.map(q => q[1]);
-            return { p: o.p, x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };
+            let ar = 0;
+            for (let q = 0; q < o.p.length; q++) {
+              const a = o.p[q],
+                c = o.p[(q + 1) % o.p.length];
+              ar += a[0] * c[1] - c[0] * a[1];
+            }
+            return {
+              p: o.p,
+              x0: Math.min(...xs),
+              x1: Math.max(...xs),
+              z0: Math.min(...zs),
+              z1: Math.max(...zs),
+              ar: Math.abs(ar / 2),
+            };
           }),
       ),
     );
     const otherAt = (x: number, z: number, self: V2[]) =>
       near.some(o => o.p !== self && x > o.x0 && x < o.x1 && z > o.z0 && z < o.z1 && pip([x, z], o.p));
+    /**
+     * v24.28 OSM draws some buildings in parts, one outline inside another. The smaller one whose middle lies in a bigger one
+     * is part of that building, not a building of its own: it gets no door and is not counted as one. (Before, the bigger one
+     * could lose its door too, when its own middle happened to fall inside the part.)
+     */
+    const partOf = (x: number, z: number, self: V2[]) => {
+      const me = near.findIndex(o => o.p === self);
+      const mine = me < 0 ? 0 : near[me].ar;
+      return near.some(
+        (o, k) =>
+          o.p !== self &&
+          (o.ar > mine || (o.ar === mine && k < me)) &&
+          x > o.x0 &&
+          x < o.x1 &&
+          z > o.z0 &&
+          z < o.z1 &&
+          pip([x, z], o.p),
+      );
+    };
+    // v24.28 a building with no wall on open ground (every side is a neighbour) gets its door in a wall it shares with a
+    // neighbour that has a way out, and that neighbour's wall is opened at the same place. Geometry only: no random numbers.
+    const party = new Map<number, { edge: number; t0: number; into: number }>();
+    const holes = new Map<number, [V2, V2][]>();
+    {
+      const foot = td.b.map(o => {
+        if (o.p.length < 3) return null;
+        let ar = 0;
+        for (let q = 0; q < o.p.length; q++)
+          ar += o.p[q][0] * o.p[(q + 1) % o.p.length][1] - o.p[(q + 1) % o.p.length][0] * o.p[q][1];
+        ar = Math.abs(ar / 2);
+        if (ar < 12 || ar > 8000) return null;
+        const mx = o.p.reduce((q, v) => q + v[0], 0) / o.p.length,
+          mz = o.p.reduce((q, v) => q + v[1], 0) / o.p.length;
+        if (partOf(mx, mz, o.p)) return null;
+        const xs = o.p.map(q => q[0]),
+          zs = o.p.map(q => q[1]);
+        return { p: o.p, x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };
+      });
+      /** which building of this tile stands here (not `self`) */
+      const hit = (x: number, z: number, self: number) => {
+        for (let k = 0; k < foot.length; k++) {
+          const f = foot[k];
+          if (f && k !== self && x > f.x0 && x < f.x1 && z > f.z0 && z < f.z1 && pip([x, z], f.p)) return k;
+        }
+        return -1;
+      };
+      const walls = (pts: V2[]) => {
+        const out: { i: number; L: number; ux: number; uz: number; nx: number; nz: number }[] = [];
+        for (let i = 0; i < pts.length; i++) {
+          const a = pts[i],
+            c = pts[(i + 1) % pts.length];
+          const L = Math.hypot(c[0] - a[0], c[1] - a[1]);
+          if (L < DOOR_W + 0.2) continue;
+          const ux = (c[0] - a[0]) / L,
+            uz = (c[1] - a[1]) / L;
+          let nx = uz,
+            nz = -ux;
+          if (pip([(a[0] + c[0]) / 2 + nx * 0.3, (a[1] + c[1]) / 2 + nz * 0.3], pts)) ((nx = -nx), (nz = -nz));
+          out.push({ i, L, ux, uz, nx, nz });
+        }
+        return out;
+      };
+      const shut = new Set<number>();
+      foot.forEach((f, k) => {
+        if (!f) return;
+        const open = walls(f.p).some(w => {
+          const a = f.p[w.i];
+          const mx = a[0] + (w.ux * w.L) / 2,
+            mz = a[1] + (w.uz * w.L) / 2;
+          return !otherAt(mx + w.nx * 0.45, mz + w.nz * 0.45, f.p) && !otherAt(mx + w.nx * 0.85, mz + w.nz * 0.85, f.p);
+        });
+        if (!open) shut.add(k);
+      });
+      /** a straight wall of building k that runs along both of these points */
+      const along = (k: number, d0: V2, d1: V2) =>
+        foot[k]!.p.some((a, i, pts) => {
+          const c = pts[(i + 1) % pts.length];
+          const L = Math.hypot(c[0] - a[0], c[1] - a[1]);
+          if (L < DOOR_W) return false;
+          const ux = (c[0] - a[0]) / L,
+            uz = (c[1] - a[1]) / L;
+          return [d0, d1].every(q => {
+            const t = (q[0] - a[0]) * ux + (q[1] - a[1]) * uz;
+            const off = Math.abs((q[0] - a[0]) * uz - (q[1] - a[1]) * ux);
+            return off < 0.35 && t > 0.05 && t < L - 0.05;
+          });
+        });
+      // outwards from the buildings that have a way out, a ring at a time
+      for (let round = 0; round < 5 && shut.size; round++) {
+        const found: [number, { edge: number; t0: number; into: number }, V2, V2][] = [];
+        for (const k of shut) {
+          const f = foot[k]!;
+          const ws = walls(f.p).sort((a, c) => c.L - a.L);
+          search: for (const w of ws) {
+            const a = f.p[w.i];
+            const slack = w.L - DOOR_W;
+            for (const t0 of slack < 0.5 ? [slack / 2] : [slack / 2, 0.2, slack - 0.2, slack * 0.25, slack * 0.75]) {
+              const d0: V2 = [a[0] + w.ux * t0, a[1] + w.uz * t0],
+                d1: V2 = [a[0] + w.ux * (t0 + DOOR_W), a[1] + w.uz * (t0 + DOOR_W)];
+              const ox = (d0[0] + d1[0]) / 2,
+                oz = (d0[1] + d1[1]) / 2;
+              const B = hit(ox + w.nx * 0.3, oz + w.nz * 0.3, k);
+              if (B < 0 || shut.has(B)) continue;
+              // the whole width of the door gives onto that one neighbour, with room to stand beyond it
+              if (
+                hit(d0[0] + w.nx * 0.3, d0[1] + w.nz * 0.3, k) !== B ||
+                hit(d1[0] + w.nx * 0.3, d1[1] + w.nz * 0.3, k) !== B
+              )
+                continue;
+              if (hit(ox + w.nx * 0.9, oz + w.nz * 0.9, k) !== B) continue;
+              if (!pip([ox - w.nx * 0.6, oz - w.nz * 0.6], f.p) || !along(B, d0, d1)) continue;
+              found.push([k, { edge: w.i, t0, into: B }, d0, d1]);
+              break search;
+            }
+          }
+        }
+        if (!found.length) break;
+        for (const [k, d, d0, d1] of found) {
+          shut.delete(k);
+          party.set(k, d);
+          for (const q of [k, d.into]) (holes.get(q) || holes.set(q, []).get(q)!).push([d0, d1]);
+        }
+      }
+    }
     // v23.3 enterable buildings (own random stream so the rest of the tile keeps its deterministic sequence)
     const er = seeded('dt23e:' + key);
     const enter: DEnter[] = [];
+    const noDoor: { bi: number; c: V2; why: string; area: number; n: number }[] = [];
     let nB = 0;
     /** points just outside each street door: keep parked scooters out of the doorway */
     const doorOut: V2[] = [];
@@ -857,8 +1086,15 @@ export class District {
       const h = GF + (lv - 1) * FH;
       const tint = WALLTINT[Math.floor(rnd() * WALLTINT.length)];
       const awn = AWN[Math.floor(rnd() * AWN.length)];
-      nB++;
-      let ent =
+      const cx0 = pts.reduce((q, v) => q + v[0], 0) / pts.length,
+        cz0 = pts.reduce((q, v) => q + v[1], 0) / pts.length;
+      const part = partOf(cx0, cz0, pts);
+      if (!part) nB++;
+      // a door must not open into a neighbour, nor into the part of this building that another outline covers
+      const doorOk = (e: DEnter) =>
+        !otherAt(e.door.p[0] + e.U[1] * 0.8, e.door.p[1] - e.U[0] * 0.8, pts) &&
+        !otherAt(e.door.p[0] - e.U[1] * 0.8, e.door.p[1] + e.U[0] * 0.8, pts);
+      const planned =
         enter.length < ENTER_CAP
           ? this.planEnter(
               key,
@@ -870,16 +1106,24 @@ export class District {
               er,
               specialKind(b.k, b.s, b.n),
               (x, z) => !otherAt(x, z, pts),
+              doorOk,
+              !part,
+              party.get(bi),
             )
           : null;
-      // not when the outline sits inside another one (overlapping OSM parts) or the door opens into a neighbour
-      if (
-        ent &&
-        (otherAt(ent.c[0], ent.c[1], pts) ||
-          otherAt(ent.door.p[0] + ent.U[1] * 0.8, ent.door.p[1] - ent.U[0] * 0.8, pts) ||
-          otherAt(ent.door.p[0] - ent.U[1] * 0.8, ent.door.p[1] + ent.U[0] * 0.8, pts))
-      )
-        ent = null;
+      const ent = part ? null : (planned?.e ?? null);
+      const myHoles = holes.get(bi) ?? [];
+      if (ent && myHoles.length) ent.holes = myHoles;
+      // what `er` gave before this version, it gives now: a door that is new draws its floor from elsewhere
+      const old = !!planned?.first && !otherAt(cx0, cz0, pts) && this.oldRule(planned.e);
+      if (!ent && !part)
+        noDoor.push({
+          bi,
+          c: [cx0, cz0],
+          why: enter.length >= ENTER_CAP ? 'cap' : this.whyNot,
+          area: Math.abs(A / 2),
+          n: pts.length,
+        });
       const plaster = PLASTER[Math.floor(er() * PLASTER.length)];
       if (ent) {
         enter.push(ent);
@@ -888,7 +1132,7 @@ export class District {
         const fl = new THREE.ShapeGeometry(sh);
         fl.rotateX(-Math.PI / 2);
         fl.translate(0, 0.03, 0);
-        tileG[Math.floor(er() * tileG.length)].push(worldUV(fl, 1));
+        tileG[Math.floor((old ? er() : (ent.id % 9973) / 9973) * tileG.length)].push(worldUV(fl, 1));
       }
       let s0 = 0;
       for (let i = 0; i < pts.length; i++) {
@@ -908,23 +1152,58 @@ export class District {
           XX = nz,
           XZ = -nx; // local +x in world
         const isDoor = !!ent && ent.edge === i;
-        // street wall: v23.3 split around the doorway of an enterable building
-        const runs: [V2, V2][] = isDoor
-          ? [
-              [[a[0], a[1]], ent!.door.a],
-              [ent!.door.c, [c[0], c[1]]],
-            ]
-          : [
-              [
-                [a[0], a[1]],
-                [c[0], c[1]],
-              ],
-            ];
-        for (const [p, q] of runs) {
-          const seg: Seg = { a: p, b: q };
-          segs.push(seg);
-          this.d.addSeg(seg);
+        // street wall: v23.3 split around the doorway of an enterable building; v24.28 and around any doorway a
+        // neighbour has through this wall. `cuts` are the openings along the wall in metres from a, `solid` what is left
+        const along = (q: V2) => (q[0] - a[0]) * ux + (q[1] - a[1]) * uz;
+        const at = (t: number): V2 => [a[0] + ux * t, a[1] + uz * t];
+        const cuts: [number, number][] = [];
+        for (const [h0, h1] of myHoles) {
+          const off = (q: V2) => Math.abs((q[0] - a[0]) * uz - (q[1] - a[1]) * ux);
+          const t0 = along(h0),
+            t1 = along(h1);
+          if (off(h0) < 0.35 && off(h1) < 0.35 && Math.min(t0, t1) > 0.02 && Math.max(t0, t1) < L - 0.02)
+            cuts.push([Math.min(t0, t1), Math.max(t0, t1)]);
         }
+        const partyCut = cuts.length > 0;
+        if (isDoor) cuts.push([along(ent!.door.a), along(ent!.door.c)].sort((x, y) => x - y) as [number, number]);
+        cuts.sort((x, y) => x[0] - y[0]);
+        for (let k = cuts.length - 1; k > 0; k--)
+          if (cuts[k][0] <= cuts[k - 1][1] + 0.05) {
+            cuts[k - 1][1] = Math.max(cuts[k - 1][1], cuts[k][1]);
+            cuts.splice(k, 1);
+          }
+        const solid: [number, number][] = [];
+        {
+          let t = 0;
+          for (const [c0, c1] of cuts) {
+            if (c0 - t > 0.02) solid.push([t, c0]);
+            t = c1;
+          }
+          if (L - t > 0.02) solid.push([t, L]);
+        }
+        // (the same points as ever where there is only its own door, or no opening at all)
+        const runs: [V2, V2][] = !partyCut
+          ? isDoor
+            ? [
+                [[a[0], a[1]], ent!.door.a],
+                [ent!.door.c, [c[0], c[1]]],
+              ]
+            : [
+                [
+                  [a[0], a[1]],
+                  [c[0], c[1]],
+                ],
+              ]
+          : solid.map(([t0, t1]) => [at(t0), at(t1)]);
+        // v24.28 a part of a bigger building (see partOf): where its wall stands inside that building there is no wall at ground
+        // level, or the room it stands in would be cut in two. Its upper floors are still drawn.
+        const inner = part && partOf(mx, mz, pts);
+        if (!inner)
+          for (const [p, q] of runs) {
+            const seg: Seg = { a: p, b: q };
+            segs.push(seg);
+            this.d.addSeg(seg);
+          }
         // rear light-well / back alley side: stairs, lean-tos, ACs, coloured cages, peeled brick.
         // v24.6 not on a wall that faces a neighbour across a 防火巷 (a footprint within 2.2 m): nobody sees it from
         // the street or from above, and dense blocks would otherwise pay for thousands of hidden cages
@@ -955,7 +1234,16 @@ export class District {
         const gH = Math.min(GF, h);
         const uAt = (q: V2) => (s0 + Math.hypot(q[0] - a[0], q[1] - a[1])) / 3.6;
         const out: V2 = [nx, nz];
-        if (isDoor) {
+        if (inner) {
+          // nothing below the first floor
+        } else if (partyCut) {
+          for (const [p, q] of runs) gr.push(wallQuad(p, q, 0, gH, [uAt(p), uAt(q), 0, 1], out, tint, 0.06));
+          if (gH > DOOR_H)
+            for (const [c0, c1] of cuts)
+              gr.push(
+                wallQuad(at(c0), at(c1), DOOR_H, gH, [uAt(at(c0)), uAt(at(c1)), DOOR_H / GF, 1], out, tint, 0.06),
+              );
+        } else if (isDoor) {
           const [d0, d1] = [ent!.door.a, ent!.door.c];
           gr.push(wallQuad([a[0], a[1]], d0, 0, gH, [uAt(a), uAt(d0), 0, 1], out, tint, 0.06));
           gr.push(wallQuad(d1, [c[0], c[1]], 0, gH, [uAt(d1), uAt(c), 0, 1], out, tint, 0.06));
@@ -974,11 +1262,17 @@ export class District {
           const ins = (q: V2): V2 => [q[0] - nx * INSET, q[1] - nz * INSET];
           const iq = (p: V2, q: V2, y0: number, y1: number) =>
             misc.push(wallQuad(ins(p), ins(q), y0, y1, [0, 1, 0, 1], inn, plaster, 0.03));
+          if (partyCut) {
+            for (const [p, q] of runs) iq(p, q, 0, gH);
+            if (gH > DOOR_H) for (const [c0, c1] of cuts) iq(at(c0), at(c1), DOOR_H, gH);
+          }
           if (isDoor) {
             const [d0, d1] = [ent.door.a, ent.door.c];
-            iq([a[0], a[1]], d0, 0, gH);
-            iq(d1, [c[0], c[1]], 0, gH);
-            iq(d0, d1, DOOR_H, gH);
+            if (!partyCut) {
+              iq([a[0], a[1]], d0, 0, gH);
+              iq(d1, [c[0], c[1]], 0, gH);
+              iq(d0, d1, DOOR_H, gH);
+            }
             // painted door frame + threshold (homes: red, shops: orange), like the core doors
             const fc = ent.use === 'home' ? 0xc0392b : 0xe8681c;
             const M = place(ent.door.p[0], 0, ent.door.p[1], angE, 1, 1, 1);
@@ -993,7 +1287,7 @@ export class District {
               misc,
             );
             doorOut.push([ent.door.p[0] + nx * 1.2, ent.door.p[1] + nz * 1.2]);
-          } else iq([a[0], a[1]], [c[0], c[1]], 0, gH);
+          } else if (!partyCut) iq([a[0], a[1]], [c[0], c[1]], 0, gH);
         }
         s0 += L;
         // street-facing edge → walk-up dressing
@@ -1247,7 +1541,7 @@ export class District {
       g,
       detail,
       segs,
-      info: { key, cx, cz, fronts, roads: td.r, rnd: seeded('dtL:' + key), enter, nB },
+      info: { key, cx, cz, fronts, roads: td.r, rnd: seeded('dtL:' + key), enter, nB, noDoor },
     };
   }
   // ---------- v24.15 the walk-in temple ----------

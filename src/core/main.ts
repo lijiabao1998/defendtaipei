@@ -4910,7 +4910,26 @@ type DClut = { g?: THREE.Group; segs: Seg[]; plan?: CL.Plan };
 const dClut = new Map<DEnter, DClut>();
 const dContId = (e: DEnter, n: number) => `t${e.key}:${1000 + e.bi * 64 + n}`;
 function dPlan(e: DEnter) {
-  return CL.plan(e, { pip, onRoad: () => e.street }, { seed: e.id, contId: n => dContId(e, n) });
+  // v24.28 nothing stands in a doorway a neighbour has into this room (plan coordinates: along the door wall, into the room)
+  const N: V2 = [-e.U[1], e.U[0]];
+  const reserve: [number, number, number, number][] = [];
+  for (const [h0, h1] of e.holes ?? []) {
+    const mx = (h0[0] + h1[0]) / 2 - e.O[0],
+      mz = (h0[1] + h1[1]) / 2 - e.O[1];
+    const u = mx * e.U[0] + mz * e.U[1],
+      v = mx * N[0] + mz * N[1];
+    // (its own door is one of them when it is the one shut in: the planner keeps that clear already)
+    if (Math.hypot(u, v) < 0.5) continue;
+    reserve.push([u - 1.3, v - 1.3, u + 1.3, v + 1.3]);
+    // and a way through from its own door to that doorway, a body and a bit wide
+    const L = Math.hypot(u, v - 0.8);
+    for (let t = 0; t <= L; t += 0.9) {
+      const cu = (u * t) / L,
+        cv = 0.8 + ((v - 0.8) * t) / L;
+      reserve.push([cu - 0.65, cv - 0.65, cu + 0.65, cv + 0.65]);
+    }
+  }
+  return CL.plan(e, { pip, onRoad: () => e.street }, { seed: e.id, contId: n => dContId(e, n), reserve });
 }
 const dClutLive = () => {
   let n = 0;
@@ -10343,6 +10362,64 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.28 every door
+    noDoors: () => [...district.noDoors()],
+    worldB: () => ({ ...WORLD_B }),
+    /** v24.28 every loaded district building, planned: how many have nothing to search, and the small ones */
+    doorPlans: () => {
+      let n = 0,
+        none = 0,
+        empty = 0,
+        tiny = 0,
+        newDoors = 0;
+      for (const e of district.enterables()) {
+        n++;
+        const P = dPlan(e);
+        const w = e.ub[1] - e.ub[0],
+          d = e.ub[3];
+        if (Math.min(w, d) < 3.4) tiny++;
+        if (e.via !== undefined) newDoors++;
+        if (!P) none++;
+        else if (!P.conts.length) empty++;
+      }
+      return { n, none, empty, tiny, via: newDoors };
+    },
+    enterNear: (x: number, z: number, r: number) =>
+      [...district.enterables()]
+        .filter(e => Math.hypot(e.c[0] - x, e.c[1] - z) < r)
+        .map(e => ({
+          bi: e.bi,
+          c: e.c,
+          via: e.via,
+          door: e.door,
+          holes: e.holes,
+          edge: e.edge,
+          n: e.pts.length,
+          pts: e.pts,
+        })),
+    /** buildings entered through a neighbour: a point just inside each, and a point on open ground outside the neighbour's door */
+    viaDoors: () => {
+      const all = [...district.enterables()];
+      return all
+        .filter(e => e.via !== undefined)
+        .map(e => {
+          let host = all.find(q => q.key === e.key && q.bi === e.via);
+          // (the neighbour may itself be reached through another one)
+          for (let k = 0; k < 6 && host && host.via !== undefined; k++) {
+            const via = host.via;
+            host = all.find(q => q.key === e.key && q.bi === via);
+          }
+          const N: V2 = [-e.U[1], e.U[0]];
+          const HN: V2 | null = host ? [-host.U[1], host.U[0]] : null;
+          return {
+            c: e.c,
+            hostDoor: host ? host.door.p : null,
+            inside: [e.door.p[0] + N[0] * 0.7, e.door.p[1] + N[1] * 0.7] as V2,
+            outside: host && HN ? ([host.door.p[0] - HN[0] * 1, host.door.p[1] - HN[1] * 1] as V2) : null,
+            host: !!host,
+          };
+        });
+    },
     // v24.27 memory
     compact: COMPACT,
     // v24.26 pathfinding

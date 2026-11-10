@@ -498,7 +498,9 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     umax = Math.max(umax, du);
     D = Math.max(D, dv);
   }
-  if (umax - umin < 2.2 || D < 2.2) return null; // v24.1 kiosks and tiny lean-tos are searchable too (was 3 m)
+  if (umax - umin < 1.2 || D < 1.2) return null; // v24.1 kiosks and tiny lean-tos are searchable too (was 3 m)
+  // v24.28 a shed a person can just stand in (under 2.2 m): no furniture, only what was left on the floor
+  const tiny = umax - umin < 2.2 || D < 2.2;
   const W = (u: number, v: number): V2 => [O[0] + U[0] * u + N[0] * v, O[1] + U[1] * u + N[1] * v];
   const inside = (u: number, v: number) => ctx.pip(W(u, v), b.pts);
   const area = (b.maxx - b.minx) * (b.maxz - b.minz);
@@ -557,6 +559,21 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     uL = umin + 0.5,
     uR = umax - 0.5,
     mid = (umin + umax) / 2;
+  if (tiny) {
+    if (!put(boxes(r, 2), mid, Math.max(0.7, D - 0.6), 0, 0.6, 0.5, 0.6, { cont: { label: '紙箱', loot: 'home' } }))
+      P.conts.push({
+        id: contId(0),
+        p: W(mid, Math.min(D - 0.4, 1.9)),
+        label: '紙箱',
+        loot: 'home',
+        seed: Math.floor(r() * 1e9),
+      });
+    clutterStats.planned++;
+    clutterStats.pieces += P.pieces.length;
+    clutterStats.conts += P.conts.length;
+    clutterStats.segs += P.segs.length;
+    return P;
+  }
   // v23.4 multi-storey blocks: reserve the stairwell corner (back right, else back left) before furnishing, so the
   // stairs to the 2F fit (the furniture used to fill that corner first in almost every building)
   let stairUV: [number, number] | null = null;
