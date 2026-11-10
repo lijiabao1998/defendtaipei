@@ -12,6 +12,7 @@ import { translateLabel } from '../labels';
 import { buildEvacZone, playEvac, cine } from '../story/events/evac';
 import * as THREE from 'three';
 import { FAST, fastCull, fastShowAll } from './fastscene';
+import { COMPACT, compact } from './compact';
 import { buildFacade } from '../map/facade';
 import { buildParks } from '../map/park';
 import { dressLots, lotMaterial, LOT_SHADOW, type LotResult } from '../map/lots';
@@ -2329,6 +2330,7 @@ function buildMap(data: any) {
       roofJobs.push({
         x: cx,
         z: cz,
+        g: roofG,
         f: () => {
           if (shack) {
             let sd = s7;
@@ -8922,7 +8924,7 @@ const prog = async (f: number, msg: string) => {
   await new Promise(r => setTimeout(r, 0));
 };
 // deferred rooftop dressing, streamed in by distance to the player
-const roofJobs: { x: number; z: number; f: () => void }[] = [];
+const roofJobs: { x: number; z: number; f: () => void; g: THREE.Object3D }[] = [];
 function pumpRoofs(px: number, pz: number, budgetMs: number, maxD = 1e9) {
   if (!roofJobs.length) return;
   const t0 = performance.now();
@@ -8932,6 +8934,7 @@ function pumpRoofs(px: number, pz: number, budgetMs: number, maxD = 1e9) {
     if (Math.hypot(j.x - px, j.z - pz) > maxD) break;
     roofJobs.pop();
     j.f();
+    compact(j.g);
   }
 }
 async function boot() {
@@ -9415,6 +9418,7 @@ async function boot() {
   // v24.6 split the big core-wide merged meshes into 60 m pieces so off-screen parts are culled (src/core/chunk.ts)
   if (new URLSearchParams(location.search).get('chunk') !== '0')
     chunkStats = chunkify(scene, { instanced: true, icell: 80, iminTris: 42000 }); // v24.25 trees have about twice the triangles now
+  compact(scene); // v24.27 once nothing is going to be merged or split any more, and before the first frame draws it
   await prog(1, tr('完成', 'Done'));
   // v22.7.1 watchdog: if the title menu has not appeared shortly after loading, offer a clean reload
   setTimeout(() => {
@@ -10339,6 +10343,8 @@ async function boot() {
     // v24.8 rescue test hooks
     rescue: () => ({ R: rescueState() ?? null, npc: rescueRig?.p ?? null }),
     rescueTalk: () => (rescueNear() ? (rescueTalk(), true) : false),
+    // v24.27 memory
+    compact: COMPACT,
     // v24.26 pathfinding
     navStat,
     /** walk this path with a real body: how far along does it get? */

@@ -8,6 +8,7 @@ import { buildTemple, type TempleCont } from './temple';
 import { buildRedHouse, buildBopiliao, type WalkIn } from './landmarks';
 import * as THREE from 'three';
 import { chunkify } from '../core/chunk';
+import { compact } from '../core/compact';
 /** v24.6 ?chunk=0 turns the tile chunking off (before / after comparisons) */
 const CHUNK = typeof location === 'undefined' || new URLSearchParams(location.search).get('chunk') !== '0';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -112,9 +113,11 @@ const RW: Record<string, number> = {
 };
 /** half-width of the river ribbon either side of the boundary (river centre line) */
 export const RIVER_W = 140;
-export const LOAD_R = 520,
+// v24.27 the view reaches some 45 m and anyone awake is within 120 m: a phone keeps far fewer tiles in memory than a desktop
+const PHONE = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent);
+export const LOAD_R = PHONE ? 340 : 520,
   DETAIL_R = 300,
-  UNLOAD_R = 680;
+  UNLOAD_R = PHONE ? 460 : 680;
 /**
  * v23.3 enterable buildings: share of eligible street-front buildings, cap per tile, door width, cut-box margin.
  * v24.1 every building: all footprints (any size or height) get a door — on the street side when one faces a road,
@@ -648,6 +651,7 @@ export class District {
       const cs = chunkify(tile.g, { minTris: 6000, minSpan: 70, cell: 50, instanced: true, iminTris: 14000 });
       this.stats.chunked += cs.meshes;
     }
+    compact(tile.g);
     this.stats.builtMs = Math.max(this.stats.builtMs, performance.now() - t0);
     this.tiles.set(k, tile);
     for (const e of tile.info.enter)
