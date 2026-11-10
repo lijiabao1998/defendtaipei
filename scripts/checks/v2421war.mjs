@@ -132,7 +132,12 @@ const after = await p.evaluate(async st => {
   const g = window.__game;
   const a = g.sols.find(q => q.id === st.aid),
     c = g.sols.find(q => q.id === st.cid);
-  for (let i = 0; i < 240 && g.war().pending; i++) await new Promise(r => setTimeout(r, 250));
+  // soldiers walk (and since v24.26 they get where they are going): keep these two where the check put them until it lands
+  for (let i = 0; i < 600 && g.war().pending; i++) {
+    a.pos.set(st.x + 10, 0, st.z);
+    c.pos.set(st.x + 110, 0, st.z);
+    await new Promise(r => setTimeout(r, 100));
+  }
   const res = {
     pending: g.war().pending,
     aDead: a.state === 'dead',
