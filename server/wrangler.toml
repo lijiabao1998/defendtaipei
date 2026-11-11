@@ -24,4 +24,4 @@ migrations_dir = "migrations"
 # bucket_name = "dt-room-archive"
 
 [vars]
-ALLOWED_ORIGINS = "https://game.lijiabao.uk,https://lijiabao1998.github.io,http://localhost:4173,http://localhost:4180,http://localhost:5173"
+ALLOWED_ORIGINS = "https://lijiabao.uk,https://game.lijiabao.uk,https://lijiabao1998.github.io,http://localhost:4173,http://localhost:4180,http://localhost:5173"
