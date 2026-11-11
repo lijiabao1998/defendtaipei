@@ -8,7 +8,7 @@ import { buildTemple, type TempleCont } from './temple';
 import { buildRedHouse, buildBopiliao, type WalkIn } from './landmarks';
 import * as THREE from 'three';
 import { chunkify } from '../core/chunk';
-import { compact } from '../core/compact';
+import { compact, freeNow } from '../core/compact';
 /** v24.6 ?chunk=0 turns the tile chunking off (before / after comparisons) */
 const CHUNK = typeof location === 'undefined' || new URLSearchParams(location.search).get('chunk') !== '0';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -742,7 +742,7 @@ export class District {
       const cs = chunkify(tile.g, { minTris: 6000, minSpan: 70, cell: 50, instanced: true, iminTris: 14000 });
       this.stats.chunked += cs.meshes;
     }
-    compact(tile.g);
+    compact(tile.g, true);
     this.stats.builtMs = Math.max(this.stats.builtMs, performance.now() - t0);
     this.tiles.set(k, tile);
     for (const e of tile.info.enter)
@@ -750,6 +750,10 @@ export class District {
     this.stats.loads++;
     this.stats.maxLoaded = Math.max(this.stats.maxLoaded, this.tiles.size);
     this.d.onLoad?.(tile.info);
+  }
+  /** v24.29 the graphics context was lost and is back: what the tiles had let go of is gone with it. Build them again. */
+  reloadAll() {
+    for (const k of [...this.tiles.keys()]) this.unload(k);
   }
   private unload(k: string) {
     const t = this.tiles.get(k);
@@ -759,6 +763,7 @@ export class District {
       const m = o as THREE.Mesh;
       if (m.isMesh && m.geometry && !(m.geometry as any).shared) m.geometry.dispose();
     });
+    freeNow(t.g); // v24.29 and its vertex data goes back now, not when the collector gets to it
     for (const s of t.segs) this.d.removeSeg(s);
     for (const e of t.info.enter)
       this.egridEach(e, c => {

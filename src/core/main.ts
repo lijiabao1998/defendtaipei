@@ -12,7 +12,7 @@ import { translateLabel } from '../labels';
 import { buildEvacZone, playEvac, cine } from '../story/events/evac';
 import * as THREE from 'three';
 import { FAST, fastCull, fastShowAll } from './fastscene';
-import { COMPACT, compact } from './compact';
+import { COMPACT, RELEASE, compact } from './compact';
 import { buildFacade } from '../map/facade';
 import { buildParks } from '../map/park';
 import { dressLots, lotMaterial, LOT_SHADOW, type LotResult } from '../map/lots';
@@ -235,6 +235,11 @@ const district = new District({
   inCore,
   onLoad: t => onTileLoad(t),
   onUnload: k => onTileUnload(k),
+});
+// v24.29 district tiles let go of vertex data the graphics card has taken; if the card loses it (a phone that put the page
+// aside), the renderer has nothing to restore them from, so they are built again. Registered after the renderer's own handler.
+renderer.domElement.addEventListener('webglcontextrestored', () => {
+  if (RELEASE.attrs) district.reloadAll();
 });
 function roadDist(x: number, z: number) {
   let best = 1e9;
@@ -10422,6 +10427,7 @@ async function boot() {
     },
     // v24.27 memory
     compact: COMPACT,
+    release: RELEASE,
     // v24.26 pathfinding
     navStat,
     /** walk this path with a real body: how far along does it get? */
