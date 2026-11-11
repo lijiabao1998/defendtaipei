@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { discard } from './compact';
 // v24.6 spatial chunking of big static merged meshes. Several boot-time builders merge the whole 1.1 km core (or
 // large parts of it) into one mesh — 50–175 k triangles each that are drawn, and drawn again in the shadow pass,
 // whenever any corner is on screen. This splits such meshes by triangle centroid into CELL-metre pieces, so the
@@ -26,6 +27,11 @@ export function chunkify(
   const todo: THREE.Mesh[] = [];
   const itodo: THREE.InstancedMesh[] = [];
   root.updateMatrixWorld(true);
+  const users = new Map<THREE.BufferGeometry, number>();
+  root.traverse(o => {
+    const g = (o as THREE.Mesh).geometry;
+    if (g) users.set(g, (users.get(g) || 0) + 1);
+  });
   root.traverse(o => {
     const m = o as THREE.Mesh;
     if (opt.instanced && (m as any).isInstancedMesh && !m.userData.chunked && !Array.isArray(m.material)) {
@@ -134,8 +140,13 @@ export function chunkify(
     // the original keeps its place in the graph but draws nothing itself (no bounds to cull against)
     m.geometry = new THREE.BufferGeometry();
     m.frustumCulled = false;
-    if (g !== g0) g.dispose();
+    if (g !== g0) {
+      g.dispose();
+      discard(g);
+    }
     g0.dispose();
+    // v24.29 the whole mesh, now copied into its pieces: its memory goes back at once (unless something else draws it too)
+    if (users.get(g0) === 1) discard(g0);
   }
   return stats;
 }
