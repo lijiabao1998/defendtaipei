@@ -460,7 +460,179 @@ export type PlanOpt = {
   reserve?: [number, number, number, number][];
   /** v23.4 skip the ground-floor stairwell (upstairs floors draw their own stair head) */
   noStair?: boolean;
+  /** v24.30 an upper floor of a walk-up: rooms behind partitions, furnished as a flat (f = this floor, top = the last) */
+  upper?: { f: number; top: number };
 };
+// ---------- v24.30 the flats upstairs (from photographs of Taiwanese walk-ups and 透天: a bedroom is a bed, a wardrobe
+// and a dresser pushed against the walls with a fan in the gap; a kitchen is one counter with the gas ring under a
+// hood; the bathroom has a tub, a pedestal basin and a red bucket; the top floor keeps the family altar) ----------
+const QUILT = [0xc86a6a, 0x5a84b8, 0xd8b45a, 0x7aa87a, 0xb07ab0, 0xe0d8c8];
+const bed = (r: () => number, wide: boolean): Part[] => {
+  const w = wide ? 1.5 : 1.0,
+    q = QUILT[Math.floor(r() * QUILT.length)],
+    q2 = QUILT[Math.floor(r() * QUILT.length)];
+  const P: Part[] = [
+    [w, 0.28, 1.95, DWOOD, 0, 0.14, 0],
+    [w - 0.06, 0.18, 1.88, 0xe8e4dc, 0, 0.37, 0],
+    [w - 0.02, 0.1, 1.2, q, 0, 0.5, -0.32, 0, 0, r() < 0.5 ? 0.03 : 0], // quilt, thrown back
+    [w - 0.3, 0.07, 0.34, q2, w * 0.08, 0.57, 0.18, 0.25],
+    [w, 0.75, 0.06, DWOOD, 0, 0.6, 0.97], // headboard
+  ];
+  for (const x of wide ? [-0.37, 0.37] : [0]) P.push([0.55, 0.12, 0.36, 0xf2efe6, x, 0.52, 0.72, (r() - 0.5) * 0.4]);
+  return P;
+};
+const nightstand = (r: () => number): Part[] => [
+  [0.45, 0.5, 0.4, WOOD, 0, 0.25, 0],
+  [0.4, 0.02, 0.36, DWOOD, 0, 0.26, -0.02],
+  [0.16, 0.2, 0.16, 0xe8d8a0, -0.08, 0.62, 0.05], // lamp
+  [0.05, 0.05, 0.05, 0x333333, -0.08, 0.52, 0.05],
+  [0.12, 0.1, 0.06, r() < 0.5 ? 0xc74a48 : 0xdddddd, 0.12, 0.55, -0.05], // alarm clock
+];
+const desk = (r: () => number): Part[] => [
+  ...table(1.2, 0.6, WOOD),
+  [0.5, 0.32, 0.04, 0x15171a, 0, 1.0, 0.2],
+  [0.46, 0.28, 0.01, 0x24303c, 0, 1.0, 0.178],
+  [0.08, 0.12, 0.08, 0x333333, 0, 0.81, 0.2],
+  [0.4, 0.02, 0.14, 0x2a2a2a, 0, 0.77, -0.05],
+  [0.22, 0.16, 0.16, 0x8a3a30, -0.42, 0.84, 0.15],
+  [0.2, 0.04, 0.28, 0x3a5a8a, -0.4, 0.78, -0.12, 0.3],
+  [0.06, 0.3, 0.06, 0x3a6a8a, 0.48, 0.9, 0.2],
+  [0.14, 0.05, 0.14, 0x3a6a8a, 0.44, 1.05, 0.14],
+  ...(r() < 0.6 ? ([[0.09, 0.1, 0.09, 0xe8e4dc, 0.3, 0.8, -0.1]] as Part[]) : []), // mug
+];
+const tvStand = (r: () => number): Part[] => [
+  [1.5, 0.5, 0.42, DWOOD, 0, 0.25, 0],
+  [0.7, 0.36, 0.02, 0x3a2618, -0.36, 0.25, -0.21],
+  [0.7, 0.36, 0.02, 0x3a2618, 0.36, 0.25, -0.21],
+  [1.05, 0.62, 0.05, 0x101214, 0, 0.86, 0.05],
+  [0.98, 0.55, 0.01, 0x1c2530, 0, 0.86, 0.022],
+  [0.3, 0.05, 0.1, 0x101214, 0, 0.53, 0.05],
+  [0.3, 0.06, 0.2, 0x222222, 0.52, 0.53, -0.05],
+  [0.14, 0.2, 0.14, r() < 0.5 ? 0xc8a050 : 0x7a9ab0, -0.6, 0.6, 0], // vase / lucky cat
+];
+const coffeeTable = (r: () => number): Part[] => [
+  ...table(1.0, 0.55, DWOOD, 0.42),
+  [0.14, 0.12, 0.14, 0x8a4a30, 0.2, 0.5, 0],
+  [0.07, 0.05, 0.07, 0xe8e4dc, 0.02, 0.47, 0.12],
+  [0.07, 0.05, 0.07, 0xe8e4dc, 0.05, 0.47, -0.1],
+  [0.22, 0.08, 0.12, 0x5aa0c8, -0.25, 0.48, 0.05, 0.3],
+  ...(r() < 0.7 ? ([[0.3, 0.02, 0.22, 0xe8e4d0, -0.2, 0.45, -0.14, 0.6]] as Part[]) : []), // newspaper
+];
+const toilet = (): Part[] => [
+  [0.4, 0.4, 0.55, WHITE, 0, 0.2, -0.05],
+  [0.38, 0.04, 0.42, 0xd0cec6, 0, 0.42, -0.08],
+  [0.42, 0.38, 0.2, WHITE, 0, 0.6, 0.22],
+  [0.1, 0.1, 0.1, 0xe8e4dc, 0.3, 0.75, 0.25], // paper roll
+];
+const basin = (): Part[] => [
+  [0.5, 0.14, 0.42, WHITE, 0, 0.8, 0],
+  [0.36, 0.02, 0.28, 0xc4d4d8, 0, 0.875, -0.02],
+  [0.16, 0.74, 0.16, WHITE, 0, 0.37, 0.05],
+  [0.04, 0.12, 0.04, STEEL, 0, 0.93, 0.15],
+  [0.45, 0.5, 0.03, 0x9ec0cc, 0, 1.2, 0.2], // mirror
+  [0.05, 0.12, 0.05, 0xc74a48, -0.18, 0.93, 0.14], // toothbrush cup
+];
+const bathtub = (r: () => number): Part[] => [
+  [1.5, 0.5, 0.7, WHITE, 0, 0.25, 0],
+  [1.36, 0.06, 0.56, r() < 0.4 ? 0x9cb8c0 : 0xd8d8d2, 0, 0.48, 0],
+  [0.05, 0.2, 0.05, STEEL, 0.6, 0.6, 0.28],
+  [0.3, 0.3, 0.3, 0xc74a48, 1.0, 0.15, -0.15], // the red bucket
+  [0.12, 0.06, 0.12, 0x3f78b5, 1.0, 0.33, -0.15], // and its scoop
+];
+const kitchen = (r: () => number): Part[] => [
+  [2.2, 0.85, 0.58, 0xcfcabb, 0, 0.425, 0],
+  [2.24, 0.04, 0.62, STEEL, 0, 0.87, 0],
+  [0.6, 0.02, 0.4, 0x5a6266, -0.7, 0.895, 0],
+  [0.04, 0.22, 0.04, STEEL, -0.7, 1.0, 0.22],
+  [0.7, 0.08, 0.4, 0x222222, 0.6, 0.93, 0],
+  [0.2, 0.02, 0.2, 0x555555, 0.43, 0.98, 0],
+  [0.2, 0.02, 0.2, 0x555555, 0.77, 0.98, 0],
+  [0.34, 0.08, 0.34, 0x1a1a1a, 0.43, 1.03, 0], // wok
+  [0.8, 0.22, 0.5, 0xb8b8b0, 0.6, 1.36, 0.04], // hood
+  [0.26, 0.22, 0.26, 0xe8e4dc, -0.12, 1.0, 0.05], // rice cooker
+  [0.3, 0.04, 0.2, 0x8a6a40, -0.12, 0.9, -0.2, 0.2], // chopping board
+  [0.08, 0.22, 0.08, 0x6a8a3a, 0.98, 1.0, 0.18], // soy sauce, oil
+  [0.08, 0.26, 0.08, 0xd8c060, 1.06, 1.02, 0.1],
+  ...(r() < 0.6 ? ([[0.3, 0.02, 0.2, 0xe8e4dc, -0.7, 0.92, 0, 0.2]] as Part[]) : []), // dishes left in the sink
+];
+const gasBottle = (): Part[] => [
+  [0.3, 0.55, 0.3, 0x8a9096, 0, 0.275, 0],
+  [0.16, 0.1, 0.16, 0x6a7076, 0, 0.6, 0],
+];
+const washer = (): Part[] => [
+  [0.6, 0.9, 0.6, 0xe6e6e2, 0, 0.45, 0],
+  [0.5, 0.03, 0.5, 0x9aa6b0, 0, 0.915, -0.03],
+  [0.6, 0.12, 0.1, 0xcfd3d6, 0, 0.96, 0.25],
+  [0.4, 0.3, 0.3, 0x3f78b5, 0.55, 0.15, 0], // laundry basket
+  [0.36, 0.12, 0.26, 0xe8e4d0, 0.55, 0.34, 0],
+];
+const standFan = (r: () => number): Part[] => {
+  const c = [0x6fa8c8, 0xe8e4dc, 0x7aa87a][Math.floor(r() * 3)];
+  return [
+    [0.36, 0.04, 0.36, 0x2a2a2a, 0, 0.02, 0],
+    [0.04, 1.0, 0.04, 0x888888, 0, 0.52, 0],
+    [0.42, 0.42, 0.1, c, 0, 1.15, 0],
+    [0.12, 0.12, 0.14, 0x2a2a2a, 0, 1.15, 0.08],
+  ];
+};
+const potPlant = (r: () => number): Part[] => [
+  [0.3, 0.3, 0.3, 0x8a5a3a, 0, 0.15, 0],
+  [0.5, 0.5, 0.5, 0x3a7a3a, 0, 0.6, 0, r()],
+  [0.3, 0.3, 0.3, 0x4a8a40, 0.08, 0.95, 0.04, r()],
+];
+const dresser = (r: () => number): Part[] => [
+  [0.9, 0.75, 0.45, WOOD, 0, 0.375, 0],
+  [0.8, 0.2, 0.02, DWOOD, 0, 0.55, -0.23],
+  [0.8, 0.2, 0.02, DWOOD, 0, 0.28, -0.23],
+  [0.6, 0.6, 0.03, 0x9ec0cc, 0, 1.1, 0.2],
+  [0.66, 0.66, 0.02, DWOOD, 0, 1.1, 0.215],
+  [0.06, 0.14, 0.06, 0xd87a9a, -0.25, 0.82, 0],
+  [0.07, 0.1, 0.07, 0xe8e4dc, -0.12, 0.8, 0.05],
+  [0.2, 0.06, 0.14, r() < 0.5 ? 0x3a5a8a : 0x8a3a30, 0.22, 0.78, -0.02, 0.3],
+];
+const woodWardrobe = (r: () => number): Part[] => [
+  [1.2, 1.9, 0.55, DWOOD, 0, 0.95, 0],
+  [0.02, 1.8, 0.02, 0x2a1c12, 0, 0.95, -0.28],
+  [0.03, 0.14, 0.03, 0xc8a050, -0.06, 1.0, -0.29],
+  [0.03, 0.14, 0.03, 0xc8a050, 0.06, 1.0, -0.29],
+  [0.5, 0.25, 0.4, 0xb89868, -0.25, 2.03, 0], // boxes on top
+  [0.4, 0.2, 0.35, PLASTIC[Math.floor(r() * 4)], 0.3, 2.0, 0.02, 0.2],
+];
+const waterCooler = (): Part[] => [
+  [0.32, 0.95, 0.32, 0xe8e8e4, 0, 0.475, 0],
+  [0.26, 0.36, 0.26, 0x7ab0d8, 0, 1.13, 0],
+  [0.06, 0.05, 0.05, 0xc74a48, -0.07, 0.8, -0.17],
+  [0.06, 0.05, 0.05, 0x3f78b5, 0.07, 0.8, -0.17],
+];
+const wallAC = (): Part[] => [
+  [0.8, 0.26, 0.2, 0xeeeeea, 0, 1.28, 0.05],
+  [0.7, 0.03, 0.04, 0xc8c8c4, 0, 1.17, -0.04],
+];
+const mahjong = (r: () => number): Part[] => {
+  const P: Part[] = [...table(0.9, 0.9, 0x2f6a4a, 0.75)];
+  for (let i = 0; i < 4; i++) P.push([0.5, 0.04, 0.06, 0xeeeadc, 0, 0.79, 0, (i * Math.PI) / 2 + (r() - 0.5) * 0.2]);
+  for (let i = 0; i < 4; i++) P[P.length - 1 - i][4 + (i % 2 ? 0 : 2)] = i < 2 ? 0.3 : -0.3;
+  for (let i = 0; i < 6; i++)
+    P.push([0.05, 0.03, 0.035, 0xeeeadc, (r() - 0.5) * 0.4, 0.785, (r() - 0.5) * 0.4, r() * 3]);
+  return P;
+};
+const offerings = (r: () => number): Part[] => [
+  ...table(1.2, 0.5, RED, 0.8),
+  [0.24, 0.08, 0.24, 0xe8e4dc, -0.35, 0.86, 0],
+  [0.18, 0.14, 0.18, 0xe8a030, -0.35, 0.95, 0], // fruit
+  [0.24, 0.08, 0.24, 0xe8e4dc, 0.35, 0.86, 0],
+  [0.18, 0.12, 0.18, r() < 0.5 ? 0xd04a2a : 0xe8d060, 0.35, 0.94, 0],
+  ...[-0.1, 0, 0.1].map(x => [0.05, 0.05, 0.05, 0xe8e4dc, x, 0.845, -0.12] as Part), // three cups of tea
+];
+const rug = (r: () => number, w: number, d: number): Part => [
+  w,
+  0.012,
+  d,
+  [0x8a3a36, 0x3a5a7a, 0x9a8a5a, 0x5a7a5a][Math.floor(r() * 4)],
+  0,
+  0.014,
+  0,
+];
 const seedOf = (b: any, o?: PlanOpt) => o?.seed ?? (b.id + 1) * 2654435761;
 function pickUse(b: any, street: boolean, r: () => number): Use {
   if (b.kind && SPECIAL.has(b.kind)) return b.kind;
@@ -755,6 +927,178 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
   // ---- ground-floor use ----
   if (special) {
     // furnished above
+  } else if (use === 'home' && opt?.upper) {
+    // v24.30 a flat upstairs. The floor is cut into rooms by partitions across its depth (drawn as low as the outer walls
+    // are cut, so the camera sees over them), each with a doorway, and each room is furnished for what it is.
+    const { f, top } = opt.upper;
+    const Wd = umax - umin;
+    const PL = [0xe6e0d0, 0xdcdfd4, 0xe8dccb, 0xd9e0d6][Math.floor(r() * 4)];
+    const bands = D < 6.5 ? 1 : D < 11.5 ? 2 : D < 19 ? 3 : 4;
+    const cuts: number[] = [0.25];
+    for (let k = 1; k < bands; k++) cuts.push((D * k) / bands + (r() - 0.5) * 0.8);
+    cuts.push(D - 0.2);
+    for (let k = 1; k < bands; k++) {
+      const gap = umin + Wd * (0.28 + r() * 0.44);
+      for (let u = umin + 0.55; u < umax - 0.3; u += 1.0) {
+        if (Math.abs(u - gap) < 0.8) continue;
+        put(
+          [
+            [1.0, 1.45, 0.1, PL, 0, 0.725, 0],
+            [1.0, 0.03, 0.14, 0xb9b2a0, 0, 1.465, 0],
+            [1.0, 0.1, 0.12, 0xa89a84, 0, 0.05, 0],
+          ],
+          u,
+          cuts[k],
+          0,
+          1.0,
+          0.12,
+          1.45,
+        );
+      }
+    }
+    type Room = 'living' | 'kitchen' | 'bed' | 'bed2' | 'bath' | 'shrine' | 'store' | 'study';
+    const kinds: Room[] =
+      f >= top && top > 2
+        ? (['shrine', 'store', 'bed', 'store'] as Room[])
+        : f === 2
+          ? (['living', 'kitchen', 'bed', 'bath'] as Room[])
+          : r() < 0.5
+            ? (['bed', 'bath', 'bed2', 'study'] as Room[])
+            : (['study', 'bed', 'bath', 'bed2'] as Room[]);
+    const rooms: Room[] = bands === 1 ? [f >= top && top > 2 ? 'shrine' : 'bed'] : kinds.slice(0, bands);
+    if (bands === 2) rooms[1] = f === 2 ? 'kitchen' : f >= top && top > 2 ? 'store' : 'bed2';
+    const fit = (room: Room, v0: number, v1: number) => {
+      const vm = (v0 + v1) / 2,
+        dep = v1 - v0;
+      const L = umin + 0.12,
+        R = umax - 0.12,
+        near = v0 + 0.15,
+        far = v1 - 0.15;
+      const wide = Wd > 4.6;
+      const c = (label: string, loot = 'home') => ({ cont: { label, loot } });
+      if (room === 'living') {
+        put(tvStand(r), L + 0.21, vm, 1, 1.5, 0.42, 0.9, c('電視櫃'));
+        put(sofa([0x5a4a3a, 0x7a6a50, 0x3a4a5a, 0x6a3a34][Math.floor(r() * 4)]), R - 0.4, vm, 3, 1.8, 0.8, 0.8);
+        if (wide) put(coffeeTable(r), mid, vm, 1, 1.0, 0.55, 0.45);
+        put(rattan(), R - 0.35, vm - 1.5, 3, 0.6, 0.6, 0.8);
+        put(rattan(), R - 0.35, vm + 1.5, 3, 0.6, 0.6, 0.8);
+        put(shoeRack(r), L + 0.5, near + 0.2, 2, 0.9, 0.32, 0.7, c('鞋櫃'));
+        put(standFan(r), L + 0.3, vm + 1.3, 1, 0.36, 0.36, 0);
+        put(potPlant(r), L + 0.25, vm - 1.3, 0, 0.35, 0.35, 0);
+        put(waterCooler(), R - 0.2, far - 0.2, 0, 0.32, 0.32, 1.2);
+        put(wallAC(), mid + 0.6, near - 0.02, 2, 0.8, 0.2, 0);
+        P.decals.push([Math.min(2.0, Wd - 2), 0.012, 1.4, rug(r, 1, 1)[3], mid, 0.014, vm]);
+        put(laundry(r), mid, near + 0.45, 0, 1.6, 0.4, 0);
+      } else if (room === 'kitchen') {
+        put(kitchen(r), L + 1.2, far - 0.29, 0, 2.2, 0.58, 0.9, c('流理台抽屜', 'store'));
+        put(gasBottle(), L + 2.5, far - 0.2, 0, 0.3, 0.3, 0.6);
+        put(fridge(r() < 0.35), R - 0.34, far - 0.34, 0, 0.65, 0.65, 1.7, c('冰箱', 'fridge'));
+        const tb = [...table(1.1, 0.75, WOOD), ...dishes(0, 0.77, 0, r), ...(r() < 0.5 ? cooker(0.3, 0.77, 0.1) : [])];
+        put(tb, mid, vm - 0.3, 0, 1.1, 0.75, 0.8);
+        put(stool(PLASTIC[0]), mid - 0.8, vm - 0.3, 0, 0.35, 0.35, 0);
+        put(stool(PLASTIC[2]), mid + 0.8, vm - 0.3, 0, 0.35, 0.35, 0);
+        put(stool(PLASTIC[3]), mid, vm - 1.0, 0, 0.35, 0.35, 0);
+        put(chair(PLASTIC[1], r() < 0.4), mid + 0.2, vm + 0.45, 2, 0.45, 0.45, 0);
+        put(shelf(1.0, STEEL, r), R - 0.25, vm - 0.6, 3, 1.0, 0.45, 1.8, c('碗櫃', 'store'));
+        put(washer(), L + 0.32, near + 0.32, 2, 0.6, 0.6, 0.9);
+        put(boxes(r, 2), R - 0.35, near + 0.35, 0, 0.6, 0.6, 0.6, c('紙箱'));
+      } else if (room === 'bed' || room === 'bed2') {
+        const big = room === 'bed' && Wd > 3.6;
+        const bw = big ? 1.5 : 1.0;
+        put(bed(r, big), L + 0.98, vm, 1, bw, 1.95, 0.6);
+        put(nightstand(r), L + 0.22, vm - bw / 2 - 0.3, 1, 0.45, 0.4, 0.5, c('床頭櫃'));
+        if (r() < 0.6) put(woodWardrobe(r), R - 0.28, vm - 0.2, 3, 1.2, 0.55, 1.9, c('衣櫃'));
+        else
+          put(wardrobe(PLASTIC[Math.floor(r() * 4)], r() < 0.5), R - 0.28, vm - 0.2, 3, 1.0, 0.55, 1.75, c('塑膠衣櫥'));
+        put(dresser(r), R - 0.24, vm + 1.1, 3, 0.9, 0.45, 0.8, c('梳妝台'));
+        put(stool(PLASTIC[1]), R - 0.8, vm + 1.1, 0, 0.35, 0.35, 0);
+        put(standFan(r), L + 0.3, vm + bw / 2 + 0.5, 1, 0.36, 0.36, 0);
+        put(wallAC(), mid, near - 0.02, 2, 0.8, 0.2, 0);
+        if (dep > 4.2) put(chest(Math.floor(r() * 4), r), mid + 0.4, far - 0.26, 0, 0.9, 0.48, 0.85, c('抽屜櫃'));
+        if (r() < 0.6) put(suitcase(r), mid + (r() - 0.5), vm + 0.4, Math.floor(r() * 4), 0.6, 0.8, 0);
+        if (room === 'bed2') put(desk(r), mid - 0.3, far - 0.32, 0, 1.2, 0.6, 0.8, c('書桌抽屜'));
+        if (room === 'bed2') put(chair(0x4a4a4a, false), mid - 0.3, far - 0.95, 0, 0.45, 0.45, 0);
+        P.decals.push([1.2, 0.012, 0.7, rug(r, 1, 1)[3], L + 2.0 + (big ? 0.3 : 0), 0.014, vm]);
+      } else if (room === 'bath') {
+        // the wet end: bathroom fittings on one side, a desk or the washing on the other
+        put(bathtub(r), L + 0.77, near + 0.38, 2, 1.5, 0.7, 0.5);
+        put(toilet(), L + 0.3, vm + 0.3, 1, 0.42, 0.6, 0.45);
+        put(basin(), L + 0.24, vm + 1.2, 1, 0.5, 0.42, 0.85, c('鏡櫃'));
+        put(washer(), R - 0.32, near + 0.32, 2, 0.6, 0.6, 0.9);
+        put(laundry(r), R - 0.9, vm + 0.4, 1, 1.6, 0.4, 0);
+        put(shelf(0.9, 0xd8d0c0, r, false), R - 0.25, far - 0.6, 3, 0.9, 0.45, 1.8, c('置物架'));
+        for (let i = 0; i < 6; i++)
+          P.decals.push([
+            0.5,
+            0.012,
+            0.5,
+            i % 2 ? 0xcfd8da : 0xb8c8cc,
+            L + 0.3 + (i % 3) * 0.5,
+            0.013,
+            near + 0.9 + Math.floor(i / 3) * 0.5,
+          ]);
+      } else if (room === 'study') {
+        put(desk(r), L + 0.32, vm - 0.6, 1, 1.2, 0.6, 0.8, c('書桌抽屜'));
+        put(chair(0x4a4a4a, r() < 0.2), L + 0.95, vm - 0.6, 1, 0.45, 0.45, 0);
+        put(shelf(1.2, WOOD, r), L + 0.25, vm + 0.9, 1, 1.2, 0.45, 1.8, c('書櫃'));
+        put(sofa([0x5a4a3a, 0x3a4a5a][Math.floor(r() * 2)]), R - 0.4, vm, 3, 1.8, 0.8, 0.8);
+        put(mahjong(r), mid, vm + (wide ? 0 : 1.6), 0, 0.9, 0.9, 0.8);
+        if (wide)
+          for (const [a, b2] of [
+            [0.75, 0],
+            [-0.75, 0],
+            [0, 0.75],
+            [0, -0.75],
+          ])
+            put(stool(PLASTIC[Math.floor(r() * 4)]), mid + a, vm + b2, 0, 0.35, 0.35, 0);
+        put(potPlant(r), R - 0.25, near + 0.25, 0, 0.35, 0.35, 0);
+        put(boxes(r, 2), R - 0.35, far - 0.35, 0, 0.6, 0.6, 0.6, c('紙箱'));
+      } else if (room === 'shrine') {
+        put(altar(r), mid, far - 0.45, 0, 1.6, 1.2, 1.1, {
+          glow: [
+            [0.1, 0.18, 0.1, 0xff5a30, -0.5, 1.18, 0.1],
+            [0.1, 0.18, 0.1, 0xff5a30, 0.5, 1.18, 0.1],
+          ],
+        });
+        put(offerings(r), mid, far - 1.9, 0, 1.2, 0.5, 0.85, c('供桌'));
+        put(rattan(), L + 0.35, vm - 0.8, 1, 0.6, 0.6, 0.8);
+        put(rattan(), L + 0.35, vm + 0.2, 1, 0.6, 0.6, 0.8);
+        put(rattan(), R - 0.35, vm - 0.8, 3, 0.6, 0.6, 0.8);
+        put(rattan(), R - 0.35, vm + 0.2, 3, 0.6, 0.6, 0.8);
+        put(potPlant(r), L + 0.25, far - 0.3, 0, 0.35, 0.35, 0);
+        put(potPlant(r), R - 0.25, far - 0.3, 0, 0.35, 0.35, 0);
+        put(laundry(r), mid, near + 0.45, 0, 1.6, 0.4, 0);
+        put(chest(0, r), L + 0.5, near + 1.4, 1, 0.9, 0.48, 0.85, c('抽屜櫃'));
+        P.decals.push([1.6, 0.012, 1.0, 0x8a2a26, mid, 0.014, far - 1.2]);
+      } else {
+        // store room: what a family keeps and never throws away
+        put(boxes(r, 3), L + 0.35, near + 0.4, 0, 0.6, 0.6, 1.2, c('紙箱'));
+        put(boxes(r, 3), L + 0.35, near + 1.2, 0, 0.6, 0.6, 1.2);
+        put(boxes(r, 2), L + 1.0, near + 0.4, 0, 0.6, 0.6, 0.6, c('紙箱'));
+        put(bunk(), R - 0.5, vm, 3, 0.95, 1.95, 1.6);
+        put(bicycle(), L + 0.3, vm + 0.6, 1, 0.5, 1.6, 0.9);
+        put(shelf(1.2, STEEL, r), mid, far - 0.25, 0, 1.2, 0.45, 1.8, c('鐵架', 'store'));
+        put(fridge(true), R - 0.35, far - 0.35, 0, 0.65, 0.65, 1.7, c('舊冰箱', 'fridge'));
+        put(suitcase(r), mid, vm - 0.5, Math.floor(r() * 4), 0.6, 0.8, 0);
+        put(chair(PLASTIC[2], true), mid + 0.6, vm + 0.6, 0, 0.45, 0.45, 0);
+        put(standFan(r), mid - 0.8, vm + 0.2, 0, 0.36, 0.36, 0);
+        put(chest(2, r), R - 0.5, near + 0.3, 2, 0.9, 0.48, 0.85, c('抽屜櫃'));
+      }
+      // what is left of the floor: a room people lived in is never bare
+      for (let i = 0, n = Math.floor((Wd * dep) / 5); i < n; i++) {
+        const u = umin + 0.5 + r() * (Wd - 1),
+          v = v0 + 0.5 + r() * Math.max(0.1, dep - 1),
+          k = r();
+        if (k < 0.2) put(stool(PLASTIC[Math.floor(r() * 4)]), u, v, 0, 0.35, 0.35, 0);
+        else if (k < 0.4) put(boxes(r, 1 + Math.floor(r() * 2)), u, v, 0, 0.6, 0.6, 0.6);
+        else if (k < 0.55) put(potPlant(r), u, v, 0, 0.35, 0.35, 0);
+        else if (k < 0.7) put(standFan(r), u, v, Math.floor(r() * 4), 0.36, 0.36, 0);
+        else if (k < 0.85) put(suitcase(r), u, v, Math.floor(r() * 4), 0.6, 0.8, 0);
+        else put(chair(PLASTIC[Math.floor(r() * 4)], r() < 0.5), u, v, Math.floor(r() * 4), 0.45, 0.45, 0);
+      }
+    };
+    for (let k = 0; k < bands; k++) fit(rooms[k], cuts[k] + (k ? 0.1 : 0), cuts[k + 1] - (k < bands - 1 ? 0.1 : 0));
+    scatter(8 + Math.floor(r() * 8), ['cloth', 'cloth', 'paper']);
   } else if (use === 'home') {
     put(altar(r), mid, back - 0.3, 0, 1.6, 1.2, 1.1, {});
     const sc = [0x5a4a3a, 0x7a6a50, 0x3a4a5a][Math.floor(r() * 3)];
@@ -840,7 +1184,7 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     scatter(8, ['paper', 'glass', 'paper']);
   }
   // fill the rest of large floors cell by cell (deep blocks are several rooms / units on the ground floor)
-  let cap = special ? 0 : 46;
+  let cap = special || opt?.upper ? 0 : 46;
   for (let v = 2.2; v < D - 0.8 && cap > 0; v += 2.6)
     for (let u = umin + 1.1; u < umax - 0.8 && cap > 0; u += 2.6) {
       if (r() < 0.28) continue;
@@ -1035,6 +1379,10 @@ export function build(P: Plan): THREE.Group {
   // frame: local x = U, z = N, origin O
   G.matrixAutoUpdate = false;
   G.matrix.set(P.U[0], 0, P.N[0], P.O[0], 0, 1, 0, 0, P.U[1], 0, P.N[1], P.O[1], 0, 0, 0, 1);
+  // v24.30 placed by hand, so nothing marks it as moved: without this the value-compared update in fastscene.ts never
+  // works out its world matrix, and the furniture is drawn at the map origin until it has been culled and shown once
+  // (upstairs, where it is built at the player's feet, that never happened: the rooms looked empty)
+  G.matrixWorldNeedsUpdate = true;
   const geos: THREE.BufferGeometry[] = [],
     glow: THREE.BufferGeometry[] = [];
   const pm = new THREE.Matrix4();

@@ -748,8 +748,22 @@ type UpState = {
   /** v24.1 floor number (2 = 2F) and the building's top floor */
   f: number;
   top: number;
+  /** v24.30 map → upstairs-space translation of this building, and the height of this floor above the street */
+  off: V2;
+  fy: number;
+  /** v24.30 this is the rooftop (f = top + 1): outdoors, nothing cut away, the real roof underfoot */
+  roof?: boolean;
+  /** pieces of furniture planned for this floor (checks) */
+  np?: number;
 };
 let up: UpState | null = null;
+/** upstairs and under a ceiling (the rooftop is not) */
+const upIn = () => !!up && !up.roof;
+/**
+ * v24.30 upstairs, the real world is drawn in place around and below the floor (two passes, see drawUpstairs) instead of
+ * stand-in boxes and a stand-in street. ?fakeup=1 brings the stand-ins back, for comparison.
+ */
+const REAL_UP = !/[?&]fakeup=1/.test(location.search);
 /** v24.1 storeys of a building (ground floor = 1), from its modelled height */
 const storeys = (b: { h: number }) => Math.max(1, Math.min(14, Math.round((b.h - GF) / FH) + 1));
 const floorZh = (f: number) =>
@@ -796,7 +810,11 @@ function placeAt(x: number, z: number): Bld | DEnter | null {
 /** v23.3 indoors for player-facing checks (sleep, shelter, drones, muffled sound): core or district building */
 function indoorAt(x: number, z: number) {
   return (
-    UP.isUp(x) || !!placeAt(x, z) || district.landmarkRoofAt(x, z) || !!huaxi?.covers(x, z) || !!market?.covers(x, z)
+    (UP.isUp(x) && !up?.roof) ||
+    !!placeAt(x, z) ||
+    district.landmarkRoofAt(x, z) ||
+    !!huaxi?.covers(x, z) ||
+    !!market?.covers(x, z)
   );
 }
 
@@ -917,7 +935,7 @@ setBoomFx((p, big) => {
   const d = Math.hypot(q[0] - p.x, q[1] - p.z);
   blastFx.explode(p, big);
   blastFx.kick(d, big);
-  AU.shellBoom(d, !!up || indoorAt(player.pos.x, player.pos.z), big);
+  AU.shellBoom(d, upIn() || indoorAt(player.pos.x, player.pos.z), big);
 });
 /** shell damage factor at distance d: full lethal core, then quadratic falloff to the wounding radius */
 function shellDmg(d: number) {
@@ -1076,7 +1094,7 @@ function setupHeli() {
   heli = new HeliPatrols({
     scene,
     player: () => player.pos,
-    hidden: () => !flyingNow() && (!!up || heliCover()),
+    hidden: () => !flyingNow() && (upIn() || heliCover()),
     night: () => isNight(),
     routes: () => routes,
     roofAt,
@@ -1093,7 +1111,7 @@ function setupHeli() {
         log(tr('被機槍打中，流血了！', 'A round from above hits you. You are bleeding!'), '#f66');
       }
     },
-    gun: dist => AU.gunshot('mg', dist, !!up || indoorAt(player.pos.x, player.pos.z)),
+    gun: dist => AU.gunshot('mg', dist, upIn() || indoorAt(player.pos.x, player.pos.z)),
     rotor: dist => AU.rotor(dist, 1.2),
     salvo: (x, z) => warBarrage(2, [x, z]),
     smoke: (x, y, z, fire) => {
@@ -1512,7 +1530,7 @@ function warTick(dt: number) {
     const dist = 140 + Math.random() * 380;
     const kind = Math.random() < 0.3 ? 'mg' : 'rifle';
     const n = 3 + Math.floor(Math.random() * (5 + 10 * L));
-    const indoors = !!up || indoorAt(player.pos.x, player.pos.z);
+    const indoors = upIn() || indoorAt(player.pos.x, player.pos.z);
     for (let i = 0; i < n; i++)
       setTimeout(() => AU.gunshot(kind as any, dist, indoors), i * (kind === 'mg' ? 90 : 170 + Math.random() * 240));
   }
@@ -5084,6 +5102,7 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
   };
   const st = P.stair!;
   const top = storeys(b);
+  if (REAL_UP && f === top + 1) return goRoof(b, P, bUp.pts, off);
   // 2F keeps its v23.4 seed and container ids (existing saves); higher floors get their own
   const seed0 = ((dist ? dist.id : (b.id + 1) * 2654435761) ^ 0x5bd1e995) >>> 0;
   const seed = f === 2 ? seed0 : (seed0 ^ Math.imul(f, 0x9e3779b1)) >>> 0;
@@ -5093,11 +5112,16 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
       : f === 2
         ? `u${b.id}_${n}`
         : `u${b.id}_${(f - 2) * 100 + n}`;
-  const fl = f < top ? upFlightAt(b, P) : null;
+  // (v24.30 the top floor has a flight too: it goes to the roof)
+  const fl = f < top + (REAL_UP ? 1 : 0) ? upFlightAt(b, P) : null;
   const reserve: [number, number, number, number][] = [[st.u - 0.8, st.v - 2.5, st.u + 0.8, st.v + 1.3]];
   if (fl) reserve.push([fl.u - 0.75, fl.v - 2.5, fl.u + 0.75, fl.v + 1.3]);
   // same frame as the ground plan (same door), furniture kept off the stair opening, the upper flight and landings
-  const P2 = CL.plan(bUp, { pip, onRoad: () => false }, { seed, contId, reserve, noStair: true });
+  const P2 = CL.plan(
+    bUp,
+    { pip, onRoad: () => false },
+    { seed, contId, reserve, noStair: true, upper: REAL_UP ? { f, top } : undefined },
+  );
   if (!P2) return false;
   const street = (i: number) => {
     const a = b.pts[i],
@@ -5118,10 +5142,11 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
     seed,
     floor: f,
     upFlight: fl,
+    noStreet: REAL_UP,
   });
   scene.add(room.g);
   // v24.9 the neighbours around this floor (nearest first), at their heights relative to it
-  {
+  if (!REAL_UP) {
     const near: { pts: V2[]; h: number; d: number }[] = [];
     for (const q of blds)
       if (q !== b) {
@@ -5138,6 +5163,8 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
     if (nb) room.g.add(nb);
   }
   const furn = CL.build(P2);
+  // v24.30 up here a bed and a wardrobe throw shadows across the room (one floor at a time: it costs one draw)
+  if (REAL_UP) furn.traverse(o => ((o as THREE.Mesh).isMesh ? (o.castShadow = true) : 0));
   scene.add(furn);
   const segs: Seg[] = [];
   for (const q of room.segs) {
@@ -5161,7 +5188,21 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
     c.mesh.visible = false;
     cs.push(c);
   }
-  up = { b, dist, P, room, furn, segs, conts: cs, anchor: stairFoot(b, P), f, top };
+  up = {
+    b,
+    dist,
+    P,
+    room,
+    furn,
+    segs,
+    conts: cs,
+    anchor: stairFoot(b, P),
+    f,
+    top,
+    off,
+    fy: UP.floorY(f),
+    np: P2.pieces.length,
+  };
   rescueFloor(b, P2, f, bUp.pts);
   const at = fromAbove && room.upFoot ? room.upFoot : room.land;
   player.pos.set(at[0], 0, at[1]);
@@ -5173,6 +5214,36 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
       : tr(`你走上${floorZh(f)}。`, `You go up to the ${floorZh(f)}.`),
     '#fd9',
   );
+  return true;
+}
+/** v24.30 the rooftop of b: the stairs come out of a hut, the parapet is the footprint, the real roof is underfoot */
+function goRoof(b: Bld | DEnter, P: CL.Plan, pts: V2[], off: V2) {
+  const dist = isDEnter(b) ? b : null;
+  const top = storeys(b);
+  const obs = ((b as any).roof?.userData.obs as V2[][] | undefined)?.map(q =>
+    q.map(([x, z]) => [x + off[0], z + off[1]] as V2),
+  );
+  const room = UP.buildRoof({
+    pts,
+    F: { O: [P.O[0] + off[0], P.O[1] + off[1]], U: P.U, N: P.N },
+    stair: P.stair!,
+    seed: ((dist ? dist.id : (b.id + 1) * 2654435761) ^ 0x7f4a7c15) >>> 0,
+    obs,
+  });
+  scene.add(room.g);
+  const segs: Seg[] = [];
+  for (const q of room.segs) {
+    const sg = { a: q.a, b: q.b } as Seg;
+    addSeg(sg);
+    segs.push(sg);
+  }
+  const furn = new THREE.Group();
+  scene.add(furn);
+  up = { b, dist, P, room, furn, segs, conts: [], anchor: stairFoot(b, P), f: top + 1, top, off, fy: b.h, roof: true };
+  player.pos.set(room.land[0], 0, room.land[1]);
+  player.vel.set(0, 0, 0);
+  player.cover = null;
+  log(tr('你推開鐵門，走上頂樓。', 'You push the steel door open and step onto the rooftop.'), '#fd9');
   return true;
 }
 /** v24.1 leave the current upper floor: keep what was taken, drop its meshes, collision and containers */
@@ -8011,13 +8082,15 @@ function update(dt: number) {
     player.mesh.position.y += roofB ? roofB.h : walkH(player.pos.x, player.pos.z); // v21.4 stand on the raised walk (v22.5 or a roof)
   }
   // v21.2 shader cutaway around the camera→player line (see occlusion.ts); camera itself unchanged
-  OCC.r.value = up || indoorAt(player.pos.x, player.pos.z) ? 3 : 6; // v24.16 outdoors: see the street behind the block
+  OCC.r.value = upIn() || indoorAt(player.pos.x, player.pos.z) ? 3 : 6; // v24.16 outdoors: see the street behind the block
   const aloft = flyingNow(); // v24.24 the city from above: nothing is cut away, nothing counts as being inside
   updateOcclusion(player.pos.x, player.pos.y, player.pos.z, !aloft);
   // v23.3 inside an enterable district building: cut its upper floors and roof away (core blocks lower their walls)
   setBuildingCut(
     up
-      ? up.room.box
+      ? up.roof
+        ? null
+        : up.room.box
       : player.pos.z < -6000 || roofB || aloft
         ? null
         : (district.enterAt(player.pos.x, player.pos.z) ??
@@ -8027,18 +8100,27 @@ function update(dt: number) {
           null),
   );
   // buildings cutaway
-  const inside = aloft ? null : bldAt(player.pos.x, player.pos.z);
+  // v24.30 upstairs the world is drawn in place under the floor: these rules then work from where the floor really is,
+  // the building itself keeps its real walls up to the floor (the cut takes what is above), and only what stands
+  // taller than the floor between it and the camera goes see-through
+  const upReal = up && REAL_UP ? up : null;
+  const bx = upReal ? player.pos.x - upReal.off[0] : player.pos.x,
+    bz = upReal ? player.pos.z - upReal.off[1] : player.pos.z;
+  const inside = aloft ? null : upReal ? (upReal.dist ? null : (upReal.b as Bld)) : bldAt(player.pos.x, player.pos.z);
   for (const b of blds) {
-    const dx = b.c[0] - player.pos.x,
-      dz = b.c[1] - player.pos.z;
+    const dx = b.c[0] - bx,
+      dz = b.c[1] - bz;
     const near = Math.abs(dx) < 40 && Math.abs(dz) < 40;
-    const front = !aloft && near && dx + dz > -4 && dx + dz < 30 && Math.abs(dx - dz) < 22 && b.h > 4;
+    const front =
+      !aloft && near && dx + dz > -4 && dx + dz < 30 && Math.abs(dx - dz) < 22 && b.h > 4 + (upReal ? upReal.fy : 0);
     const mi = (b as any).mi;
-    b.walls.material = front || b === inside ? wallMatsT[mi] : wallMats[mi];
-    b.roof.visible = b !== inside && !front;
-    b.walls.scale.y = b === inside ? 0.12 : 1;
-    if (b.innerWalls) b.innerWalls.visible = b === inside;
+    const own = !!upReal && b === inside;
+    b.walls.material = !own && (front || b === inside) ? wallMatsT[mi] : wallMats[mi];
+    b.roof.visible = (b !== inside || !!upReal?.roof) && !front;
+    b.walls.scale.y = b === inside && !own ? 0.12 : 1;
+    if (b.innerWalls) b.innerWalls.visible = b === inside && !own;
   }
+  for (const m of wallMats) m.userData.cut = !!upReal;
   // soldiers
   const night = isNight();
   const pp: V2 = [player.pos.x, player.pos.z];
@@ -8058,7 +8140,8 @@ function update(dt: number) {
     const dx = player.pos.x - s.pos.x,
       dz = player.pos.z - s.pos.z;
     const dist = Math.hypot(dx, dz);
-    if (dist > 120) continue; // dormant far away
+    // dormant far away (v24.30 upstairs: far from the building, so the street below keeps moving)
+    if ((upReal ? Math.hypot(up!.anchor[0] - s.pos.x, up!.anchor[1] - s.pos.z) : dist) > 120) continue;
     // vision
     let range = (night ? 11 : 20) * (player.sneak ? 0.55 : 1) * (player.light && night ? 2 : 1);
     if (inside) range *= 0.6;
@@ -8597,7 +8680,10 @@ function drawHud(inside: Bld | null) {
   const rd = roofB ? null : roofDoor();
   if (up && upFlightFoot() && !panelOpen) {
     pr.style.display = 'block';
-    pr.textContent = tr(`[E] 上樓（${floorZh(up.f + 1)}）`, `[E] Go upstairs (${floorZh(up.f + 1)})`);
+    pr.textContent =
+      up.f + 1 > up.top
+        ? tr('[E] 上頂樓', '[E] Go up to the rooftop')
+        : tr(`[E] 上樓（${floorZh(up.f + 1)}）`, `[E] Go upstairs (${floorZh(up.f + 1)})`);
   } else if (up && upLanding() && !panelOpen) {
     pr.style.display = 'block';
     pr.textContent = tr(`[E] 下樓（回${floorZh(up.f - 1)}）`, `[E] Go downstairs (${floorZh(up.f - 1)})`);
@@ -8727,6 +8813,70 @@ function die() {
       ? `<h1 style="color:#c33">You died</h1><h2>This is how your story ends.</h2><p>You survived occupied Taipei for ${day} days, defeated ${player.kills} occupation troops and reclaimed ${liberated.size} districts.</p><button onclick="location.reload()">Start again (new survivor)</button>`
       : `<h1 style="color:#c33">你陣亡了</h1><h2>這就是你的結局。</h2><p>你在淪陷的台北撐過了 ${day} 天，擊倒 ${player.kills} 名佔領軍，奪回了 ${liberated.size} 個街區。</p><button onclick="location.reload()">重新開始（新的倖存者）</button>`;
 }
+/**
+ * v24.30 an upper floor lives off-map (its own collision, its own furniture), but it is drawn where it really is. Two
+ * passes into the same frame: first the world, with the camera moved by the same step that separates the floor from its
+ * building, so every real wall, roof and street lands where it would be seen from this floor; then the floor itself.
+ * The step is a pure translation and the projection is orthographic, so the two depth buffers agree and each hides the
+ * other correctly. The cutaway uniforms and the sun are moved with the first pass and put back for the second.
+ */
+const upCam = camera.clone(false);
+/** what the first pass drew last frame (checks) */
+const upDraw = { calls: 0, tris: 0 };
+function drawUpstairs() {
+  const u = up!;
+  const dx = -u.off[0],
+    dy = u.fy,
+    dz = -u.off[1];
+  const sh = sun.castShadow ? sun.shadow : null;
+  const shift = (k: number) => {
+    OCC.p.value.x += dx * k;
+    OCC.p.value.y += dy * k;
+    OCC.p.value.z += dz * k;
+    CUT.f.value.x += dx * k;
+    CUT.f.value.y += dz * k;
+    sun.position.x += dx * k;
+    sun.position.y += dy * k;
+    sun.position.z += dz * k;
+    sun.target.position.x += dx * k;
+    sun.target.position.y += dy * k;
+    sun.target.position.z += dz * k;
+    sun.updateMatrixWorld();
+    sun.target.updateMatrixWorld();
+    sh?.updateMatrices(sun);
+  };
+  // the world, from where this floor really is: its own building is cut just above the floor
+  // (only what the projection needs: copy() would also bring the main camera's matrices, which the value-compared
+  // matrix update in fastscene.ts would then keep, seeing no change in position)
+  upCam.left = camera.left;
+  upCam.right = camera.right;
+  upCam.top = camera.top;
+  upCam.bottom = camera.bottom;
+  upCam.near = camera.near;
+  upCam.far = camera.far;
+  upCam.zoom = camera.zoom;
+  upCam.projectionMatrix.copy(camera.projectionMatrix);
+  upCam.projectionMatrixInverse.copy(camera.projectionMatrixInverse);
+  upCam.quaternion.copy(camera.quaternion);
+  upCam.position.set(camera.position.x + dx, camera.position.y + dy, camera.position.z + dz);
+  upCam.updateMatrixWorld(true);
+  const cy = CUT.y.value;
+  shift(1);
+  if (cy < 1e8) CUT.y.value = dy + 1.5; // (on the rooftop nothing is cut)
+  CUT.fl.value = dy;
+  fastCull(scene, upCam, sh ? sh.camera : null);
+  renderer.render(scene, upCam);
+  upDraw.calls = renderer.info.render.calls;
+  upDraw.tris = renderer.info.render.triangles;
+  // the floor
+  shift(-1);
+  CUT.y.value = cy;
+  CUT.fl.value = 0;
+  renderer.autoClear = false;
+  fastCull(scene, camera, sh ? sh.camera : null);
+  renderer.render(scene, camera);
+  renderer.autoClear = true;
+}
 function loop() {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (cine.on) {
@@ -8743,13 +8893,15 @@ function loop() {
   }
   update(dt);
   // v24.23 only the street camera can hide what it does not see: the drone and the scope look further
+  const two = !!up && REAL_UP && !fpv?.active && !scope.on;
   if (fpv?.active || scope.on) fastShowAll(scene);
-  else fastCull(scene, camera, sun.castShadow ? sun.shadow.camera : null);
+  else if (!two) fastCull(scene, camera, sun.castShadow ? sun.shadow.camera : null);
   if (fpv?.active) {
     fpv.update(dt);
     if (fpv.active) fpv.render(renderer);
     else renderer.render(scene, camera);
-  } else renderer.render(scene, camera);
+  } else if (two) drawUpstairs();
+  else renderer.render(scene, camera);
   if (scope.on) {
     scope.place(player.pos.x, eyeY(), player.pos.z);
     scope.render(renderer, scene);
@@ -10099,6 +10251,10 @@ async function boot() {
             upFoot: up.room.upFoot,
             f: up.f,
             top: up.top,
+            roof: !!up.roof,
+            fy: up.fy,
+            np: up.np ?? 0,
+            furnX: up.furn.matrixWorld.elements[12],
             anchor: up.anchor,
             conts: up.conts.map(c => [c.id, c.label, Object.keys(c.items).length]),
             pieces: up.furn.children.length,
@@ -10428,6 +10584,9 @@ async function boot() {
     // v24.27 memory
     compact: COMPACT,
     release: RELEASE,
+    realUp: REAL_UP,
+    upDraw,
+    upCam,
     // v24.26 pathfinding
     navStat,
     /** walk this path with a real body: how far along does it get? */

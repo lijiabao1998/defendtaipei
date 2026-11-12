@@ -521,6 +521,20 @@ export function placeRooftop(
         sh.position.set(x, y, z);
         sh.rotation.y = -(th + r);
         grp.add(sh);
+        // v24.30 a body on this roof walks round the house: its footprint, for whoever climbs up here
+        {
+          const ca = Math.cos(th + r),
+            sa = Math.sin(th + r);
+          const obs = ((root.userData.obs as [number, number][][] | undefined) ??= []);
+          obs.push(
+            [
+              [-w / 2, -d / 2],
+              [w / 2, -d / 2],
+              [w / 2, d / 2],
+              [-w / 2, d / 2],
+            ].map(([lx, lz]) => [x + lx * ca - lz * sa, z + lx * sa + lz * ca] as [number, number]),
+          );
+        }
         return true;
       }
       w *= 0.82;

@@ -15,6 +15,8 @@ export const isUp = (x: number) => x > 5000;
 export const FLOOR_H = 3.2;
 /** v24.1 the street seen from floor f (2 = one storey up) */
 const streetY = (f: number) => -(3.8 + (Math.max(2, f) - 2) * FLOOR_H);
+/** v24.30 height of floor f above the street */
+export const floorY = (f: number) => -streetY(f);
 
 const wallMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 });
 wallMat.userData.cut = true; // cut down to a low wall while the player is up here, like the ground floors
@@ -82,6 +84,8 @@ export function buildUpstairs(o: {
   floor?: number;
   /** v24.1 centre (plan frame) of the flight up to the next floor, beside the opening */
   upFlight?: { u: number; v: number } | null;
+  /** v24.30 the real street is drawn under this floor (main.ts draws the world in place): no stand-in plane */
+  noStreet?: boolean;
 }): UpRoom {
   const { pts, F, stair } = o;
   const r = hash(o.seed);
@@ -182,11 +186,13 @@ export function buildUpstairs(o: {
   g.add(m);
   vc.forEach(q => q.dispose());
   // the street one storey below, seen past the cut-down walls
-  const gp = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), groundMat);
-  gp.rotation.x = -Math.PI / 2;
-  gp.position.set(UP_O[0], streetY(o.floor ?? 2), UP_O[1]);
-  gp.receiveShadow = true;
-  g.add(gp);
+  if (!o.noStreet) {
+    const gp = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), groundMat);
+    gp.rotation.x = -Math.PI / 2;
+    gp.position.set(UP_O[0], streetY(o.floor ?? 2), UP_O[1]);
+    gp.receiveShadow = true;
+    g.add(gp);
+  }
   // cut box in the plan frame
   let umin = 1e9,
     umax = -1e9,
@@ -205,6 +211,79 @@ export function buildUpstairs(o: {
     segs,
     land: W(stair.u, stair.v - 1.8),
     upFoot,
+    box: { O: F.O, U: F.U, ub: [umin - 1, umax + 1, vmin - 1, vmax + 1] },
+  };
+}
+const hutMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 });
+const shadeMat = new THREE.ShadowMaterial({ opacity: 0.32, depthWrite: false });
+/**
+ * v24.30 the rooftop. The real roof, with its tin houses and tanks, is drawn in place (main.ts), so this is only what
+ * the stairs come out of (the stairwell hut with its steel door), something for shadows to fall on, and the collision:
+ * the parapet (the footprint), the hut, and whatever stands on the real roof (obs, already moved off-map).
+ */
+export function buildRoof(o: {
+  pts: V2[];
+  F: { O: V2; U: V2; N: V2 };
+  stair: { u: number; v: number };
+  seed: number;
+  obs?: V2[][];
+}): UpRoom {
+  const { pts, F, stair } = o;
+  const r = hash(o.seed ^ 0x51ed270b);
+  const W = (u: number, v: number): V2 => [F.O[0] + F.U[0] * u + F.N[0] * v, F.O[1] + F.U[1] * u + F.N[1] * v];
+  const frameM = new THREE.Matrix4().set(F.U[0], 0, F.N[0], F.O[0], 0, 1, 0, 0, F.U[1], 0, F.N[1], F.O[1], 0, 0, 0, 1);
+  const g = new THREE.Group();
+  g.name = 'rooftop';
+  const vc: THREE.BufferGeometry[] = [];
+  const segs: { a: V2; b: V2 }[] = [];
+  for (let i = 0; i < pts.length; i++) segs.push({ a: pts[i], b: pts[(i + 1) % pts.length] });
+  for (const q of o.obs ?? []) for (let i = 0; i < q.length; i++) segs.push({ a: q[i], b: q[(i + 1) % q.length] });
+  // the hut over the stairwell, door toward the landing (-v)
+  const { u, v } = stair;
+  const sm = frameM.clone().multiply(new THREE.Matrix4().makeTranslation(u, 0, v + 0.3));
+  const wall = [0xcfc9bb, 0xc4c8c0, 0xd6cdbd, 0xbdb7a8][Math.floor(r() * 4)];
+  const stain = wall - 0x1a1a1a;
+  for (const x of [-0.85, 0.85]) vc.push(box(0.12, 2.3, 2.4, x, 1.15, 0, wall, sm));
+  vc.push(box(1.7, 2.3, 0.12, 0, 1.15, 1.2, wall, sm));
+  for (const x of [-0.675, 0.675]) vc.push(box(0.35, 2.3, 0.12, x, 1.15, -1.2, wall, sm));
+  vc.push(box(1.0, 0.32, 0.12, 0, 2.14, -1.2, wall, sm));
+  vc.push(box(1.82, 0.5, 2.52, 0, 0.25, 0, stain, sm)); // the damp foot of the walls
+  vc.push(box(0.98, 1.98, 0.02, 0, 0.99, -1.1, 0x14120f, sm)); // dark inside
+  vc.push(box(0.05, 1.95, 0.9, 0.52, 0.98, -1.68, [0x6f4a3a, 0x4a5a66, 0x7a3a30][Math.floor(r() * 3)], sm)); // steel door, open
+  vc.push(box(0.04, 0.12, 0.04, 0.47, 1.0, -2.05, 0x2a2a2a, sm)); // its handle
+  vc.push(box(2.15, 0.12, 2.85, 0, 2.36, 0, 0x9a968c, sm)); // slab
+  vc.push(box(2.19, 0.05, 2.89, 0, 2.44, 0, 0x7f7b72, sm));
+  vc.push(box(1.0, 0.1, 0.5, 0, 0.05, -1.5, 0x8e8a80, sm)); // the step out
+  const c = [W(u - 0.92, v - 0.95), W(u + 0.92, v - 0.95), W(u + 0.92, v + 1.56), W(u - 0.92, v + 1.56)];
+  for (let i = 0; i < 4; i++) segs.push({ a: c[i], b: c[(i + 1) % 4] });
+  const m = new THREE.Mesh(mergeGeometries(vc), hutMat);
+  m.castShadow = m.receiveShadow = true;
+  g.add(m);
+  vc.forEach(q => q.dispose());
+  // shadows of the player and the hut, on the real roof underneath
+  const fl = new THREE.ShapeGeometry(new THREE.Shape(pts.map(q => new THREE.Vector2(q[0], -q[1]))));
+  fl.rotateX(-Math.PI / 2);
+  fl.translate(0, 0.03, 0);
+  const sf = new THREE.Mesh(fl, shadeMat);
+  sf.receiveShadow = true;
+  g.add(sf);
+  let umin = 1e9,
+    umax = -1e9,
+    vmin = 1e9,
+    vmax = -1e9;
+  for (const q of pts) {
+    const du = (q[0] - F.O[0]) * F.U[0] + (q[1] - F.O[1]) * F.U[1],
+      dv = (q[0] - F.O[0]) * F.N[0] + (q[1] - F.O[1]) * F.N[1];
+    umin = Math.min(umin, du);
+    umax = Math.max(umax, du);
+    vmin = Math.min(vmin, dv);
+    vmax = Math.max(vmax, dv);
+  }
+  return {
+    g,
+    segs,
+    land: W(u, v - 1.9),
+    upFoot: null,
     box: { O: F.O, U: F.U, ub: [umin - 1, umax + 1, vmin - 1, vmax + 1] },
   };
 }
