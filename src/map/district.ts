@@ -19,7 +19,8 @@ import { useOf, specialKind, type Use } from './clutter';
 import { Forest } from './trees';
 import { dressLots, lotMaterial, LOT_SHADOW } from './lots';
 const LOT_MAT = lotMaterial();
-import { placeRooftop, dressRoof, pickRoofMat, roofClass, roofDetMat, roofConc } from './rooftin';
+import { addLit } from './litwin';
+import { placeRooftop, dressRoof, pickRoofMat, roofClass, roofDetMat, roofConc, type RoofShed } from './rooftin';
 import { VehicleSystem, type VehicleKind } from '../systems/vehicles';
 import { readDistrictTiles, writeDistrictTiles } from '../systems/save';
 
@@ -56,6 +57,9 @@ export type DEnter = {
   via?: number;
   /** v24.28 doorways other buildings have into this one, through a shared wall (world) */
   holes?: [V2, V2][];
+  /** v24.32 the tin houses on its roof, and the footprints of what else stands there */
+  sheds?: RoofShed[];
+  roofObs?: V2[][];
   /** v23.6 public building kind (school, clinic, temple, market, police, office) from the OSM tags, if any */
   kind?: Use;
   minx: number;
@@ -277,6 +281,14 @@ const signTex = canvasTex(512, 384, c => {
 signTex.repeat.set(1, 1);
 const upperMat = new THREE.MeshStandardMaterial({ map: upperTex, vertexColors: true, roughness: 0.95 });
 const upperAltMat = new THREE.MeshStandardMaterial({ map: upperAltTex, vertexColors: true, roughness: 0.92 });
+// v24.32 lit windows at night (both textures have the same two panes in the same place)
+addLit(
+  upperAltMat,
+  [25 / 128, 33 / 128, 78 / 128, 56 / 128],
+  2,
+  2433,
+  addLit(upperMat, [25 / 128, 33 / 128, 78 / 128, 56 / 128], 2, 2433),
+);
 const shutMat = new THREE.MeshStandardMaterial({ map: shutTex, vertexColors: true, roughness: 0.8, metalness: 0.2 });
 const vcMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85 });
 const metalMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.45 });
@@ -1403,8 +1415,12 @@ export class District {
         const rg2 = new THREE.Group();
         placeRooftop(rg2, pts, h, rnd, pip as any, rcls);
         detail.add(rg2);
+        if (ent && rg2.userData.sheds) ent.sheds = rg2.userData.sheds;
       }
-      dressRoof(detail, pts, h, rnd, pip as any, true, roofKit);
+      // v24.32 what stands on this roof is solid to whoever climbs up (no draws from rnd: the stream is shared)
+      const robs: V2[][] = [];
+      dressRoof(detail, pts, h, rnd, pip as any, true, roofKit, robs);
+      if (ent && robs.length) ent.roofObs = robs;
     }
     // kerbside cars / taxis / kei trucks
     for (const r of td.r) {

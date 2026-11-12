@@ -158,11 +158,13 @@ const diff = (a, c) =>
     [a.toString('base64'), c.toString('base64')],
   );
 const near = (x, y, f) => Math.abs(x - y) <= Math.max(x, y) * f;
+// (6%: since v24.30 the furniture of the buildings around is drawn as soon as it is built, and which of them have been
+// built by now differs a little from run to run)
 for (const [name] of views) {
   const A = off.v[name],
     C = on.v[name];
   check(
-    near(A.r.calls, C.r.calls, 0.03) && near(A.r.tris, C.r.tris, 0.03),
+    near(A.r.calls, C.r.calls, 0.06) && near(A.r.tris, C.r.tris, 0.06),
     `${name}: the same draw calls and triangles (${A.r.calls}/${C.r.calls}, ${A.r.tris}/${C.r.tris})`,
   );
   const d = await diff(A.shot, C.shot);

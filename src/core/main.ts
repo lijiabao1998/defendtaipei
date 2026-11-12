@@ -24,7 +24,15 @@ import { ROLES, roleById, type Role } from '../player/roles';
 import type { FPV } from '../systems/fpv';
 import type { GameMap } from '../map/map';
 import { RocSystem, ROC_NAME, flagPole, rocFlagTex, type RocKind } from '../npc/roc';
-import { placeRooftop, dressRoof, pickRoofMat, setShackNight, roofClass, roofStats } from '../map/rooftin';
+import {
+  type RoofShed,
+  placeRooftop,
+  dressRoof,
+  pickRoofMat,
+  setShackNight,
+  roofClass,
+  roofStats,
+} from '../map/rooftin';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeLampBatches } from './lamps';
 import { ITEMS, LOOT } from '../systems/items';
@@ -68,6 +76,7 @@ import { SwingTrail } from '../systems/trail';
 import * as SQ from '../npc/squadai';
 import * as CL from '../map/clutter';
 import * as UP from '../map/upstairs';
+import { setLitWindows, litStats } from '../map/litwin';
 import * as BC from '../story/broadcasts/broadcast';
 import { Nav, smooth } from '../systems/nav';
 import { RoadTiles } from '../map/roads';
@@ -748,8 +757,154 @@ type UpState = {
   /** v24.1 floor number (2 = 2F) and the building's top floor */
   f: number;
   top: number;
+  /** v24.30 map → upstairs-space translation of this building, and the height of this floor above the street */
+  off: V2;
+  fy: number;
+  /** v24.30 this is the rooftop (f = top + 1): outdoors, nothing cut away, the real roof underfoot */
+  roof?: boolean;
+  /** pieces of furniture planned for this floor (checks) */
+  np?: number;
+  /** v24.32 on a rooftop: how many solid things stand on it besides the houses (checks) */
+  ro?: number;
 };
 let up: UpState | null = null;
+/** upstairs and under a ceiling (the rooftop is not) */
+const upIn = () => !!up && (!up.roof || !!roofShed());
+/** v24.31 where the player really stands (upstairs lives off-map): map x, z and the height of the floor underfoot */
+const realX = () => (up && REAL_UP ? player.pos.x - up.off[0] : player.pos.x);
+const realZ = () => (up && REAL_UP ? player.pos.z - up.off[1] : player.pos.z);
+const realY = () => (roofB ? roofB.h : up && REAL_UP ? up.fy : 0);
+const realPos = new THREE.Vector3();
+/** v24.32 seconds since the player last fired down at the street: the muzzle flash gives the window away */
+let upFireT = 0;
+/** the last round fired down at the street (checks) */
+let upShot: Record<string, unknown> | null = null;
+/** v24.32 how far the player upstairs is from the outer wall (or parapet), going toward (x, z) on the map */
+function upExit(x: number, z: number) {
+  const pts = up!.b.pts as V2[];
+  const rx = realX(),
+    rz = realZ();
+  const D = Math.hypot(x - rx, z - rz) || 1;
+  const ux = (x - rx) / D,
+    uz = (z - rz) / D;
+  for (let t = 0.2; t < 30; t += 0.2) if (!pip([rx + ux * t, rz + uz * t], pts)) return t;
+  return 30;
+}
+/**
+ * v24.32 a clear line between a point in the street (at height sy) and the head of the player upstairs: the player has
+ * to be at the wall on that side (a window, or the parapet of the roof) for the sill not to hide them, and nothing taller
+ * than the line may stand between.
+ */
+function upLos(sx: number, sz: number, sy = 1.6) {
+  const u = up!;
+  if (u.roof && roofShed()) return false;
+  const rx = realX(),
+    rz = realZ();
+  const D = Math.hypot(sx - rx, sz - rz);
+  if (D < 0.6) return false;
+  const e = upExit(sx, sz);
+  const py = u.fy + 1.55;
+  if (e > (u.roof ? 2.5 : 1.6) || ((py - sy) * e) / D > 0.55) return false;
+  const pts = u.b.pts as V2[];
+  for (let t = 1; t < D - e; t += 1) {
+    const x = sx + ((rx - sx) * t) / D,
+      z = sz + ((rz - sz) * t) / D;
+    if (roofAt(x, z) > sy + ((py - sy) * t) / D + 0.2 && !pip([x, z], pts)) return false;
+  }
+  return true;
+}
+function tracer3(a: THREE.Vector3, b: THREE.Vector3) {
+  const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), tracerMat);
+  scene.add(l);
+  fx.push({ o: l, t: 0.1 });
+}
+const aimSt = new THREE.Vector3();
+/**
+ * v24.32 from a window upstairs or over the parapet, a round aimed at the street goes down into the street: the cursor is
+ * read on the real ground (through the camera of the world pass), a soldier near it is what is aimed at, and the round
+ * is stopped by whatever stands taller than its path. Returns false when the aim is inside the building (an ordinary shot).
+ */
+function streetShot(d: any): boolean {
+  const u = up!;
+  if (u.roof && roofShed()) return false;
+  const rx = realX(),
+    rz = realZ(),
+    ey = u.fy + 1.4;
+  let tx: number, tz: number;
+  if (MOBILE) {
+    const ax = aimPt.x - player.pos.x,
+      az = aimPt.z - player.pos.z,
+      L = Math.hypot(ax, az) || 1;
+    tx = rx + (ax / L) * 25;
+    tz = rz + (az / L) * 25;
+  } else {
+    ray.setFromCamera(mouse, upCam);
+    if (!ray.ray.intersectPlane(plane, aimSt)) return false;
+    tx = aimSt.x;
+    tz = aimSt.z;
+  }
+  const pts = u.b.pts as V2[];
+  if (pip([tx, tz], pts)) return false;
+  if (upExit(tx, tz) > (u.roof ? 2.5 : 2.2)) return false; // not at the window: the round stays in the room
+  // what is aimed at: the soldier nearest the cursor (on a phone, nearest the way the player faces)
+  let best: Sol | null = null,
+    bd = MOBILE ? 0.35 : 2.6;
+  const a0 = Math.atan2(tz - rz, tx - rx);
+  for (const q of sols) {
+    if (q.state === 'dead' || !q.mesh.visible) continue;
+    const dd = MOBILE
+      ? Math.abs(
+          Math.atan2(
+            Math.sin(Math.atan2(q.pos.z - rz, q.pos.x - rx) - a0),
+            Math.cos(Math.atan2(q.pos.z - rz, q.pos.x - rx) - a0),
+          ),
+        )
+      : Math.hypot(q.pos.x - tx, q.pos.z - tz);
+    if (dd < bd && Math.hypot(q.pos.x - rx, q.pos.z - rz, ey) < d.range * 1.5) ((bd = dd), (best = q));
+  }
+  if (best) ((tx = best.pos.x), (tz = best.pos.z));
+  const o = new THREE.Vector3(rx, ey, rz);
+  const dir = new THREE.Vector3(tx - rx, 1.0 - ey, tz - rz);
+  const reach = Math.min(d.range * 1.5, (dir.length() * ey) / (ey - 1.0) + 0.5); // to the ground at the latest
+  dir.normalize();
+  const e = upExit(tx, tz);
+  let hit: Sol | null = null,
+    end = reach;
+  walk: for (let t = 0.4; t < reach; t += 0.35) {
+    const x = rx + dir.x * t,
+      y = ey + dir.y * t,
+      z = rz + dir.z * t;
+    if (y < 0) {
+      end = t;
+      break;
+    }
+    if (Math.hypot(dir.x, dir.z) * t > e + 0.3 && !pip([x, z], pts) && roofAt(x, z) > y) {
+      end = t;
+      break;
+    }
+    for (const q of sols) {
+      if (q.state === 'dead' || !q.mesh.visible) continue;
+      if (Math.hypot(q.pos.x - x, q.pos.z - z) < 0.5 && y < (q.crouch ? 1.2 : 1.75)) {
+        hit = q;
+        end = t;
+        break walk;
+      }
+    }
+  }
+  tracer3(o, o.clone().addScaledVector(dir, end));
+  upFireT = 6;
+  upShot = { aim: [tx, tz], snapped: !!best, exit: e, reach, end, hit: !!hit };
+  if (hit) damageSol(hit, d.dmg * (0.8 + rnd() * 0.4), false);
+  return true;
+}
+/** v24.31 the player has come up the stairs to where this sniper is: his roof, or his room on the top floor */
+const snpLevel = (s: Sniper) =>
+  !!up && REAL_UP && up.b === s.b && (s.kind === 'window' ? !up.roof && up.f === up.top : !!up.roof);
+/**
+ * v24.30 upstairs, the real world is drawn in place around and below the floor (two passes, see drawUpstairs) instead of
+ * stand-in boxes and a stand-in street. ?fakeup=1 brings the stand-ins back, for comparison.
+ */
+const REAL_UP = !/[?&]fakeup=1/.test(location.search);
 /** v24.1 storeys of a building (ground floor = 1), from its modelled height */
 const storeys = (b: { h: number }) => Math.max(1, Math.min(14, Math.round((b.h - GF) / FH) + 1));
 const floorZh = (f: number) =>
@@ -796,7 +951,11 @@ function placeAt(x: number, z: number): Bld | DEnter | null {
 /** v23.3 indoors for player-facing checks (sleep, shelter, drones, muffled sound): core or district building */
 function indoorAt(x: number, z: number) {
   return (
-    UP.isUp(x) || !!placeAt(x, z) || district.landmarkRoofAt(x, z) || !!huaxi?.covers(x, z) || !!market?.covers(x, z)
+    (UP.isUp(x) && upIn()) ||
+    !!placeAt(x, z) ||
+    district.landmarkRoofAt(x, z) ||
+    !!huaxi?.covers(x, z) ||
+    !!market?.covers(x, z)
   );
 }
 
@@ -917,7 +1076,7 @@ setBoomFx((p, big) => {
   const d = Math.hypot(q[0] - p.x, q[1] - p.z);
   blastFx.explode(p, big);
   blastFx.kick(d, big);
-  AU.shellBoom(d, !!up || indoorAt(player.pos.x, player.pos.z), big);
+  AU.shellBoom(d, upIn() || indoorAt(player.pos.x, player.pos.z), big);
 });
 /** shell damage factor at distance d: full lethal core, then quadratic falloff to the wounding radius */
 function shellDmg(d: number) {
@@ -1076,7 +1235,7 @@ function setupHeli() {
   heli = new HeliPatrols({
     scene,
     player: () => player.pos,
-    hidden: () => !flyingNow() && (!!up || heliCover()),
+    hidden: () => !flyingNow() && (upIn() || heliCover()),
     night: () => isNight(),
     routes: () => routes,
     roofAt,
@@ -1093,7 +1252,7 @@ function setupHeli() {
         log(tr('被機槍打中，流血了！', 'A round from above hits you. You are bleeding!'), '#f66');
       }
     },
-    gun: dist => AU.gunshot('mg', dist, !!up || indoorAt(player.pos.x, player.pos.z)),
+    gun: dist => AU.gunshot('mg', dist, upIn() || indoorAt(player.pos.x, player.pos.z)),
     rotor: dist => AU.rotor(dist, 1.2),
     salvo: (x, z) => warBarrage(2, [x, z]),
     smoke: (x, y, z, fire) => {
@@ -1512,7 +1671,7 @@ function warTick(dt: number) {
     const dist = 140 + Math.random() * 380;
     const kind = Math.random() < 0.3 ? 'mg' : 'rifle';
     const n = 3 + Math.floor(Math.random() * (5 + 10 * L));
-    const indoors = !!up || indoorAt(player.pos.x, player.pos.z);
+    const indoors = upIn() || indoorAt(player.pos.x, player.pos.z);
     for (let i = 0; i < n; i++)
       setTimeout(() => AU.gunshot(kind as any, dist, indoors), i * (kind === 'mg' ? 90 : 170 + Math.random() * 240));
   }
@@ -2340,12 +2499,12 @@ function buildMap(data: any) {
           if (shack) {
             let sd = s7;
             const pr = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
-            placeRooftop(roofG, pts as any, h, pr, pip as any, rcls);
+            placeRooftop(roofG, pts as any, h, pr, pip as any, rcls, true);
           }
           {
             let sd = s8;
             const pr = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
-            dressRoof(roofG, pts as any, h, pr, pip as any, A > 25);
+            dressRoof(roofG, pts as any, h, pr, pip as any, A > 25, undefined, (roofG.userData.obs ??= []));
           }
           if (A < 600) {
             let sd = s8 ^ 0x5bd1;
@@ -2497,6 +2656,7 @@ function buildLamps() {
 let lampT = 0;
 function updateLamps(night: number, dt: number) {
   setShackNight(night);
+  setLitWindows(UT.power ? night : 0); // v24.32 windows lit in the walls, while there is power
   lampHeadMat.emissiveIntensity = night * 2.5;
   lampT -= dt;
   if (lampT > 0) return;
@@ -5084,6 +5244,7 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
   };
   const st = P.stair!;
   const top = storeys(b);
+  if (REAL_UP && f === top + 1) return goRoof(b, P, bUp.pts, off);
   // 2F keeps its v23.4 seed and container ids (existing saves); higher floors get their own
   const seed0 = ((dist ? dist.id : (b.id + 1) * 2654435761) ^ 0x5bd1e995) >>> 0;
   const seed = f === 2 ? seed0 : (seed0 ^ Math.imul(f, 0x9e3779b1)) >>> 0;
@@ -5093,11 +5254,16 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
       : f === 2
         ? `u${b.id}_${n}`
         : `u${b.id}_${(f - 2) * 100 + n}`;
-  const fl = f < top ? upFlightAt(b, P) : null;
+  // (v24.30 the top floor has a flight too: it goes to the roof)
+  const fl = f < top + (REAL_UP ? 1 : 0) ? upFlightAt(b, P) : null;
   const reserve: [number, number, number, number][] = [[st.u - 0.8, st.v - 2.5, st.u + 0.8, st.v + 1.3]];
   if (fl) reserve.push([fl.u - 0.75, fl.v - 2.5, fl.u + 0.75, fl.v + 1.3]);
   // same frame as the ground plan (same door), furniture kept off the stair opening, the upper flight and landings
-  const P2 = CL.plan(bUp, { pip, onRoad: () => false }, { seed, contId, reserve, noStair: true });
+  const P2 = CL.plan(
+    bUp,
+    { pip, onRoad: () => false },
+    { seed, contId, reserve, noStair: true, upper: REAL_UP ? { f, top } : undefined },
+  );
   if (!P2) return false;
   const street = (i: number) => {
     const a = b.pts[i],
@@ -5118,10 +5284,11 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
     seed,
     floor: f,
     upFlight: fl,
+    noStreet: REAL_UP,
   });
   scene.add(room.g);
   // v24.9 the neighbours around this floor (nearest first), at their heights relative to it
-  {
+  if (!REAL_UP) {
     const near: { pts: V2[]; h: number; d: number }[] = [];
     for (const q of blds)
       if (q !== b) {
@@ -5138,6 +5305,8 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
     if (nb) room.g.add(nb);
   }
   const furn = CL.build(P2);
+  // v24.30 up here a bed and a wardrobe throw shadows across the room (one floor at a time: it costs one draw)
+  if (REAL_UP) furn.traverse(o => ((o as THREE.Mesh).isMesh ? (o.castShadow = true) : 0));
   scene.add(furn);
   const segs: Seg[] = [];
   for (const q of room.segs) {
@@ -5161,7 +5330,21 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
     c.mesh.visible = false;
     cs.push(c);
   }
-  up = { b, dist, P, room, furn, segs, conts: cs, anchor: stairFoot(b, P), f, top };
+  up = {
+    b,
+    dist,
+    P,
+    room,
+    furn,
+    segs,
+    conts: cs,
+    anchor: stairFoot(b, P),
+    f,
+    top,
+    off,
+    fy: UP.floorY(f),
+    np: P2.pieces.length,
+  };
   rescueFloor(b, P2, f, bUp.pts);
   const at = fromAbove && room.upFoot ? room.upFoot : room.land;
   player.pos.set(at[0], 0, at[1]);
@@ -5174,6 +5357,124 @@ function goFloor(b: Bld | DEnter, P: CL.Plan, f: number, fromAbove = false) {
     '#fd9',
   );
   return true;
+}
+/** v24.30 the rooftop of b: the stairs come out of a hut, the parapet is the footprint, the real roof is underfoot */
+function goRoof(b: Bld | DEnter, P: CL.Plan, pts: V2[], off: V2) {
+  const dist = isDEnter(b) ? b : null;
+  const top = storeys(b);
+  const T = (q: V2): V2 => [q[0] + off[0], q[1] + off[1]];
+  const obs = ((dist ? dist.roofObs : (b as any).roof?.userData.obs) as V2[][] | undefined)?.map(q => q.map(T));
+  const st = P.stair!;
+  const F = { O: T(P.O), U: P.U, N: P.N };
+  const hutC: V2 = [F.O[0] + F.U[0] * st.u + F.N[0] * (st.v + 0.3), F.O[1] + F.U[1] * st.u + F.N[1] * (st.v + 0.3)];
+  // v24.32 the tin houses: walked into by their doors (not the one the stairs come up through: that is the hut)
+  const sheds = ((dist ? dist.sheds : (b as any).roof?.userData.sheds) as RoofShed[] | undefined)
+    ?.map(h => ({ ...h, c: T(h.c) }))
+    .filter(h => {
+      const dx = hutC[0] - h.c[0],
+        dz = hutC[1] - h.c[1];
+      const lx = dx * Math.cos(h.ang) + dz * Math.sin(h.ang),
+        lz = -dx * Math.sin(h.ang) + dz * Math.cos(h.ang);
+      return Math.abs(lx) > h.w / 2 + 3.2 || Math.abs(lz) > h.d / 2 + 3.2;
+    });
+  const seed0 = ((dist ? dist.id : (b.id + 1) * 2654435761) ^ 0x7f4a7c15) >>> 0;
+  const room = UP.buildRoof({ pts, F, stair: st, seed: seed0, obs, sheds });
+  scene.add(room.g);
+  const segs: Seg[] = [];
+  for (const q of room.segs) {
+    const sg = { a: q.a, b: q.b } as Seg;
+    addSeg(sg);
+    segs.push(sg);
+  }
+  const furn = new THREE.Group();
+  scene.add(furn);
+  // each house is a room: furnished from its own door, with its own things to find
+  const cs: Cont[] = [];
+  const sv = dist ? district.saved[dist.key]?.c || {} : null;
+  let np = 0;
+  (sheds ?? []).slice(0, 6).forEach((h, i) => {
+    if (h.door === undefined) return;
+    const ca = Math.cos(h.ang),
+      sa = Math.sin(h.ang);
+    const L = (lx: number, lz: number): V2 => [h.c[0] + lx * ca - lz * sa, h.c[1] + lx * sa + lz * ca];
+    const cps = [L(-h.w / 2, -h.d / 2), L(h.w / 2, -h.d / 2), L(h.w / 2, h.d / 2), L(-h.w / 2, h.d / 2)];
+    const fake = {
+      id: 900000 + i,
+      pts: cps,
+      door: { p: L(h.door, h.d / 2), a: L(h.door - 0.5, h.d / 2), c: L(h.door + 0.5, h.d / 2) },
+      type: 'home',
+      h: 3,
+      minx: Math.min(...cps.map(q => q[0])),
+      maxx: Math.max(...cps.map(q => q[0])),
+      minz: Math.min(...cps.map(q => q[1])),
+      maxz: Math.max(...cps.map(q => q[1])),
+    };
+    const contId = (n: number) =>
+      dist ? `t${dist.key}:${20000 * top + dist.bi * 64 + i * 10 + n}` : `u${b.id}_${(top - 1) * 100 + i * 10 + n}`;
+    const P3 = CL.plan(
+      fake,
+      { pip, onRoad: () => false },
+      {
+        seed: (seed0 ^ Math.imul(i + 1, 0x9e3779b1)) >>> 0,
+        contId,
+        noStair: true,
+        upper: { f: 99, top: 99, shed: true },
+      },
+    );
+    if (!P3) return;
+    np += P3.pieces.length;
+    const fg = CL.build(P3);
+    fg.traverse(o => ((o as THREE.Mesh).isMesh ? (o.castShadow = true) : 0));
+    furn.add(fg);
+    for (const q of P3.segs) {
+      const sg = { a: q.a, b: q.b, h: q.h } as Seg;
+      addSeg(sg, q.h < 1.3);
+      segs.push(sg);
+    }
+    for (const k of P3.conts.slice(0, 9)) {
+      let x = k.seed >>> 0;
+      const r = () => (x = (x * 1664525 + 1013904223) >>> 0) / 4294967296;
+      const items = (sv ? sv[+k.id.split(':')[1]] : savedF.get(k.id)) ?? rollLoot(k.loot, r);
+      const c = makeCont(k.id, k.p, 'crate', undefined, { ...items });
+      c.label = k.label;
+      c.mesh.visible = false;
+      cs.push(c);
+    }
+  });
+  up = {
+    b,
+    dist,
+    P,
+    room,
+    furn,
+    segs,
+    conts: cs,
+    anchor: stairFoot(b, P),
+    f: top + 1,
+    top,
+    off,
+    fy: b.h,
+    roof: true,
+    np,
+    ro: obs?.length ?? 0,
+  };
+  player.pos.set(room.land[0], 0, room.land[1]);
+  player.vel.set(0, 0, 0);
+  player.cover = null;
+  log(tr('你推開鐵門，走上頂樓。', 'You push the steel door open and step onto the rooftop.'), '#fd9');
+  return true;
+}
+/** v24.32 the tin house on this rooftop that the player is standing in, if any */
+function roofShed() {
+  if (!up?.roof) return null;
+  for (const h of up.room.sheds ?? []) {
+    const dx = player.pos.x - h.O[0],
+      dz = player.pos.z - h.O[1];
+    const u = dx * h.U[0] + dz * h.U[1],
+      v = -dx * h.U[1] + dz * h.U[0];
+    if (u > h.ub[0] + 0.25 && u < h.ub[1] - 0.25 && v > h.ub[2] + 0.25 && v < h.ub[3] - 0.25) return h;
+  }
+  return null;
 }
 /** v24.1 leave the current upper floor: keep what was taken, drop its meshes, collision and containers */
 function leaveFloor() {
@@ -5581,7 +5882,10 @@ function snpEye(s: Sniper): V2 {
 }
 function setupSnipers() {
   if (snp) return;
-  const posts = findPosts(roads, blds);
+  const posts = findPosts(roads, blds, undefined, undefined, {
+    stairs: b => REAL_UP && !!(b as any).clut?.stair,
+    topY: b => UP.floorY(storeys(b)),
+  });
   surv.snpDead ||= [];
   snp = new SniperSys(
     posts,
@@ -5602,14 +5906,16 @@ function setupSnipers() {
       },
       animate: (r, a, dt) => animate(r, a as AnimState, 0, dt),
       sees: s => {
-        if (roofB === s.b) return true;
+        if (roofB === s.b || snpLevel(s)) return true;
         if (roofB) return false;
+        // v24.31 upstairs: under a ceiling he cannot see in; on a rooftop there is nothing to hide behind
+        if (up) return !!up.roof && up.b !== s.b;
         const P: V2 = [player.pos.x, player.pos.z];
         if (indoorAt(P[0], P[1])) return false; // indoors / under the arcade
         if (vehicles.list.some(v => Math.hypot(v.pos.x - P[0], v.pos.z - P[1]) < 1.8)) return false; // behind a car
         return los(snpEye(s), P);
       },
-      player: () => player.pos,
+      player: () => realPos.set(realX(), realY(), realZ()),
       hurt: dmg => {
         if (player.sleeping) player.sleeping = false;
         player.rig.hurtT = 0.35;
@@ -5665,6 +5971,8 @@ function setupSnipers() {
 function roofDoor() {
   if (!snp) return null;
   for (const s of snp.list) {
+    // v24.31 a building with stairs is climbed floor by floor, like any other
+    if (REAL_UP && (s.b as any).clut?.stair) continue;
     const d = s.b.door;
     if (d && Math.hypot(d.p[0] - player.pos.x, d.p[1] - player.pos.z) < 2) return s;
   }
@@ -5707,7 +6015,7 @@ function scopeExit() {
   scope.exit();
   if (moral && moral.t > 0) moralEnd(false);
 }
-const eyeY = () => (roofB ? roofB.h : 0) + 1.55;
+const eyeY = () => realY() + 1.55;
 /** a scoped shot: bullet drop (≈300 m/s), head / body hit zones, stops at buildings and the ground; loud */
 function scopeFire() {
   const k = player.equip;
@@ -5718,13 +6026,15 @@ function scopeFire() {
   player.cd = d.cd;
   gunFx(player.rig, true);
   AU.gunshot(AU.gunKind(k, d), 0, indoorAt(player.pos.x, player.pos.z));
-  noise(player.pos.x, player.pos.z, 80); // a rifle crack: soldiers come to search
-  const o = new THREE.Vector3(player.pos.x, eyeY(), player.pos.z);
+  noise(...mapPos(), 80); // a rifle crack: soldiers come to search
+  const o = new THREE.Vector3(realX(), eyeY(), realZ());
+  // v24.31 from a window upstairs the round leaves through this building's own wall
+  const own = up && REAL_UP && !up.dist ? (up.b as Bld) : null;
   let hit: { s?: Sniper; sol?: Sol; head: boolean } | null = null;
   const r = ballistic(o, scope.dir(), 260, 300, (p, dist) => {
     if (dist > 1.5) {
       const b = bldAt(p.x, p.z);
-      if (b && b !== roofB && p.y < b.h) return true;
+      if (b && b !== roofB && !(b === own && (up!.roof || dist < 14)) && p.y < b.h) return true;
       if (roofB && b === roofB && p.y < roofB.h) return true;
     }
     for (const s of snp?.list || []) {
@@ -5822,6 +6132,7 @@ function moralEnd(shot: boolean) {
 function snpUpdate(dt: number) {
   if (!snp) return;
   snp.update(dt, gameMin);
+  for (const q of snp.list) if (q.rig) q.rig.root.visible = !(up && REAL_UP && up.b === q.b) || snpLevel(q);
   if (scope.on) {
     if (!scopeAllowed()) scopeExit();
     if (
@@ -6967,11 +7278,15 @@ function playerAttack() {
     if (--player.inv[d.ammo] <= 0) delete player.inv[d.ammo];
     gunFx(player.rig, true);
     AU.gunshot(AU.gunKind(k, d), 0, indoorAt(player.pos.x, player.pos.z));
-    noise(player.pos.x, player.pos.z, d.noise);
+    {
+      const [nx, nz] = mapPos(); // (upstairs: heard in the street below)
+      noise(nx, nz, d.noise);
+    }
     if (d.at) {
       fireAT(k, d, dir);
       return;
     }
+    if (up && REAL_UP && streetShot(d)) return;
     // v21.4 the round stops at the first wall / cover it meets (aimed at chest height)
     const P0: V2 = [player.pos.x, player.pos.z];
     let hit: Sol | null = null,
@@ -7042,6 +7357,26 @@ function meleeTick(dt: number) {
   swingTrail.update(dt);
 }
 function meleeResolve(d: any, dir: THREE.Vector3): Sol | null {
+  if (up && snp) {
+    // v24.31 up the real stairs to where he is: the same close work as on the old rooftops
+    const u = up;
+    const s = snp.list.find(
+      q =>
+        !q.dead &&
+        snpLevel(q) &&
+        Math.hypot(q.p[0] + u.off[0] - player.pos.x, q.p[1] + u.off[1] - player.pos.z) < d.range + 0.6,
+    );
+    if (s) {
+      snp.hit(s, d.dmg * 4, s.st !== 'aim');
+      log(
+        s.dead
+          ? tr('你從背後制伏了狙擊手。', 'You subdue the sniper from behind.')
+          : tr('狙擊手掙扎反抗！', 'The sniper fights back!'),
+        '#ff9',
+      );
+      return null;
+    }
+  }
   if (roofB && snp) {
     const s = snp.list.find(
       q => !q.dead && q.b === roofB && Math.hypot(q.p[0] - player.pos.x, q.p[1] - player.pos.z) < d.range + 0.6,
@@ -8011,13 +8346,15 @@ function update(dt: number) {
     player.mesh.position.y += roofB ? roofB.h : walkH(player.pos.x, player.pos.z); // v21.4 stand on the raised walk (v22.5 or a roof)
   }
   // v21.2 shader cutaway around the camera→player line (see occlusion.ts); camera itself unchanged
-  OCC.r.value = up || indoorAt(player.pos.x, player.pos.z) ? 3 : 6; // v24.16 outdoors: see the street behind the block
+  OCC.r.value = upIn() || indoorAt(player.pos.x, player.pos.z) ? 3 : 6; // v24.16 outdoors: see the street behind the block
   const aloft = flyingNow(); // v24.24 the city from above: nothing is cut away, nothing counts as being inside
   updateOcclusion(player.pos.x, player.pos.y, player.pos.z, !aloft);
   // v23.3 inside an enterable district building: cut its upper floors and roof away (core blocks lower their walls)
   setBuildingCut(
     up
-      ? up.room.box
+      ? up.roof
+        ? roofShed() // v24.32 inside a tin house on the roof: its roof comes off like any other room's
+        : up.room.box
       : player.pos.z < -6000 || roofB || aloft
         ? null
         : (district.enterAt(player.pos.x, player.pos.z) ??
@@ -8027,21 +8364,32 @@ function update(dt: number) {
           null),
   );
   // buildings cutaway
-  const inside = aloft ? null : bldAt(player.pos.x, player.pos.z);
+  // v24.30 upstairs the world is drawn in place under the floor: these rules then work from where the floor really is,
+  // the building itself keeps its real walls up to the floor (the cut takes what is above), and only what stands
+  // taller than the floor between it and the camera goes see-through
+  const upReal = up && REAL_UP ? up : null;
+  const bx = upReal ? player.pos.x - upReal.off[0] : player.pos.x,
+    bz = upReal ? player.pos.z - upReal.off[1] : player.pos.z;
+  const inside = aloft ? null : upReal ? (upReal.dist ? null : (upReal.b as Bld)) : bldAt(player.pos.x, player.pos.z);
   for (const b of blds) {
-    const dx = b.c[0] - player.pos.x,
-      dz = b.c[1] - player.pos.z;
+    const dx = b.c[0] - bx,
+      dz = b.c[1] - bz;
     const near = Math.abs(dx) < 40 && Math.abs(dz) < 40;
-    const front = !aloft && near && dx + dz > -4 && dx + dz < 30 && Math.abs(dx - dz) < 22 && b.h > 4;
+    const front =
+      !aloft && near && dx + dz > -4 && dx + dz < 30 && Math.abs(dx - dz) < 22 && b.h > 4 + (upReal ? upReal.fy : 0);
     const mi = (b as any).mi;
-    b.walls.material = front || b === inside ? wallMatsT[mi] : wallMats[mi];
-    b.roof.visible = b !== inside && !front;
-    b.walls.scale.y = b === inside ? 0.12 : 1;
-    if (b.innerWalls) b.innerWalls.visible = b === inside;
+    const own = !!upReal && b === inside;
+    b.walls.material = !own && (front || b === inside) ? wallMatsT[mi] : wallMats[mi];
+    b.roof.visible = (b !== inside || !!upReal?.roof) && !front;
+    b.walls.scale.y = b === inside && !own ? 0.12 : 1;
+    if (b.innerWalls) b.innerWalls.visible = b === inside && !own;
   }
+  for (const m of wallMats) m.userData.cut = !!upReal;
   // soldiers
   const night = isNight();
-  const pp: V2 = [player.pos.x, player.pos.z];
+  // v24.32 upstairs the soldiers deal with where the player really is: over their heads, at a window or a parapet
+  const pp: V2 = upReal ? [bx, bz] : [player.pos.x, player.pos.z];
+  upFireT = Math.max(0, upFireT - dt);
   assignSquads(night);
   updateGrenades(dt, night);
   for (const s of sols) {
@@ -8055,22 +8403,26 @@ function update(dt: number) {
     s.mesh.visible = active;
     s.cone.visible = active;
     if (!active) continue;
-    const dx = player.pos.x - s.pos.x,
-      dz = player.pos.z - s.pos.z;
-    const dist = Math.hypot(dx, dz);
-    if (dist > 120) continue; // dormant far away
+    const dx = pp[0] - s.pos.x,
+      dz = pp[1] - s.pos.z;
+    const dist = upReal ? Math.hypot(dx, dz, upReal.fy) : Math.hypot(dx, dz);
+    // dormant far away (v24.30 upstairs: far from the building, so the street below keeps moving)
+    if ((upReal ? Math.hypot(up!.anchor[0] - s.pos.x, up!.anchor[1] - s.pos.z) : dist) > 120) continue;
     // vision
     let range = (night ? 11 : 20) * (player.sneak ? 0.55 : 1) * (player.light && night ? 2 : 1);
-    if (inside) range *= 0.6;
+    if (inside && !upReal)
+      range *= 0.6; // (upstairs `inside` is the building the player is up in, not a room they are seen in)
     else range *= 1 - WX.amt * 0.3; // v24.11 a downpour hides you
     const facing =
       Math.abs(Math.atan2(Math.sin(Math.atan2(dz, dx) - s.dir), Math.cos(Math.atan2(dz, dx) - s.dir))) < Math.PI / 5;
-    const sees =
-      (dist < range &&
-        (facing || dist < 1.6) &&
-        !player.sleeping &&
-        shotRay([s.pos.x, s.pos.z], pp, 1.6, playerAimH() + 0.1, 0.6) >= 1) ||
-      (player.sleeping && dist < 2.5);
+    const sees = upReal
+      ? // a head at a window is seen from further off, and one that has just fired from it from further still
+        dist < range * (upFireT > 0 ? 3 : 1.4) && (facing || upFireT > 0) && !player.sleeping && upLos(s.pos.x, s.pos.z)
+      : (dist < range &&
+          (facing || dist < 1.6) &&
+          !player.sleeping &&
+          shotRay([s.pos.x, s.pos.z], pp, 1.6, playerAimH() + 0.1, 0.6) >= 1) ||
+        (player.sleeping && dist < 2.5);
     if (sees) {
       s.alert += dt * (1.6 - dist / range) * 1.6;
       if (s.state !== 'combat') {
@@ -8089,7 +8441,7 @@ function update(dt: number) {
     let goal: V2 | null = null,
       sp = night ? 1.6 : 2.0;
     if (s.state === 'patrol') {
-      goal = s.route[s.wi];
+      goal = s.route[s.wi] ?? s.route[0]; // (a route of one point leaves wi past its end)
       if (Math.hypot(goal[0] - s.pos.x, goal[1] - s.pos.z) < 1) {
         s.wi += 1;
         if (s.wi >= s.route.length) {
@@ -8117,8 +8469,8 @@ function update(dt: number) {
       }
     } else if (s.state === 'combat') {
       s.cd -= dt;
-      if (sees && dist < 24) {
-        goal = dist > 8 ? pp : null;
+      if (sees && dist < (upReal ? 60 : 24)) {
+        goal = dist > 8 && !upReal ? pp : null; // (nobody runs at a wall to shoot up it)
         s.dir = Math.atan2(dz, dx);
         // v21.4 enemies use cover: run to the nearest cover between them and you, then crouch / peek and fire
         s.covT = (s.covT || 0) - dt;
@@ -8195,9 +8547,14 @@ function update(dt: number) {
           AU.gunshot('rifle', dist, !!bldAt(s.pos.x, s.pos.z) || indoorAt(player.pos.x, player.pos.z));
           noise(s.pos.x, s.pos.z, 40);
           // v21.4 ray against walls / cover first, then the hit roll (lower vs a covered target)
-          const clear = shotRay([s.pos.x, s.pos.z], pp, 1.4, playerAimH(), 1.0);
+          const clear = upReal
+            ? upLos(s.pos.x, s.pos.z, 1.4)
+              ? 1
+              : 0
+            : shotRay([s.pos.x, s.pos.z], pp, 1.4, playerAimH(), 1.0);
           const hitP =
-            (0.55 - dist / 60) *
+            Math.max(0.08, 0.55 - dist / 60) *
+            (upReal ? 0.55 : 1) * // up at a window: a head and shoulders
             (player.sneak ? 0.7 : 1) *
             (night ? 0.7 : 1) *
             (player.cover ? 0.5 : 1) *
@@ -8207,7 +8564,14 @@ function update(dt: number) {
             clear < 1
               ? new THREE.Vector3(s.pos.x + (pp[0] - s.pos.x) * clear, 0, s.pos.z + (pp[1] - s.pos.z) * clear)
               : new THREE.Vector3(player.pos.x + (rnd() - 0.5) * 3, 0, player.pos.z + (rnd() - 0.5) * 3);
-          tracer(s.pos, hitIt ? player.pos : miss);
+          if (upReal)
+            tracer3(
+              new THREE.Vector3(s.pos.x, 1.3, s.pos.z),
+              hitIt
+                ? new THREE.Vector3(bx, upReal.fy + 1.3, bz)
+                : new THREE.Vector3(bx + (rnd() - 0.5) * 2.4, upReal.fy + 0.6 + rnd() * 2, bz + (rnd() - 0.5) * 2.4),
+            );
+          else tracer(s.pos, hitIt ? player.pos : miss);
           coverStats.enemyShots++;
           if (clear < 1) coverStats.blocked++;
           if (hitIt) {
@@ -8271,7 +8635,7 @@ function update(dt: number) {
     }
     let moved = 0;
     if (s.state !== 'combat') ((s.cov = null), (s.crouch = false));
-    s.aiming = s.state === 'combat' && sees && dist < 24 && !(s.stun! > 0) && !s.crouch;
+    s.aiming = s.state === 'combat' && sees && dist < (upReal ? 60 : 24) && !(s.stun! > 0) && !s.crouch;
     if (s.stun! > 0) {
       s.stun! -= dt;
       goal = null;
@@ -8597,7 +8961,10 @@ function drawHud(inside: Bld | null) {
   const rd = roofB ? null : roofDoor();
   if (up && upFlightFoot() && !panelOpen) {
     pr.style.display = 'block';
-    pr.textContent = tr(`[E] 上樓（${floorZh(up.f + 1)}）`, `[E] Go upstairs (${floorZh(up.f + 1)})`);
+    pr.textContent =
+      up.f + 1 > up.top
+        ? tr('[E] 上頂樓', '[E] Go up to the rooftop')
+        : tr(`[E] 上樓（${floorZh(up.f + 1)}）`, `[E] Go upstairs (${floorZh(up.f + 1)})`);
   } else if (up && upLanding() && !panelOpen) {
     pr.style.display = 'block';
     pr.textContent = tr(`[E] 下樓（回${floorZh(up.f - 1)}）`, `[E] Go downstairs (${floorZh(up.f - 1)})`);
@@ -8727,6 +9094,87 @@ function die() {
       ? `<h1 style="color:#c33">You died</h1><h2>This is how your story ends.</h2><p>You survived occupied Taipei for ${day} days, defeated ${player.kills} occupation troops and reclaimed ${liberated.size} districts.</p><button onclick="location.reload()">Start again (new survivor)</button>`
       : `<h1 style="color:#c33">你陣亡了</h1><h2>這就是你的結局。</h2><p>你在淪陷的台北撐過了 ${day} 天，擊倒 ${player.kills} 名佔領軍，奪回了 ${liberated.size} 個街區。</p><button onclick="location.reload()">重新開始（新的倖存者）</button>`;
 }
+/**
+ * v24.30 an upper floor lives off-map (its own collision, its own furniture), but it is drawn where it really is. Two
+ * passes into the same frame: first the world, with the camera moved by the same step that separates the floor from its
+ * building, so every real wall, roof and street lands where it would be seen from this floor; then the floor itself.
+ * The step is a pure translation and the projection is orthographic, so the two depth buffers agree and each hides the
+ * other correctly. The cutaway uniforms and the sun are moved with the first pass and put back for the second.
+ */
+const upCam = camera.clone(false);
+/** what the first pass drew last frame (checks) */
+const upDraw = { calls: 0, tris: 0 };
+function drawUpstairs(cull = true) {
+  const u = up!;
+  const dx = -u.off[0],
+    dy = u.fy,
+    dz = -u.off[1];
+  const sh = sun.castShadow ? sun.shadow : null;
+  const shift = (k: number) => {
+    OCC.p.value.x += dx * k;
+    OCC.p.value.y += dy * k;
+    OCC.p.value.z += dz * k;
+    CUT.f.value.x += dx * k;
+    CUT.f.value.y += dz * k;
+    sun.position.x += dx * k;
+    sun.position.y += dy * k;
+    sun.position.z += dz * k;
+    sun.target.position.x += dx * k;
+    sun.target.position.y += dy * k;
+    sun.target.position.z += dz * k;
+    sun.updateMatrixWorld();
+    sun.target.updateMatrixWorld();
+    sh?.updateMatrices(sun);
+  };
+  // the world, from where this floor really is: its own building is cut just above the floor
+  // (only what the projection needs: copy() would also bring the main camera's matrices, which the value-compared
+  // matrix update in fastscene.ts would then keep, seeing no change in position)
+  upCam.left = camera.left;
+  upCam.right = camera.right;
+  upCam.top = camera.top;
+  upCam.bottom = camera.bottom;
+  upCam.near = camera.near;
+  upCam.far = camera.far;
+  upCam.zoom = camera.zoom;
+  upCam.projectionMatrix.copy(camera.projectionMatrix);
+  upCam.projectionMatrixInverse.copy(camera.projectionMatrixInverse);
+  upCam.quaternion.copy(camera.quaternion);
+  upCam.position.set(camera.position.x + dx, camera.position.y + dy, camera.position.z + dz);
+  upCam.updateMatrixWorld(true);
+  const cy = CUT.y.value;
+  shift(1);
+  if (cy < 1e8) CUT.y.value = dy + 1.5; // (on the rooftop nothing is cut)
+  CUT.fl.value = dy;
+  if (cull) fastCull(scene, upCam, sh ? sh.camera : null);
+  renderer.render(scene, upCam);
+  upDraw.calls = renderer.info.render.calls;
+  upDraw.tris = renderer.info.render.triangles;
+  // the floor
+  shift(-1);
+  CUT.y.value = cy;
+  CUT.fl.value = 0;
+  renderer.autoClear = false;
+  if (cull) fastCull(scene, camera, sh ? sh.camera : null);
+  // v24.31 under a ceiling the light is not the street's: little direct sun (what comes through the windows is drawn on
+  // the floor, upstairs.ts), a duller sky, and at night, while there is power, the flat cold light of fluorescent tubes
+  const si = sun.intensity,
+    hi = hemi.intensity,
+    hc = hemi.color.getHex();
+  if (!u.roof) {
+    const hr = (gameMin / 60) % 24;
+    const day = Math.max(0, Math.sin(((hr - 5.5) / 13) * Math.PI)) * (1 - WX.amt * 0.6);
+    const lamp = !!UT.power && (day < 0.35 || WX.amt > 0.6);
+    UP.setUpLight(day, lamp);
+    sun.intensity = si * 0.35;
+    hemi.intensity = lamp ? Math.max(hi * 0.8, 0.62) : hi * 0.8;
+    if (lamp) hemi.color.setHex(0xe4eee8);
+  }
+  renderer.render(scene, camera);
+  sun.intensity = si;
+  hemi.intensity = hi;
+  hemi.color.setHex(hc);
+  renderer.autoClear = true;
+}
 function loop() {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (cine.on) {
@@ -8743,15 +9191,17 @@ function loop() {
   }
   update(dt);
   // v24.23 only the street camera can hide what it does not see: the drone and the scope look further
+  const two = !!up && REAL_UP && !fpv?.active;
   if (fpv?.active || scope.on) fastShowAll(scene);
-  else fastCull(scene, camera, sun.castShadow ? sun.shadow.camera : null);
+  else if (!two) fastCull(scene, camera, sun.castShadow ? sun.shadow.camera : null);
   if (fpv?.active) {
     fpv.update(dt);
     if (fpv.active) fpv.render(renderer);
     else renderer.render(scene, camera);
-  } else renderer.render(scene, camera);
+  } else if (two) drawUpstairs(!scope.on);
+  else renderer.render(scene, camera);
   if (scope.on) {
-    scope.place(player.pos.x, eyeY(), player.pos.z);
+    scope.place(realX(), eyeY(), realZ());
     scope.render(renderer, scene);
   }
   requestAnimationFrame(loop);
@@ -10099,6 +10549,25 @@ async function boot() {
             upFoot: up.room.upFoot,
             f: up.f,
             top: up.top,
+            roof: !!up.roof,
+            sheds: (up.room.sheds ?? []).map(h => h.O),
+            // share of the roof under tin houses, and how many solid things stand on it
+            cover: (() => {
+              const q = up.b.pts as V2[];
+              let A = 0;
+              for (let i = 0; i < q.length; i++)
+                A += q[i][0] * q[(i + 1) % q.length][1] - q[(i + 1) % q.length][0] * q[i][1];
+              A = Math.abs(A / 2) || 1;
+              let c = 0;
+              for (const h of up.room.sheds ?? []) c += (h.ub[1] - h.ub[0] - 0.3) * (h.ub[3] - h.ub[2] - 0.3);
+              return { area: A, share: c / A };
+            })(),
+            solid: up.ro ?? 0,
+            inShed: !!roofShed(),
+            fy: up.fy,
+            off: up.off,
+            np: up.np ?? 0,
+            furnX: up.furn.matrixWorld.elements[12],
             anchor: up.anchor,
             conts: up.conts.map(c => [c.id, c.label, Object.keys(c.items).length]),
             pieces: up.furn.children.length,
@@ -10129,6 +10598,11 @@ async function boot() {
         dead: s.dead,
         st: s.st,
         door: s.b.door?.p,
+        kind: s.kind,
+        foot: (s.b as any).clut?.stair ? stairFoot(s.b, (s.b as any).clut) : null,
+        top: storeys(s.b),
+        level: snpLevel(s),
+        shown: !!s.rig?.root.visible,
       })),
     snpLock: () => !!snp?.lock,
     inBld: (x: number, z: number) => !!bldAt(x, z),
@@ -10428,6 +10902,38 @@ async function boot() {
     // v24.27 memory
     compact: COMPACT,
     release: RELEASE,
+    realUp: REAL_UP,
+    lit: litStats,
+    /** v24.32 fire between upstairs and the street (checks) */
+    upFire: () => ({
+      aim: (() => {
+        ray.setFromCamera(mouse, upCam);
+        return ray.ray.intersectPlane(plane, aimSt) ? [aimSt.x, aimSt.z] : null;
+      })(),
+      exit: (x: number, z: number) => upExit(x, z),
+      los: (x: number, z: number) => upLos(x, z),
+      /** heights along the line from the player's head to (x, z) at chest height: [distance, line, roof] where blocked */
+      trace: (x: number, z: number) => {
+        const rx = realX(),
+          rz = realZ(),
+          ey = up!.fy + 1.4,
+          D = Math.hypot(x - rx, z - rz);
+        const out: number[][] = [];
+        for (let t = 0; t <= D; t += 0.5) {
+          const px = rx + ((x - rx) * t) / D,
+            pz = rz + ((z - rz) * t) / D,
+            y = ey + ((1 - ey) * t) / D;
+          const r = roofAt(px, pz);
+          if (r > y) out.push([+t.toFixed(1), +y.toFixed(1), +r.toFixed(1), pip([px, pz], up!.b.pts as V2[]) ? 1 : 0]);
+        }
+        return out.slice(0, 12);
+      },
+      t: upFireT,
+      shot: upShot,
+      real: [realX(), realY(), realZ()],
+    }),
+    upDraw,
+    upCam,
     // v24.26 pathfinding
     navStat,
     /** walk this path with a real body: how far along does it get? */

@@ -4,7 +4,17 @@
 import * as THREE from 'three';
 import type { V2, Bld } from '../core/world';
 
-export type Post = { id: string; name: string; j: V2; b: Bld; p: V2; y: number; r: number };
+export type Post = {
+  id: string;
+  name: string;
+  j: V2;
+  b: Bld;
+  p: V2;
+  y: number;
+  r: number;
+  /** v24.31 on the roof, or at a window of the top floor (only where the building has stairs to get there) */
+  kind?: 'roof' | 'window';
+};
 export type Sniper = Post & {
   hp: number;
   dead: boolean;
@@ -27,6 +37,8 @@ export function findPosts(
   blds: Bld[],
   want = ['西園路', '和平西路', '康定路', '中華路', '環河南路', '桂林路'],
   max = 5,
+  /** v24.31 which buildings have stairs, and the height of their top floor: every other post there is at a window */
+  o?: { stairs: (b: Bld) => boolean; topY: (b: Bld) => number },
 ): Omit<Post, 'r'>[] {
   const X: { j: V2; name: string }[] = [];
   const inter = (a: V2, b: V2, c: V2, d: V2): V2 | null => {
@@ -73,6 +85,30 @@ export function findPosts(
       if (d < bd) ((bd = d), (best = p));
     }
     const k = 0.6 / (Math.hypot(b.c[0] - best[0], b.c[1] - best[1]) || 1);
+    if (o && out.length % 2 === 1 && o.stairs(b)) {
+      // a window of the top floor: the middle of the wall that faces the junction, a step back from the glass
+      let mid: V2 = b.pts[0],
+        md = 1e9;
+      for (let i = 0; i < b.pts.length; i++) {
+        const a = b.pts[i],
+          c = b.pts[(i + 1) % b.pts.length];
+        if (Math.hypot(c[0] - a[0], c[1] - a[1]) < 2.5) continue;
+        const m: V2 = [(a[0] + c[0]) / 2, (a[1] + c[1]) / 2];
+        const d = Math.hypot(m[0] - x.j[0], m[1] - x.j[1]);
+        if (d < md) ((md = d), (mid = m));
+      }
+      const kw = 0.9 / (Math.hypot(b.c[0] - mid[0], b.c[1] - mid[1]) || 1);
+      out.push({
+        id: 'snp' + out.length,
+        name: x.name,
+        j: x.j,
+        b,
+        p: [mid[0] + (b.c[0] - mid[0]) * kw, mid[1] + (b.c[1] - mid[1]) * kw],
+        y: o.topY(b),
+        kind: 'window',
+      });
+      continue;
+    }
     out.push({
       id: 'snp' + out.length,
       name: x.name,
@@ -80,6 +116,7 @@ export function findPosts(
       b,
       p: [best[0] + (b.c[0] - best[0]) * k, best[1] + (b.c[1] - best[1]) * k],
       y: b.h,
+      kind: 'roof',
     });
   }
   return out;
@@ -206,7 +243,7 @@ export class SniperSys {
         lock = s;
         const a = s.laser.geometry.attributes.position as THREE.BufferAttribute;
         a.setXYZ(0, s.p[0], s.y + 1.2, s.p[1]);
-        a.setXYZ(1, P.x, 1.3, P.z);
+        a.setXYZ(1, P.x, P.y + 1.3, P.z); // (P.y: the floor or roof the player stands on)
         a.needsUpdate = true;
         (s.laser.material as THREE.LineBasicMaterial).opacity = 0.4 + 0.6 * (1 - Math.max(0, s.t) / AIM_T);
       }

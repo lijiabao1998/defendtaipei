@@ -24,6 +24,8 @@ export const CUT = {
   b: { value: new THREE.Vector4() },
   /** fragments above this height are cut; 1e9 = off */
   y: { value: 1e9 },
+  /** v24.30 height of the floor being looked into (an upper floor seen in place); 0 = the ground floor */
+  fl: { value: 0 },
 };
 // v24.13 street signs: each carries its building's centre (attribute aBld) and goes ghostly by the very rule that turns
 // that building's walls see-through (main.ts: near && dx + dz in -4..30 && |dx - dz| < 22), so a sign fades exactly when
@@ -62,7 +64,7 @@ const GLSL = /* glsl */ `
     if (uCutMe > 0.5 && occW.y > uCutY) {
       // the fragment itself is inside the building box, or it hides a floor point of the box from the camera
       vec3 cutR = isOrthographic ? -(transpose(mat3(viewMatrix)) * vec3(0.0, 0.0, 1.0)) : occW - cameraPosition;
-      vec2 cutG = cutR.y < -1e-4 ? occW.xz + cutR.xz * (occW.y / -cutR.y) : occW.xz;
+      vec2 cutG = cutR.y < -1e-4 ? occW.xz + cutR.xz * ((occW.y - uCutFl) / -cutR.y) : occW.xz;
       for (int cutI = 0; cutI < 2; cutI++) {
         vec2 cutQ = (cutI == 0 ? occW.xz : cutG) - uCutF.xy;
         float cutU = dot(cutQ, uCutF.zw);
@@ -86,6 +88,7 @@ THREE.Material.prototype.onBeforeCompile = function (
   sh.uniforms.uCutF = CUT.f;
   sh.uniforms.uCutB = CUT.b;
   sh.uniforms.uCutY = CUT.y;
+  sh.uniforms.uCutFl = CUT.fl;
   // read live, so a material may opt in after it was first compiled (shared tile materials)
   sh.uniforms.uCutMe = {
     get value() {
@@ -106,7 +109,7 @@ THREE.Material.prototype.onBeforeCompile = function (
   }
   sh.fragmentShader =
     'uniform vec3 uOccP;\nuniform float uOccR;\nuniform float uOccOn;\n' +
-    'uniform vec4 uCutF;\nuniform vec4 uCutB;\nuniform float uCutY;\nuniform float uCutMe;\n' +
+    'uniform vec4 uCutF;\nuniform vec4 uCutB;\nuniform float uCutY;\nuniform float uCutFl;\nuniform float uCutMe;\n' +
     (fr ? 'varying vec2 vBld;' + NL : '') +
     fs.replace(
       '#include <clipping_planes_fragment>',
@@ -123,7 +126,9 @@ export function updateOcclusion(px: number, py: number, pz: number, on = true) {
 export function setBuildingCut(
   box: { O: [number, number]; U: [number, number]; ub: [number, number, number, number] } | null,
   y = 1.5,
+  fl = 0,
 ) {
+  CUT.fl.value = fl;
   if (!box) {
     CUT.y.value = 1e9;
     return;
