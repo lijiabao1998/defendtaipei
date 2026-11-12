@@ -461,7 +461,7 @@ export type PlanOpt = {
   /** v23.4 skip the ground-floor stairwell (upstairs floors draw their own stair head) */
   noStair?: boolean;
   /** v24.30 an upper floor of a walk-up: rooms behind partitions, furnished as a flat (f = this floor, top = the last) */
-  upper?: { f: number; top: number };
+  upper?: { f: number; top: number; shed?: boolean };
 };
 // ---------- v24.30 the flats upstairs (from photographs of Taiwanese walk-ups and 透天: a bedroom is a bed, a wardrobe
 // and a dresser pushed against the walls with a fan in the gap; a kitchen is one counter with the gas ring under a
@@ -699,7 +699,7 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     for (let t = 0; t < 5; t++) {
       const uu = u + (t % 2 ? 1 : -1) * Math.ceil(t / 2) * 0.35,
         vv = v;
-      if (Math.hypot(uu, vv) < 1.5 + hd) continue; // keep the doorway clear
+      if (Math.hypot(uu, vv) < (opt?.upper?.shed ? 0.7 : 1.5) + hd) continue; // keep the doorway clear (a tin house is small)
       const cs: V2[] = [
         [uu - hw, vv - hd],
         [uu + hw, vv - hd],
@@ -933,7 +933,7 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
     const { f, top } = opt.upper;
     const Wd = umax - umin;
     const PL = [0xe6e0d0, 0xdcdfd4, 0xe8dccb, 0xd9e0d6][Math.floor(r() * 4)];
-    const bands = D < 6.5 ? 1 : D < 11.5 ? 2 : D < 19 ? 3 : 4;
+    const bands = opt.upper.shed || D < 6.5 ? 1 : D < 11.5 ? 2 : D < 19 ? 3 : 4;
     const cuts: number[] = [0.25];
     for (let k = 1; k < bands; k++) cuts.push((D * k) / bands + (r() - 0.5) * 0.8);
     cuts.push(D - 0.2);
@@ -965,7 +965,12 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
           : r() < 0.5
             ? (['bed', 'bath', 'bed2', 'study'] as Room[])
             : (['study', 'bed', 'bath', 'bed2'] as Room[]);
-    const rooms: Room[] = bands === 1 ? [f >= top && top > 2 ? 'shrine' : 'bed'] : kinds.slice(0, bands);
+    const rooms: Room[] = opt.upper.shed
+      ? // v24.32 a tin house on the roof: someone's room, a workroom, or where things are kept
+        [(['bed', 'bed', 'store', 'study'] as Room[])[Math.floor(r() * 4)]]
+      : bands === 1
+        ? [f >= top && top > 2 ? 'shrine' : 'bed']
+        : kinds.slice(0, bands);
     if (bands === 2) rooms[1] = f === 2 ? 'kitchen' : f >= top && top > 2 ? 'store' : 'bed2';
     const fit = (room: Room, v0: number, v1: number) => {
       const vm = (v0 + v1) / 2,

@@ -52,6 +52,8 @@ const runs = await p.evaluate(async () => {
         conts: u.conts.length,
         furnX: u.furnX,
         world: g.upDraw.calls,
+        sheds: (u.sheds || []).length,
+        inShed: !!u.inShed,
       };
       if (u.roof) r.roof = row;
       else r.floors.push(row);
@@ -110,7 +112,8 @@ check(
   'the furniture is drawn on its floor, not at the map origin',
 );
 check(
-  runs.filter(r => r.roof).every(r => r.roof.fy > 5 && r.roof.np === 0),
+  // (v24.32: a rooftop with tin houses on it has their furniture; one without has none)
+  runs.filter(r => r.roof).every(r => r.roof.fy > 5 && !r.roof.inShed && (r.roof.sheds > 0 || r.roof.np === 0)),
   'the rooftop is at the height of the roof, in the open',
 );
 

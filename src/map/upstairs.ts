@@ -145,6 +145,8 @@ export type UpRoom = {
   upFoot: V2 | null;
   /** cut box for occlusion.ts while up here */
   box: { O: V2; U: V2; ub: [number, number, number, number] };
+  /** v24.32 on a rooftop: the houses one can walk into (their boxes, for the cut and for "am I inside one") */
+  sheds?: { O: V2; U: V2; ub: [number, number, number, number] }[];
 };
 
 /**
@@ -353,6 +355,8 @@ export function buildRoof(o: {
   stair: { u: number; v: number };
   seed: number;
   obs?: V2[][];
+  /** v24.32 the tin houses (already moved off-map): centre, size, angle, door offset along the front (+z) */
+  sheds?: { c: V2; w: number; d: number; ang: number; door?: number }[];
 }): UpRoom {
   const { pts, F, stair } = o;
   const r = hash(o.seed ^ 0x51ed270b);
@@ -364,6 +368,22 @@ export function buildRoof(o: {
   const segs: { a: V2; b: V2 }[] = [];
   for (let i = 0; i < pts.length; i++) segs.push({ a: pts[i], b: pts[(i + 1) % pts.length] });
   for (const q of o.obs ?? []) for (let i = 0; i < q.length; i++) segs.push({ a: q[i], b: q[(i + 1) % q.length] });
+  // v24.32 a house on the roof: four walls, and a doorway where its door is drawn
+  const sheds: NonNullable<UpRoom['sheds']> = [];
+  for (const h of o.sheds ?? []) {
+    if (h.door === undefined) continue; // open-sided: posts and a roof, walked through
+    const ca = Math.cos(h.ang),
+      sa = Math.sin(h.ang);
+    const P = (lx: number, lz: number): V2 => [h.c[0] + lx * ca - lz * sa, h.c[1] + lx * sa + lz * ca];
+    const w2 = h.w / 2,
+      d2 = h.d / 2;
+    segs.push({ a: P(-w2, -d2), b: P(w2, -d2) }, { a: P(w2, -d2), b: P(w2, d2) }, { a: P(-w2, d2), b: P(-w2, -d2) });
+    const g0 = Math.max(-w2 + 0.1, h.door - 0.55),
+      g1 = Math.min(w2 - 0.1, h.door + 0.55);
+    if (g0 > -w2 + 0.05) segs.push({ a: P(-w2, d2), b: P(g0, d2) });
+    if (g1 < w2 - 0.05) segs.push({ a: P(g1, d2), b: P(w2, d2) });
+    sheds.push({ O: h.c, U: [ca, sa], ub: [-w2 - 0.15, w2 + 0.15, -d2 - 0.15, d2 + 0.15] });
+  }
   // the hut over the stairwell, door toward the landing (-v)
   const { u, v } = stair;
   const sm = frameM.clone().multiply(new THREE.Matrix4().makeTranslation(u, 0, v + 0.3));
@@ -411,6 +431,7 @@ export function buildRoof(o: {
     land: W(u, v - 1.9),
     upFoot: null,
     box: { O: F.O, U: F.U, ub: [umin - 1, umax + 1, vmin - 1, vmax + 1] },
+    sheds,
   };
 }
 export function disposeUpstairs(room: UpRoom) {

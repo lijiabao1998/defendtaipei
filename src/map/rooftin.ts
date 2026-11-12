@@ -90,6 +90,8 @@ const MATS = PAL.map(
       side: THREE.DoubleSide,
     }),
 );
+// v24.32 (the cut only acts inside the box of the room the player is in, see occlusion.ts)
+for (const m of MATS) m.userData.cut = true;
 const pickMat = (q: number) => {
   const tot = PAL.reduce((a, p) => a + p[1], 0);
   let acc = 0;
@@ -107,6 +109,8 @@ export const shackGlass = new THREE.MeshStandardMaterial({
   emissive: 0xffc070,
   emissiveIntensity: 0,
 });
+detMat.userData.cut = true;
+shackGlass.userData.cut = true;
 export function setShackNight(k: number) {
   shackGlass.emissiveIntensity = k * 0.9;
 }
@@ -150,6 +154,8 @@ const strip = (g: THREE.BufferGeometry) => {
   return n;
 };
 
+/** v24.32 a house on a roof: centre, size, the angle of its long axis, and its door (offset along the front, +z) */
+export type RoofShed = { c: [number, number]; w: number; d: number; ang: number; door?: number };
 export type ShackOpt = { H?: number; open?: boolean; kind?: number; mat?: number; roofMat?: number };
 export function makeShack(W: number, D: number, rnd: () => number, o: ShackOpt = {}) {
   const g = new THREE.Group();
@@ -293,6 +299,7 @@ export function makeShack(W: number, D: number, rnd: () => number, o: ShackOpt =
   } else {
     // door on front (+z) + aluminium windows w/ 鐵窗 bars
     const dx = (rnd() - 0.5) * (W - 1.4);
+    g.userData.door = dx; // v24.32 where a body walks in (placeRooftop passes it on)
     det.push(
       B(0.85, 2.0, 0.05, dx, 1.0, D / 2 + 0.03, [0x6a5040, 0x8a8a84, 0x3a5a6a][Math.floor(rnd() * 3)]),
       B(0.06, 0.06, 0.06, dx + 0.32, 1.0, D / 2 + 0.07, 0xd0c080),
@@ -462,6 +469,8 @@ export function placeRooftop(
   rnd: () => number,
   pip: PIP,
   cls: RoofClass = 'row',
+  /** v24.32 keep the additions in proportion to the roof (only where the caller owns rnd: it changes what is drawn) */
+  fit = false,
 ) {
   // principal axis = longest edge
   let best = 0,
@@ -521,20 +530,14 @@ export function placeRooftop(
         sh.position.set(x, y, z);
         sh.rotation.y = -(th + r);
         grp.add(sh);
-        // v24.30 a body on this roof walks round the house: its footprint, for whoever climbs up here
-        {
-          const ca = Math.cos(th + r),
-            sa = Math.sin(th + r);
-          const obs = ((root.userData.obs as [number, number][][] | undefined) ??= []);
-          obs.push(
-            [
-              [-w / 2, -d / 2],
-              [w / 2, -d / 2],
-              [w / 2, d / 2],
-              [-w / 2, d / 2],
-            ].map(([lx, lz]) => [x + lx * ca - lz * sa, z + lx * sa + lz * ca] as [number, number]),
-          );
-        }
+        // v24.32 where this house stands and where its door is, for whoever climbs up here (an open-sided one has none)
+        ((root.userData.sheds as RoofShed[] | undefined) ??= []).push({
+          c: [x, z],
+          w: sh.userData.w ?? w,
+          d: sh.userData.d ?? d,
+          ang: th + r,
+          door: sh.userData.door,
+        });
         return true;
       }
       w *= 0.82;
@@ -631,15 +634,24 @@ export function placeRooftop(
     const side = rnd() < 0.5 ? -1 : 1; // additions hug the same parapet along the whole row
     const frac = 0.6 + rnd() * 0.3;
     const uniform = rnd() < 0.5;
+    // v24.32 a long roof is not one tin house from end to end: the bigger it is, the smaller the share built over
+    const capA = fit ? W * D * (W * D < 110 ? 0.72 : W * D < 220 ? 0.52 : 0.38) : 1e9;
+    const fMax = fit ? (W * D < 110 ? 0.9 : W * D < 220 ? 0.7 : 0.58) : 0.9;
     for (const [la, lw] of lots) {
       const um = la + lw / 2;
+      if (fit && cover + lw * Du * 0.5 > capA) {
+        if (rnd() < 0.5) tank(um, vm, h);
+        else if (rnd() < 0.6) laundry(um, vm + side * -1, h, Math.min(lw - 1, 3));
+        continue;
+      }
       if (rnd() < 0.2) {
         if (rnd() < 0.8) tank(um, vm, h);
         if (rnd() < 0.5) laundry(um, vm + side * -1, h, Math.min(lw - 1, 3));
         continue;
       }
       const m = uniform || rnd() < 0.6 ? baseMat : pickMat(rnd());
-      const f = uniform ? frac : Math.min(0.9, Math.max(0.6, frac + (rnd() - 0.5) * 0.15));
+      const f0 = uniform ? frac : Math.min(0.9, Math.max(0.6, frac + (rnd() - 0.5) * 0.15));
+      const f = Math.min(f0, fMax);
       const d = Du * f;
       const dH = uniform ? 0 : Math.round((rnd() - 0.5) * 2) * 0.25;
       putC(um, vm + (side * (Du - d)) / 2, lw - 0.06, d, { H: H0 + dH, kind, mat: m, roofMat: m, open: false });
@@ -834,6 +846,8 @@ export function dressRoof(
   pip: PIP,
   clutter: boolean,
   out?: { det: THREE.BufferGeometry[]; conc: THREE.BufferGeometry[] },
+  /** v24.32 collects the footprints of what stands on a big roof */
+  obs?: [number, number][][],
 ) {
   const g: THREE.BufferGeometry[] = [];
   const cg: THREE.BufferGeometry[] = []; // matte concrete / membrane pieces
@@ -961,7 +975,7 @@ export function dressRoof(
         at(col(new THREE.BoxGeometry(1.2, 0.03, 0.03).translate(0, 2.2, 0), 0x777777), p),
       ); // antenna
   }
-  bigRoof(g, cg, pts, h, rnd, pip);
+  bigRoof(g, cg, pts, h, rnd, pip, obs);
   for (const q of [...g, ...cg]) {
     if (q.index) {
       const n = q.toNonIndexed();
@@ -997,6 +1011,8 @@ function bigRoof(
   h: number,
   rnd: () => number,
   pip: PIP,
+  /** v24.32 footprints of what stands here (stair housings, tank stands, condenser rows, sheds), for collision */
+  obs?: [number, number][][],
 ) {
   let A = 0,
     x0 = 1e9,
@@ -1044,6 +1060,19 @@ function bigRoof(
   };
   const B = (w: number, hh: number, d: number, ox = 0, oy = 0, oz = 0) =>
     new THREE.BoxGeometry(w, hh, d).translate(ox, oy + hh / 2, oz);
+  /** a w x d rectangle at p, turned like the geometry above (rotateY(th)) */
+  const ob = (p: [number, number], w: number, d: number) => {
+    const ca = Math.cos(th),
+      sa = Math.sin(th);
+    obs?.push(
+      [
+        [-w / 2, -d / 2],
+        [w / 2, -d / 2],
+        [w / 2, d / 2],
+        [-w / 2, d / 2],
+      ].map(([lx, lz]) => [p[0] + lx * ca + lz * sa, p[1] - lx * sa + lz * ca] as [number, number]),
+    );
+  };
   const n = Math.min(1, A / 400);
   // waterproofing: 2-6 patched membrane sheets (grey-green / tar black / faded silver) + drain stains
   for (let i = 0; i < 2 + Math.floor(n * 4); i++) {
@@ -1051,8 +1080,22 @@ function bigRoof(
       d = 2 + rnd() * 5,
       p = spot(Math.max(w, d) * 0.35);
     if (!p) continue;
-    const c = [0x5f6a5c, 0x2c2c2a, 0x8e9290, 0x6e665a][Math.floor(rnd() * 4)];
-    put(cg, new THREE.BoxGeometry(w, 0.02, d).translate(0, 0.02 + i * 0.003, 0), c, p, 0, th + (rnd() - 0.5) * 0.2);
+    // v24.32 these were sheets up to 9 x 7 m in tar black and brown, which read as holes in the roof. Now a repair
+    // the size of a few rolls of membrane, in a tone near the roof's own, with the seams between the rolls
+    const c = [0x66705f, 0x565a55, 0x8e9290, 0x7b7568][Math.floor(rnd() * 4)];
+    const pr = th + (rnd() - 0.5) * 0.2;
+    const pw = Math.min(4.2, w * 0.5),
+      pd = Math.min(3.2, d * 0.5);
+    put(cg, new THREE.BoxGeometry(pw, 0.02, pd).translate(0, 0.02 + i * 0.003, 0), c, p, 0, pr);
+    for (let k = 1; k * 1.0 < pd; k++)
+      put(
+        cg,
+        new THREE.BoxGeometry(pw, 0.006, 0.05).translate(0, 0.034 + i * 0.003, -pd / 2 + k),
+        c + 0x121212,
+        p,
+        0,
+        pr,
+      );
   }
   // 樓梯間 stair housing (one per ~350 m²) with a rusty steel door and a small tank on top
   for (let i = 0; i < Math.max(1, Math.round(A / 350)) && i < 3; i++) {
@@ -1063,6 +1106,7 @@ function bigRoof(
     if (!p) continue;
     const wc = [0xb8b2a4, 0xa8a69c, 0xc4bca8][Math.floor(rnd() * 3)];
     put(cg, B(w, hh, d), wc, p);
+    ob(p, w, d);
     put(cg, B(w + 0.3, 0.12, d + 0.3, 0, hh), 0x8a867c, p); // slab overhang
     put(g, B(0.95, 2.05, 0.06, 0, 0, d / 2 + 0.02), 0x6a4a34, p); // door
     for (let k = 0; k < 3; k++)
@@ -1089,6 +1133,7 @@ function bigRoof(
     ])
       put(g, B(0.08, st, 0.08, ox, 0, oz), 0x4a4440, p);
     put(g, B(1.5, 0.08, 1.5, 0, st), 0x4a4440, p);
+    ob(p, 1.4, 1.4);
     if (kind < 0.4)
       put(
         g,
@@ -1109,6 +1154,7 @@ function bigRoof(
     const k = 2 + Math.floor(rnd() * 4),
       p = spot(k * 0.5);
     if (!p) continue;
+    ob([p[0] - 0.475 * Math.cos(th), p[1] + 0.475 * Math.sin(th)], k * 0.95, 0.4);
     for (let i = 0; i < k; i++) {
       put(g, B(0.85, 0.62, 0.34, (i - k / 2) * 0.95, 0.1), 0xe2e0d8, p);
       put(g, B(0.06, 0.1, 0.4, (i - k / 2) * 0.95, 0), 0x55504a, p);
@@ -1128,6 +1174,7 @@ function bigRoof(
     if (p) {
       const c = [0x5a7a8a, 0x8a5a3a, 0x9a9a92, 0x3f6a5a][Math.floor(rnd() * 4)];
       put(g, B(w, 2.2, d), c, p);
+      ob(p, w, d);
       put(g, new THREE.BoxGeometry(w + 0.4, 0.05, d + 0.5).rotateX(0.12).translate(0, 2.35, 0), 0x7a7a74, p);
     }
   }

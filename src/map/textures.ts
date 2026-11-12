@@ -1,5 +1,6 @@
 // Procedural canvas textures and shared materials for the city:
 // walls (painted render / 二丁掛 tiles with 鐵窗 windows and grime), roads, ground, shop signs and loot containers.
+import { addLit } from './litwin';
 import * as THREE from 'three';
 import { shrink } from './texq';
 
@@ -184,6 +185,11 @@ const wallTexs = WALLC.map((col, wi) =>
   }),
 );
 export const wallMats = wallTexs.map(t => new THREE.MeshStandardMaterial({ map: t, roughness: 0.95 }));
+// v24.32 their windows light up at night (one pattern shared by all: the glass is in the same place in every tile)
+{
+  let lit: THREE.Texture | undefined;
+  for (const m of wallMats) lit = addLit(m, [66 / 256, 52 / 256, 124 / 256, 96 / 256], 1, 2432, lit);
+}
 export const wallMatsT = wallTexs.map(
   t => new THREE.MeshStandardMaterial({ map: t, roughness: 0.9, transparent: true, opacity: 0.22, depthWrite: false }),
 );
