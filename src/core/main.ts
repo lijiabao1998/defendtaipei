@@ -759,6 +759,14 @@ type UpState = {
 let up: UpState | null = null;
 /** upstairs and under a ceiling (the rooftop is not) */
 const upIn = () => !!up && !up.roof;
+/** v24.31 where the player really stands (upstairs lives off-map): map x, z and the height of the floor underfoot */
+const realX = () => (up && REAL_UP ? player.pos.x - up.off[0] : player.pos.x);
+const realZ = () => (up && REAL_UP ? player.pos.z - up.off[1] : player.pos.z);
+const realY = () => (roofB ? roofB.h : up && REAL_UP ? up.fy : 0);
+const realPos = new THREE.Vector3();
+/** v24.31 the player has come up the stairs to where this sniper is: his roof, or his room on the top floor */
+const snpLevel = (s: Sniper) =>
+  !!up && REAL_UP && up.b === s.b && (s.kind === 'window' ? !up.roof && up.f === up.top : !!up.roof);
 /**
  * v24.30 upstairs, the real world is drawn in place around and below the floor (two passes, see drawUpstairs) instead of
  * stand-in boxes and a stand-in street. ?fakeup=1 brings the stand-ins back, for comparison.
@@ -5652,7 +5660,10 @@ function snpEye(s: Sniper): V2 {
 }
 function setupSnipers() {
   if (snp) return;
-  const posts = findPosts(roads, blds);
+  const posts = findPosts(roads, blds, undefined, undefined, {
+    stairs: b => REAL_UP && !!(b as any).clut?.stair,
+    topY: b => UP.floorY(storeys(b)),
+  });
   surv.snpDead ||= [];
   snp = new SniperSys(
     posts,
@@ -5673,14 +5684,16 @@ function setupSnipers() {
       },
       animate: (r, a, dt) => animate(r, a as AnimState, 0, dt),
       sees: s => {
-        if (roofB === s.b) return true;
+        if (roofB === s.b || snpLevel(s)) return true;
         if (roofB) return false;
+        // v24.31 upstairs: under a ceiling he cannot see in; on a rooftop there is nothing to hide behind
+        if (up) return !!up.roof && up.b !== s.b;
         const P: V2 = [player.pos.x, player.pos.z];
         if (indoorAt(P[0], P[1])) return false; // indoors / under the arcade
         if (vehicles.list.some(v => Math.hypot(v.pos.x - P[0], v.pos.z - P[1]) < 1.8)) return false; // behind a car
         return los(snpEye(s), P);
       },
-      player: () => player.pos,
+      player: () => realPos.set(realX(), realY(), realZ()),
       hurt: dmg => {
         if (player.sleeping) player.sleeping = false;
         player.rig.hurtT = 0.35;
@@ -5736,6 +5749,8 @@ function setupSnipers() {
 function roofDoor() {
   if (!snp) return null;
   for (const s of snp.list) {
+    // v24.31 a building with stairs is climbed floor by floor, like any other
+    if (REAL_UP && (s.b as any).clut?.stair) continue;
     const d = s.b.door;
     if (d && Math.hypot(d.p[0] - player.pos.x, d.p[1] - player.pos.z) < 2) return s;
   }
@@ -5778,7 +5793,7 @@ function scopeExit() {
   scope.exit();
   if (moral && moral.t > 0) moralEnd(false);
 }
-const eyeY = () => (roofB ? roofB.h : 0) + 1.55;
+const eyeY = () => realY() + 1.55;
 /** a scoped shot: bullet drop (≈300 m/s), head / body hit zones, stops at buildings and the ground; loud */
 function scopeFire() {
   const k = player.equip;
@@ -5789,13 +5804,15 @@ function scopeFire() {
   player.cd = d.cd;
   gunFx(player.rig, true);
   AU.gunshot(AU.gunKind(k, d), 0, indoorAt(player.pos.x, player.pos.z));
-  noise(player.pos.x, player.pos.z, 80); // a rifle crack: soldiers come to search
-  const o = new THREE.Vector3(player.pos.x, eyeY(), player.pos.z);
+  noise(...mapPos(), 80); // a rifle crack: soldiers come to search
+  const o = new THREE.Vector3(realX(), eyeY(), realZ());
+  // v24.31 from a window upstairs the round leaves through this building's own wall
+  const own = up && REAL_UP && !up.dist ? (up.b as Bld) : null;
   let hit: { s?: Sniper; sol?: Sol; head: boolean } | null = null;
   const r = ballistic(o, scope.dir(), 260, 300, (p, dist) => {
     if (dist > 1.5) {
       const b = bldAt(p.x, p.z);
-      if (b && b !== roofB && p.y < b.h) return true;
+      if (b && b !== roofB && !(b === own && (up!.roof || dist < 14)) && p.y < b.h) return true;
       if (roofB && b === roofB && p.y < roofB.h) return true;
     }
     for (const s of snp?.list || []) {
@@ -5893,6 +5910,7 @@ function moralEnd(shot: boolean) {
 function snpUpdate(dt: number) {
   if (!snp) return;
   snp.update(dt, gameMin);
+  for (const q of snp.list) if (q.rig) q.rig.root.visible = !(up && REAL_UP && up.b === q.b) || snpLevel(q);
   if (scope.on) {
     if (!scopeAllowed()) scopeExit();
     if (
@@ -7113,6 +7131,26 @@ function meleeTick(dt: number) {
   swingTrail.update(dt);
 }
 function meleeResolve(d: any, dir: THREE.Vector3): Sol | null {
+  if (up && snp) {
+    // v24.31 up the real stairs to where he is: the same close work as on the old rooftops
+    const u = up;
+    const s = snp.list.find(
+      q =>
+        !q.dead &&
+        snpLevel(q) &&
+        Math.hypot(q.p[0] + u.off[0] - player.pos.x, q.p[1] + u.off[1] - player.pos.z) < d.range + 0.6,
+    );
+    if (s) {
+      snp.hit(s, d.dmg * 4, s.st !== 'aim');
+      log(
+        s.dead
+          ? tr('你從背後制伏了狙擊手。', 'You subdue the sniper from behind.')
+          : tr('狙擊手掙扎反抗！', 'The sniper fights back!'),
+        '#ff9',
+      );
+      return null;
+    }
+  }
   if (roofB && snp) {
     const s = snp.list.find(
       q => !q.dead && q.b === roofB && Math.hypot(q.p[0] - player.pos.x, q.p[1] - player.pos.z) < d.range + 0.6,
@@ -8172,7 +8210,7 @@ function update(dt: number) {
     let goal: V2 | null = null,
       sp = night ? 1.6 : 2.0;
     if (s.state === 'patrol') {
-      goal = s.route[s.wi];
+      goal = s.route[s.wi] ?? s.route[0]; // (a route of one point leaves wi past its end)
       if (Math.hypot(goal[0] - s.pos.x, goal[1] - s.pos.z) < 1) {
         s.wi += 1;
         if (s.wi >= s.route.length) {
@@ -8823,7 +8861,7 @@ function die() {
 const upCam = camera.clone(false);
 /** what the first pass drew last frame (checks) */
 const upDraw = { calls: 0, tris: 0 };
-function drawUpstairs() {
+function drawUpstairs(cull = true) {
   const u = up!;
   const dx = -u.off[0],
     dy = u.fy,
@@ -8864,7 +8902,7 @@ function drawUpstairs() {
   shift(1);
   if (cy < 1e8) CUT.y.value = dy + 1.5; // (on the rooftop nothing is cut)
   CUT.fl.value = dy;
-  fastCull(scene, upCam, sh ? sh.camera : null);
+  if (cull) fastCull(scene, upCam, sh ? sh.camera : null);
   renderer.render(scene, upCam);
   upDraw.calls = renderer.info.render.calls;
   upDraw.tris = renderer.info.render.triangles;
@@ -8873,8 +8911,25 @@ function drawUpstairs() {
   CUT.y.value = cy;
   CUT.fl.value = 0;
   renderer.autoClear = false;
-  fastCull(scene, camera, sh ? sh.camera : null);
+  if (cull) fastCull(scene, camera, sh ? sh.camera : null);
+  // v24.31 under a ceiling the light is not the street's: little direct sun (what comes through the windows is drawn on
+  // the floor, upstairs.ts), a duller sky, and at night, while there is power, the flat cold light of fluorescent tubes
+  const si = sun.intensity,
+    hi = hemi.intensity,
+    hc = hemi.color.getHex();
+  if (!u.roof) {
+    const hr = (gameMin / 60) % 24;
+    const day = Math.max(0, Math.sin(((hr - 5.5) / 13) * Math.PI)) * (1 - WX.amt * 0.6);
+    const lamp = !!UT.power && (day < 0.35 || WX.amt > 0.6);
+    UP.setUpLight(day, lamp);
+    sun.intensity = si * 0.35;
+    hemi.intensity = lamp ? Math.max(hi * 0.8, 0.62) : hi * 0.8;
+    if (lamp) hemi.color.setHex(0xe4eee8);
+  }
   renderer.render(scene, camera);
+  sun.intensity = si;
+  hemi.intensity = hi;
+  hemi.color.setHex(hc);
   renderer.autoClear = true;
 }
 function loop() {
@@ -8893,17 +8948,17 @@ function loop() {
   }
   update(dt);
   // v24.23 only the street camera can hide what it does not see: the drone and the scope look further
-  const two = !!up && REAL_UP && !fpv?.active && !scope.on;
+  const two = !!up && REAL_UP && !fpv?.active;
   if (fpv?.active || scope.on) fastShowAll(scene);
   else if (!two) fastCull(scene, camera, sun.castShadow ? sun.shadow.camera : null);
   if (fpv?.active) {
     fpv.update(dt);
     if (fpv.active) fpv.render(renderer);
     else renderer.render(scene, camera);
-  } else if (two) drawUpstairs();
+  } else if (two) drawUpstairs(!scope.on);
   else renderer.render(scene, camera);
   if (scope.on) {
-    scope.place(player.pos.x, eyeY(), player.pos.z);
+    scope.place(realX(), eyeY(), realZ());
     scope.render(renderer, scene);
   }
   requestAnimationFrame(loop);
@@ -10253,6 +10308,7 @@ async function boot() {
             top: up.top,
             roof: !!up.roof,
             fy: up.fy,
+            off: up.off,
             np: up.np ?? 0,
             furnX: up.furn.matrixWorld.elements[12],
             anchor: up.anchor,
@@ -10285,6 +10341,11 @@ async function boot() {
         dead: s.dead,
         st: s.st,
         door: s.b.door?.p,
+        kind: s.kind,
+        foot: (s.b as any).clut?.stair ? stairFoot(s.b, (s.b as any).clut) : null,
+        top: storeys(s.b),
+        level: snpLevel(s),
+        shown: !!s.rig?.root.visible,
       })),
     snpLock: () => !!snp?.lock,
     inBld: (x: number, z: number) => !!bldAt(x, z),

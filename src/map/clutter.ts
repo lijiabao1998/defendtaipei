@@ -1085,7 +1085,7 @@ export function plan(b: any, ctx: Ctx, opt?: PlanOpt): Plan | null {
         put(chest(2, r), R - 0.5, near + 0.3, 2, 0.9, 0.48, 0.85, c('抽屜櫃'));
       }
       // what is left of the floor: a room people lived in is never bare
-      for (let i = 0, n = Math.floor((Wd * dep) / 5); i < n; i++) {
+      for (let i = 0, n = 3 + Math.floor((Wd * dep) / 3.4); i < n; i++) {
         const u = umin + 0.5 + r() * (Wd - 1),
           v = v0 + 0.5 + r() * Math.max(0.1, dep - 1),
           k = r();

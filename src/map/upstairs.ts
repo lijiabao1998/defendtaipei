@@ -25,6 +25,83 @@ groundTex.needsUpdate = true;
 groundTex.repeat.set(75, 75);
 const groundMat = new THREE.MeshStandardMaterial({ map: groundTex, color: 0x9a9a9a, roughness: 1 });
 const PLASTER = [0xe6e0d0, 0xdcdfd4, 0xe8dccb, 0xd8d4c8];
+// v24.31 light indoors. A walk-up or a 透天 is long and narrow with windows only at the street end (and the back): by
+// day the front of the room is bright where the sun comes through the glass and it falls away into the depth; at
+// night, with the power on, each room has a fluorescent tube and a cold pool of light under it. Both are drawn as
+// light added to the floor (no extra lamps for the renderer to carry); main.ts dims the sun for this pass.
+const poolSun = new THREE.MeshBasicMaterial({
+  vertexColors: true,
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  opacity: 0,
+});
+const poolLamp = poolSun.clone();
+const tubeMat = new THREE.MeshBasicMaterial({ color: 0x20221f });
+/** day: 0 (night) … 1 (noon), how much sun comes through the windows; lamp: the tubes are lit */
+export function setUpLight(day: number, lamp: boolean) {
+  poolSun.opacity = 0.5 * day;
+  poolLamp.opacity = lamp ? 0.42 : 0;
+  tubeMat.color.setHex(lamp ? 0xf4fbf6 : 0x4a4d4a);
+}
+/** a quad on the floor from p-q (bright) reaching `len` along (nx, nz) and fading out */
+function pool(p: V2, q: V2, nx: number, nz: number, len: number, hex: number) {
+  const g = new THREE.BufferGeometry();
+  const y = 0.022;
+  // slanted a little, as sunlight through a window lies
+  const sx = (q[0] - p[0]) * 0.18,
+    sz = (q[1] - p[1]) * 0.18;
+  g.setAttribute(
+    'position',
+    new THREE.Float32BufferAttribute(
+      [
+        p[0],
+        y,
+        p[1],
+        q[0],
+        y,
+        q[1],
+        q[0] + nx * len + sx,
+        y,
+        q[1] + nz * len + sz,
+        p[0] + nx * len + sx,
+        y,
+        p[1] + nz * len + sz,
+      ],
+      3,
+    ),
+  );
+  col.setHex(hex);
+  g.setAttribute(
+    'color',
+    new THREE.Float32BufferAttribute([col.r, col.g, col.b, col.r, col.g, col.b, 0, 0, 0, 0, 0, 0], 3),
+  );
+  g.setIndex([0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2]);
+  return g;
+}
+/** a round pool of lamp light on the floor */
+function disc(x: number, z: number, r: number, hex: number, pts: V2[]) {
+  const g = new THREE.BufferGeometry();
+  const N = 14,
+    pos: number[] = [x, 0.024, z],
+    cl: number[] = [];
+  col.setHex(hex);
+  cl.push(col.r, col.g, col.b);
+  for (let i = 0; i <= N; i++) {
+    const a = (i / N) * Math.PI * 2;
+    // not through the walls: the pool stops where the room does
+    let rr = r;
+    while (rr > 0.3 && !pipPts([x + Math.cos(a) * rr, z + Math.sin(a) * rr], pts)) rr -= 0.3;
+    pos.push(x + Math.cos(a) * rr, 0.024, z + Math.sin(a) * rr);
+    cl.push(0, 0, 0);
+  }
+  const idx: number[] = [];
+  for (let i = 1; i <= N; i++) idx.push(0, i + 1, i);
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(cl, 3));
+  g.setIndex(idx);
+  return g;
+}
 const col = new THREE.Color();
 
 function paint(g: THREE.BufferGeometry, hex: number) {
@@ -94,6 +171,9 @@ export function buildUpstairs(o: {
   const g = new THREE.Group();
   g.name = 'upstairs';
   const vc: THREE.BufferGeometry[] = [];
+  const sunP: THREE.BufferGeometry[] = [],
+    lampP: THREE.BufferGeometry[] = [],
+    tubes: THREE.BufferGeometry[] = [];
   const segs: { a: V2; b: V2 }[] = [];
   const plaster = PLASTER[Math.floor(r() * PLASTER.length)];
   // floor: one tile style over the footprint
@@ -134,6 +214,14 @@ export function buildUpstairs(o: {
       const t = ((k + 0.5) / n) * L,
         w = Math.min(1.6, L / n - 0.5);
       m.setPosition(a[0] + ux * t, 0, a[1] + uz * t);
+      // v24.31 what the sun throws on the floor through this window
+      {
+        const cx = a[0] + ux * t + nx * 0.25,
+          cz = a[1] + uz * t + nz * 0.25;
+        sunP.push(
+          pool([cx - (ux * w) / 2, cz - (uz * w) / 2], [cx + (ux * w) / 2, cz + (uz * w) / 2], nx, nz, 3.4, 0xfff0c8),
+        );
+      }
       vc.push(box(w, 1.1, 0.02, 0, 1.55, 0.07, 0x8fb4c2, m)); // glass
       vc.push(
         box(w + 0.1, 0.06, 0.08, 0, 0.98, 0.08, 0xc8ccc8, m),
@@ -185,6 +273,44 @@ export function buildUpstairs(o: {
   m.receiveShadow = true;
   g.add(m);
   vc.forEach(q => q.dispose());
+  // v24.31 a tube every few metres of the floor, and its pool of light
+  {
+    let x0 = 1e9,
+      x1 = -1e9,
+      z0 = 1e9,
+      z1 = -1e9;
+    for (const q of pts) {
+      x0 = Math.min(x0, q[0]);
+      x1 = Math.max(x1, q[0]);
+      z0 = Math.min(z0, q[1]);
+      z1 = Math.max(z1, q[1]);
+    }
+    const nxl = Math.max(1, Math.round((x1 - x0) / 4.2)),
+      nzl = Math.max(1, Math.round((z1 - z0) / 4.2));
+    for (let i = 0; i < nxl; i++)
+      for (let k = 0; k < nzl; k++) {
+        const x = x0 + ((i + 0.5) / nxl) * (x1 - x0),
+          z = z0 + ((k + 0.5) / nzl) * (z1 - z0);
+        if (!pipPts([x, z], pts)) continue;
+        lampP.push(disc(x, z, 2.7, 0xdff0ea, pts));
+        // the tube itself, where the ceiling would be (the ceiling is cut away with the upper walls)
+        const t = new THREE.BoxGeometry(1.2, 0.05, 0.07);
+        t.rotateY(Math.atan2(-F.U[1], F.U[0]));
+        t.translate(x, 2.55, z);
+        tubes.push(t);
+      }
+  }
+  for (const [list, mat] of [
+    [sunP, poolSun],
+    [lampP, poolLamp],
+    [tubes, tubeMat],
+  ] as [THREE.BufferGeometry[], THREE.Material][]) {
+    if (!list.length) continue;
+    const pm = new THREE.Mesh(mergeGeometries(list), mat);
+    pm.renderOrder = 2;
+    g.add(pm);
+    list.forEach(q => q.dispose());
+  }
   // the street one storey below, seen past the cut-down walls
   if (!o.noStreet) {
     const gp = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), groundMat);
