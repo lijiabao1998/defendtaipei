@@ -117,6 +117,8 @@ export function clearRoadTiles(): void {
 export type MapSave = {
   n?: { x: number; z: number; k: string; t?: string; intel?: boolean; id?: string }[];
   f?: string;
+  /** v24.33 the fog grid: [west edge, north edge, cell size, cells per side] */
+  g?: number[];
 };
 
 /** Throws on corrupt JSON so the caller keeps its existing catch (same as a bare JSON.parse). */
@@ -124,7 +126,7 @@ export function readMapSave(): MapSave | null {
   return JSON.parse(localStorage.getItem(MAP_SAVE_KEY) || 'null');
 }
 
-export function writeMapSave(data: { n: unknown; f: string }): void {
+export function writeMapSave(data: { n: unknown; f: string; g?: number[] }): void {
   if (multiplayerSession) return;
   localStorage.setItem(MAP_SAVE_KEY, JSON.stringify(data));
 }

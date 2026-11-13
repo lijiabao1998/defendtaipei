@@ -33,6 +33,8 @@ export type DIndex = {
   T: number;
   bbox: [number, number, number, number];
   boundary: V2[][];
+  /** v24.33 the name of each ring of the boundary (萬華區 first) */
+  districts?: string[];
   landmarks: { kind: string; n: string; x: number; z: number }[];
   water: V2[][];
   park: { n?: string; p: V2[] }[];

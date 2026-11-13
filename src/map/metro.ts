@@ -28,11 +28,113 @@ export type Station = {
   shops: Shop[];
   built: boolean;
 };
-export const STATIONS: { name: string; x: number; z: number }[] = [
+/** e: the two street exits, where they were worked out beforehand (stations outside the core: its buildings are not
+ * loaded when the stations are made, so a clear stretch of pavement was found offline, from the tile data) */
+export const STATIONS: { name: string; x: number; z: number; e?: V2[] }[] = [
   { name: '龍山寺', x: -300, z: 420 },
   { name: '西門', x: 420, z: -180 },
   { name: '萬大', x: -260, z: 1500 },
   { name: '華江', x: -1250, z: 760 },
+  // v24.33 中正區 and 大同區. The places are real; the network, its line and its numbers are ours.
+  {
+    name: '小南門',
+    x: 787,
+    z: 564,
+    e: [
+      [784.1, 566.7],
+      [824.1, 587.5],
+    ],
+  },
+  {
+    name: '中正紀念堂',
+    x: 1467,
+    z: 807,
+    e: [
+      [1446.7, 744.2],
+      [1499.2, 895],
+    ],
+  },
+  {
+    name: '古亭',
+    x: 1989,
+    z: 1579,
+    e: [
+      [1977.2, 1595.2],
+      [1995.6, 1621.5],
+    ],
+  },
+  {
+    name: '公館',
+    x: 3153,
+    z: 2883,
+    e: [
+      [3062.2, 2937.6],
+      [3144.6, 3001.7],
+    ],
+  },
+  {
+    name: '善導寺',
+    x: 2060,
+    z: -416,
+    e: [
+      [2054.5, -392.6],
+      [2094, -390],
+    ],
+  },
+  {
+    name: '台北車站',
+    x: 1460,
+    z: -580,
+    e: [
+      [1448.3, -554.5],
+      [1457.1, -520.2],
+    ],
+  },
+  {
+    name: '北門',
+    x: 739,
+    z: -928,
+    e: [
+      [672.3, -1005.2],
+      [863.2, -883.7],
+    ],
+  },
+  {
+    name: '大橋頭',
+    x: 978,
+    z: -2454,
+    e: [
+      [981.3, -2451.7],
+      [1009.5, -2449.9],
+    ],
+  },
+  {
+    name: '民權西路',
+    x: 1654,
+    z: -2415,
+    e: [
+      [1653.5, -2399],
+      [1649.7, -2353.9],
+    ],
+  },
+  {
+    name: '雙連',
+    x: 1785,
+    z: -1839,
+    e: [
+      [1777.6, -1832.2],
+      [1693.2, -1820.4],
+    ],
+  },
+  {
+    name: '圓山',
+    x: 1728,
+    z: -3362,
+    e: [
+      [1723.3, -3403.7],
+      [1714.1, -3338.8],
+    ],
+  },
 ];
 const LINE = '艋舺橘線';
 
@@ -493,11 +595,13 @@ export function buildMetro(d: MetroDeps): Station[] {
       shops: stationShops(i),
     };
     // two street exits per station, ~45 m apart
-    [
-      [st.x, st.z],
-      [st.x + 34, st.z + 26],
-    ].forEach(([ax, az], k) => {
-      const [ex, ez] = d.snap(ax, az);
+    (
+      st.e ?? [
+        [st.x, st.z],
+        [st.x + 34, st.z + 26],
+      ]
+    ).forEach(([ax, az], k) => {
+      const [ex, ez] = st.e ? [ax, az] : d.snap(ax, az);
       entrance(d.scene, d.addSeg, S, ex, ez, k + 1, r);
       gates.push({
         no: k + 1,
@@ -618,6 +722,22 @@ function interiorSegs(addSeg: MetroDeps['addSeg'], OX: number, OZ: number): SegS
 }
 
 /** builds a station interior the first time it is needed (lazy streaming) */
+/** v24.33 the interior of each station that has been built */
+const GROUPS: (THREE.Group | undefined)[] = [];
+/**
+ * v24.33 only the station the player is in is drawn. Each interior carries some twenty point lights, and three.js
+ * counts every visible light into every material on screen: with the interiors left in the scene, the third station
+ * visited brought a frame from 40 ms to 900 ms, and the fifth lost the tab. (Stations are 240 m apart.)
+ */
+function showOnly(px: number, pz: number) {
+  for (let i = 0; i < GROUPS.length; i++) {
+    const g = GROUPS[i];
+    if (!g) continue;
+    const [OX, OZ] = OXZ(i);
+    g.visible = Math.abs(px - OX) < 115 && pz - OZ > -45 && pz - OZ < 75;
+  }
+}
+export const metroShown = () => GROUPS.map(g => !!g?.visible);
 export function ensureInterior(scene: THREE.Scene, S: Station, i: number) {
   if (S.built) return;
   S.built = true;
@@ -626,6 +746,7 @@ export function ensureInterior(scene: THREE.Scene, S: Station, i: number) {
   const g = new THREE.Group();
   g.position.set(OX, 0, OZ);
   scene.add(g);
+  GROUPS[i] = g;
   const b = new Builder(g);
   // the black void around everything (rock / tunnel)
   b.box(M.void, 0, -0.62, 12, 150, 0.6, 80);
@@ -1287,6 +1408,7 @@ function drawBoard(D: Dyn, txt: string, l2: string, warn: boolean) {
 
 /** per-frame: emergency-light flicker (power out), gates, screen doors, the day-1 trains and the boards */
 export function metroTick(t: number, gm = 0, power = false, px = 0, pz = 0) {
+  showOnly(px, pz);
   for (const L of lights) {
     const f = Math.sin(t * 13 + L.ph) * Math.sin(t * 3.1 + L.ph * 2);
     L.l.intensity = power ? L.base * 1.3 : L.base * (f > 0.93 ? 0.15 : 0.85 + 0.15 * Math.sin(t * 40 + L.ph));
