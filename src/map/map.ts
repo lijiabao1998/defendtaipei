@@ -38,6 +38,8 @@ const DISTRICT_NAME: Record<string, string> = {
   萬華區: tr('萬華區', 'Wanhua'),
   中正區: tr('中正區', 'Zhongzheng'),
   大同區: tr('大同區', 'Datong'),
+  大安區: tr('大安區', "Da'an"),
+  中山區: tr('中山區', 'Zhongshan'),
 };
 type Note = { x: number; z: number; k: string; t?: string; intel?: boolean; id?: string };
 const KINDS: Record<string, [string, string]> = {
@@ -92,12 +94,6 @@ export class GameMap {
     this.base = document.createElement('canvas');
     this.base.width = this.base.height = this.S;
     this.drawBase();
-    d.district?.more?.().then(m => {
-      this.extraB = m.b;
-      this.extraR = m.r;
-      this.drawBase();
-      this.dirty = true;
-    });
     this.fog = document.createElement('canvas');
     this.fog.width = this.fog.height = FG;
     this.fogA = new Uint8Array(FG * FG);
@@ -418,10 +414,26 @@ export class GameMap {
     this.fogA.fill(0);
     this.save();
   }
+  private asked = false;
+  /**
+   * v24.34 the footprints and streets of the districts (3 MB of them by now, forty thousand buildings to draw) are
+   * fetched when the map is first opened. They used to come in as the game started, whether the map was looked at or not.
+   */
+  private loadMore() {
+    if (this.asked) return;
+    this.asked = true;
+    this.d.district?.more?.().then(m => {
+      this.extraB = m.b;
+      this.extraR = m.r;
+      this.drawBase();
+      this.dirty = true;
+    });
+  }
   toggle(on = !this.open) {
     this.open = on;
     this.el.classList.toggle('hidden', !on);
     if (on) {
+      this.loadMore();
       this.resize();
       this.center();
     } else this.menu?.remove();

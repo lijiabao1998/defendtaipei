@@ -35,6 +35,8 @@ export type DIndex = {
   boundary: V2[][];
   /** v24.33 the name of each ring of the boundary (萬華區 first) */
   districts?: string[];
+  /** v24.34 the banks of rivers inside the map: [ax, az, bx, bz] walls */
+  banks?: number[][];
   landmarks: { kind: string; n: string; x: number; z: number }[];
   water: V2[][];
   park: { n?: string; p: V2[] }[];
@@ -455,6 +457,8 @@ export class District {
       });
     }
     if (rw.length) this.d.scene.add(new THREE.Mesh(mergeGeometries(rw), waterMat));
+    // v24.34 a river that runs through a district (基隆河): its banks are walls, open under the bridges
+    for (const [ax, az, bx, bz] of this.ix.banks ?? []) this.d.addSeg({ a: [ax, az], b: [bx, bz] });
     this.buildLandmarks();
   }
   inside(x: number, z: number) {

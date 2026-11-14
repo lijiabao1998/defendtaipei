@@ -1,4 +1,4 @@
-// v24.33 the map reaches past 萬華: 中正區 and 大同區 stream in like the rest (same tiles, same walk-ups, every one of
+// v24.33 / v24.34 the map reaches past 萬華: 中正區, 大同區, 大安區 and 中山區 stream in like the rest (same tiles, same walk-ups, every one of
 // them entered), they have areas of their own with a garrison each, taking one back does not touch the campaign's
 // count, the metro has stations there with street exits on clear pavement, and a map explored in an older save is
 // still explored. argv: [url] (default: vite preview)
@@ -39,6 +39,8 @@ const w = await p.evaluate(() => {
       [1900, 1550],
       [700, -1820],
       [1340, -3500],
+      [4400, -80],
+      [4480, -4300],
     ].map(q => S.names[g.sectorOf(q[0], q[1])]),
     stations: g.metro().map(s => ({ name: s.name, no: s.no, gates: s.gates })),
     hud: document.getElementById('street')?.textContent,
@@ -54,16 +56,17 @@ console.log(
   '+',
   w.S.all - w.S.campaign,
 );
-check(w.S.districts.length === 3, `three districts are in the map (${w.S.districts.join('、')})`);
-check(w.B.maxx > 3000 && w.B.minz < -4000, 'the world reaches the east of 中正 and the north of 大同');
+check(w.S.districts.length === 5, `five districts are in the map (${w.S.districts.join('、')})`);
+check(w.B.maxx > 6500 && w.B.minz < -5500, 'the world reaches the east of 大安 and the north of 中山');
 check(w.S.campaign === 15, 'the campaign is still the fifteen areas of 萬華');
 check(
   w.wan.every(i => i < 15),
   'a place in 萬華 belongs to one of them',
 );
 check(
-  w.ext.join() === ['台北車站', '南門', '古亭', '大稻埕', '大龍峒'].join() ||
-    w.ext.join() === ['Taipei Station', 'South Gate', 'Guting', 'Dadaocheng', 'Dalongdong'].join(),
+  w.ext.join() === ['台北車站', '南門', '古亭', '大稻埕', '大龍峒', '東區', '大直'].join() ||
+    w.ext.join() ===
+      ['Taipei Station', 'South Gate', 'Guting', 'Dadaocheng', 'Dalongdong', 'East District', 'Dazhi'].join(),
   `a place in the new districts belongs to an area of its own (${w.ext.join('、')})`,
 );
 
@@ -75,6 +78,10 @@ for (const [name, x, z] of [
   ['大稻埕', 706, -1824],
   ['大龍峒', 1340, -3480],
   ['水源', 3050, 2880],
+  ['東區', 4400, -80],
+  ['通化街', 5100, 1000],
+  ['行天宮', 3040, -2050],
+  ['大直', 4480, -4300],
 ]) {
   const r = await p.evaluate(
     async ([x, z]) => {
@@ -110,7 +117,11 @@ check(
   `and the buildings are entered like any other (${visits.map(v => v.n - v.enter).join(' / ')} without a door)`,
 );
 check(
-  visits.every(v => v.hud.includes(v.name) || /Taipei Station|South Gate|Dadaocheng|Dalongdong|Shuiyuan/.test(v.hud)),
+  visits.every(
+    v =>
+      v.hud.includes(v.name) ||
+      /Taipei Station|South Gate|Dadaocheng|Dalongdong|Shuiyuan|East District|Tonghua|Xingtian|Dazhi/.test(v.hud),
+  ),
   'the street sign names the area the player is in',
 );
 
@@ -152,7 +163,7 @@ check(
 check(!gar.ended, 'and nothing ends');
 
 // ---- the metro: fifteen stations, every street exit of the new ones goes down and comes back up
-check(w.stations.length === 15, `fifteen stations (${w.stations.length})`);
+check(w.stations.length === 33, `thirty-three stations (${w.stations.length})`);
 const ex = await p.evaluate(async () => {
   const g = window.__game;
   const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -182,7 +193,7 @@ const ex = await p.evaluate(async () => {
 });
 const badEx = ex.filter(e => !e.clear || !e.down || !e.up);
 check(
-  ex.length === 22 && !badEx.length,
+  ex.length === 58 && !badEx.length,
   `the ${ex.length} street exits of the new stations go down and come back up, none inside a building (${badEx.map(e => e.st).join(' ') || 'all good'})`,
 );
 // (every interior carries some twenty lights: left in the scene they add up, and the fifth station lost the tab)
@@ -210,7 +221,7 @@ const under = await p.evaluate(async () => {
 });
 console.log('   underground', JSON.stringify(under));
 await p.screenshot({ path: shot('v2433-station.png'), timeout: 120000 });
-check(under.shown === 1 && under.built >= 11, `down in a station only that one is drawn (${under.built} built)`);
+check(under.shown === 1 && under.built >= 29, `down in a station only that one is drawn (${under.built} built)`);
 check(under.ms < 250, `and a frame down there is not the 900 ms it was with three of them lit (${under.ms} ms)`);
 await p.evaluate(async () => {
   const g = window.__game;
@@ -239,9 +250,60 @@ const ride = await p.evaluate(async () => {
 await p.screenshot({ path: shot('v2433-ride.png'), timeout: 120000 });
 await p.evaluate(() => document.getElementById('ride')?.remove());
 check(
-  ride.n === 14 && ride.top >= 0 && ride.bottom <= ride.h,
-  `the ride menu lists the other fourteen and fits the screen (${Math.round(ride.bottom - ride.top)} of ${ride.h} px)`,
+  ride.n === 32 && ride.top >= 0 && ride.bottom <= ride.h,
+  `the ride menu lists the other thirty-two and fits the screen (${Math.round(ride.bottom - ride.top)} of ${ride.h} px)`,
 );
+
+// ---- 基隆河 runs through 中山區: its banks are walls, and a bridge is mapped over it
+const river = await p.evaluate(async () => {
+  const g = window.__game;
+  const ix = await (await fetch('data/district/index.json')).json();
+  const pip = (x, z, r) => {
+    let c = false;
+    for (let a = 0, b = r.length - 1; a < r.length; b = a++)
+      if (r[a][1] > z !== r[b][1] > z && x < ((r[b][0] - r[a][0]) * (z - r[a][1])) / (r[b][1] - r[a][1]) + r[a][0])
+        c = !c;
+    return c;
+  };
+  const area = r =>
+    Math.abs(r.reduce((s, q, i) => s + q[0] * r[(i + 1) % r.length][1] - r[(i + 1) % r.length][0] * q[1], 0) / 2);
+  const riv = ix.water.reduce((a, r) => (area(r) > area(a) ? r : a));
+  // from the land side of each long bank wall, straight at the water
+  let tried = 0,
+    wet = 0;
+  for (const [ax, az, bx, bz] of ix.banks) {
+    const L = Math.hypot(bx - ax, bz - az);
+    if (L < 30) continue;
+    const mx = (ax + bx) / 2,
+      mz = (az + bz) / 2;
+    let nx = -(bz - az) / L,
+      nz = (bx - ax) / L;
+    if (!pip(mx + nx * 4, mz + nz * 4, riv)) ((nx = -nx), (nz = -nz));
+    if (!pip(mx + nx * 4, mz + nz * 4, riv) || pip(mx - nx * 5, mz - nz * 5, riv)) continue;
+    tried++;
+    const e = g.pushLine(mx - nx * 5, mz - nz * 5, mx + nx * 8, mz + nz * 8);
+    if (pip(e[0], e[1], riv)) wet++;
+  }
+  // and a bridge: a road that is flagged as one, with a point over the water
+  let bridge = null;
+  for (const k of Object.keys(ix.tiles)) {
+    const [tx, tz] = k.split('_').map(Number);
+    if (bridge || tx < 14 || tx > 28 || tz < -24 || tz > -15) continue;
+    const t = await (await fetch(`data/district/${k}.json`)).json();
+    for (const r of t.r) {
+      if (!r.b || !/^(primary|secondary|tertiary)$/.test(r.t)) continue;
+      if (r.p.some(q => pip(q[0], q[1], riv))) bridge = { n: r.n, t: r.t };
+    }
+  }
+  return { area: Math.round(area(riv)), banks: ix.banks.length, tried, wet, bridge };
+});
+console.log('   river', JSON.stringify(river));
+check(
+  river.area > 500000 && river.banks > 100,
+  `the river is water (${river.area} m²) with banks (${river.banks} walls)`,
+);
+check(river.tried > 20 && river.wet === 0, `nobody walks into it from the bank (${river.tried} places tried)`);
+check(!!river.bridge, `a bridge is mapped over it (${river.bridge?.n || river.bridge?.t})`);
 
 // ---- the paper map: what an older save had explored is still explored, in the right place
 const fog = await p.evaluate(() => {
