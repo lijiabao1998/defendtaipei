@@ -1,7 +1,7 @@
 import { tr } from '../i18n';
 // Project-Zomboid-style paper map rendered from the same OpenStreetMap data as the 3D world (© OpenStreetMap contributors, ODbL).
 // Fog of war, player notes, intel markers, 奪回/佔領 sector tint. Street names come from OSM `name` tags; no house numbers.
-import { readMapSave, writeMapSave } from '../systems/save';
+import { readMapSave, writeMapSave, type MapSave } from '../systems/save';
 
 type V2 = [number, number];
 export type MapBld = { pts: V2[]; type: string; n?: string };
@@ -21,14 +21,23 @@ export type MapDeps = {
     park: { p: V2[] }[];
     river: number[][];
     landmarks: { n: string; x: number; z: number }[];
+    /** v24.33 the name of each ring of the boundary */
+    districts?: string[];
     more?: () => Promise<{ b: number[][]; r: MapRoad[] }>;
   };
+  /** v24.33 metro stations (their first street exit) */
+  stations?: { n: string; x: number; z: number }[];
   liberated: () => Set<number>;
   player: () => { x: number; z: number; rot: number };
   parks: V2[];
   outposts: () => V2[];
   evac: () => V2 | null;
   home: () => V2 | null;
+};
+const DISTRICT_NAME: Record<string, string> = {
+  萬華區: tr('萬華區', 'Wanhua'),
+  中正區: tr('中正區', 'Zhongzheng'),
+  大同區: tr('大同區', 'Datong'),
 };
 type Note = { x: number; z: number; k: string; t?: string; intel?: boolean; id?: string };
 const KINDS: Record<string, [string, string]> = {
@@ -49,7 +58,9 @@ const ZONE = (b: MapBld) => {
   if (b.type === 'police') return '#9cb0d0';
   return '#bdb6a2';
 };
-const FG = 320; // v21: finer fog grid for the 3 × 4.5 km district
+const FG = 448; // v24.33: the map is 5.4 × 7.9 km now (was 320 cells over the 3 × 4.5 km of 萬華)
+/** the fog grid of a save made before v24.33: 320 cells over 萬華 alone */
+const OLD_FOG = [-1992, -1002, 4562 / 320, 320];
 export class GameMap {
   el: HTMLDivElement;
   cv: HTMLCanvasElement;
@@ -92,11 +103,7 @@ export class GameMap {
     this.fogA = new Uint8Array(FG * FG);
     try {
       const s = readMapSave();
-      if (s) {
-        this.notes = s.n || [];
-        const f = atob(s.f || '');
-        for (let i = 0; i < f.length && i < FG * FG; i++) this.fogA[i] = f.charCodeAt(i);
-      }
+      if (s) this.load(s);
     } catch {
       /* fresh */
     }
@@ -138,6 +145,29 @@ export class GameMap {
             this.zoomAt(+(z as HTMLElement).dataset.z!, innerWidth / 2, innerHeight / 2)),
       );
     this.input();
+  }
+  /**
+   * v24.33 take the notes and the fog of a save. The grid a save was made on travels with it; one from another grid
+   * (an older, smaller map) is laid over the new one, so what was explored stays explored.
+   */
+  load(s: MapSave) {
+    const b = this.d.bounds;
+    this.notes = s.n || [];
+    this.fogA.fill(0);
+    const f = atob(s.f || '');
+    const g = s.g ?? OLD_FOG;
+    const cs = (Math.max(b.maxx - b.minx, b.maxz - b.minz) + 80) / FG;
+    if (g[0] === this.ox && g[1] === this.oy && g[3] === FG && Math.abs(g[2] - cs) < 1e-6)
+      for (let i = 0; i < f.length && i < FG * FG; i++) this.fogA[i] = f.charCodeAt(i);
+    else
+      for (let j = 0; j < FG; j++)
+        for (let i = 0; i < FG; i++) {
+          const oi = Math.floor((this.ox + (i + 0.5) * cs - g[0]) / g[2]),
+            oj = Math.floor((this.oy + (j + 0.5) * cs - g[1]) / g[2]);
+          if (oi >= 0 && oj >= 0 && oi < g[3] && oj < g[3] && oj * g[3] + oi < f.length)
+            this.fogA[j * FG + i] = f.charCodeAt(oj * g[3] + oi);
+        }
+    this.dirty = true;
   }
   wx(x: number) {
     return (x - this.ox) * this.k;
@@ -304,8 +334,41 @@ export class GameMap {
         c.strokeText('⛩ ' + l.n, this.wx(l.x), this.wy(l.z) - 22);
         c.fillText('⛩ ' + l.n, this.wx(l.x), this.wy(l.z) - 22);
       }
+      // v24.33 the name of each district, large and faint across it
+      if (D.districts && D.boundary.length > 1) {
+        c.font = 'bold 84px "Noto Sans TC", serif';
+        c.textAlign = 'center';
+        c.fillStyle = 'rgba(120,40,30,.2)';
+        D.boundary.forEach((ring, i) => {
+          const n = D.districts![i];
+          if (!n) return;
+          let x = 0,
+            z = 0;
+          for (const q of ring) ((x += q[0] / ring.length), (z += q[1] / ring.length));
+          c.fillText(DISTRICT_NAME[n] ?? n, this.wx(x), this.wy(z));
+        });
+      }
     }
     c.setLineDash([]);
+    // v24.33 metro stations
+    c.textAlign = 'center';
+    c.font = 'bold 20px "Noto Sans TC", sans-serif';
+    for (const st of d.stations ?? []) {
+      const x = this.wx(st.x),
+        y = this.wy(st.z);
+      c.fillStyle = '#fff';
+      c.beginPath();
+      c.arc(x, y, 9, 0, 7);
+      c.fill();
+      c.lineWidth = 4;
+      c.strokeStyle = '#e8681c';
+      c.stroke();
+      c.lineWidth = 4;
+      c.strokeStyle = '#efe9da';
+      c.strokeText(st.n, x, y + 28);
+      c.fillStyle = '#1f5a3a';
+      c.fillText(st.n, x, y + 28);
+    }
   }
   reveal(x: number, z: number, r = 38) {
     const b = this.d.bounds;
@@ -340,7 +403,12 @@ export class GameMap {
     let f = '';
     for (let i = 0; i < this.fogA.length; i++) f += String.fromCharCode(this.fogA[i]);
     try {
-      writeMapSave({ n: this.notes, f: btoa(f) });
+      const b = this.d.bounds;
+      writeMapSave({
+        n: this.notes,
+        f: btoa(f),
+        g: [this.ox, this.oy, (Math.max(b.maxx - b.minx, b.maxz - b.minz) + 80) / FG, FG],
+      });
     } catch {
       /* quota */
     }
@@ -501,8 +569,25 @@ export class GameMap {
     const key = [...L].sort().join(',');
     if (!this.secCv || key !== this.secKey) {
       // low-res nearest-anchor raster, tinted by 奪回/佔領 state
-      const N = 192,
+      // v24.33 finer (the map is nearly twice as long), and only where there is a district: the tint and the lines
+      // between areas no longer run out across the land that is not in the map
+      const N = 320,
         cv = (this.secCv ||= document.createElement('canvas'));
+      const rings = d.district?.boundary;
+      const inMap = (x: number, z: number) => {
+        if (!rings) return true;
+        for (const r of rings) {
+          let c = false;
+          for (let a = 0, b = r.length - 1; a < r.length; b = a++)
+            if (
+              r[a][1] > z !== r[b][1] > z &&
+              x < ((r[b][0] - r[a][0]) * (z - r[a][1])) / (r[b][1] - r[a][1]) + r[a][0]
+            )
+              c = !c;
+          if (c) return true;
+        }
+        return false;
+      };
       cv.width = cv.height = N;
       const sc = cv.getContext('2d')!,
         im = sc.createImageData(N, N);
@@ -511,9 +596,10 @@ export class GameMap {
         for (let i = 0; i < N; i++) {
           const x = this.ox + (i + 0.5) * cs,
             z = this.oy + (j + 0.5) * cs;
+          const o = (j * N + i) * 4;
+          if (!inMap(x, z)) continue; // (left transparent)
           const si = d.sectorOf(x, z),
             e = d.sectorOf(x + cs, z) !== si || d.sectorOf(x, z + cs) !== si;
-          const o = (j * N + i) * 4;
           const lib = L.has(si);
           im.data.set(e ? [110, 70, 50, 120] : lib ? [60, 170, 70, 44] : [200, 40, 30, 32], o);
         }

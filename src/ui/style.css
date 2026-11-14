@@ -1345,6 +1345,18 @@ body.mobile.portrait #coverind {
   text-align: center;
   min-width: 240px;
 }
+/* v24.33 fifteen stops: two columns, and the list scrolls if the screen is short */
+#ride {
+  max-height: 88vh;
+  width: min(92vw, 440px);
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+#ride .stops {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 8px;
+}
 #ride h3,
 #shop h3 {
   margin: 0 0 4px;

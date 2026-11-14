@@ -110,8 +110,10 @@ import {
   ensureInterior,
   metroTick,
   metroStats,
+  metroShown,
   svc,
   stationOrigin,
+  STATIONS as METRO_STOPS,
   pryLoot,
   setPried,
   type Shop,
@@ -979,16 +981,57 @@ const SECTORS: { n: string; x: number; z: number }[] = [
   { n: tr('馬場町', 'Machangding'), x: 420, z: 2350 },
   { n: tr('雙園', 'Shuangyuan'), x: -1300, z: 2560 },
 ];
+/** the 萬華 campaign: these are the areas that have to be taken back to win */
 const NSEC = SECTORS.length;
+// v24.33 the neighbouring districts (中正, then 大同). Their areas are held by a garrison like the outer areas of 萬華
+// and can be taken back the same way, but they are not part of the campaign: its count, the offensive and the ending
+// are about the fifteen above.
+SECTORS.push(
+  { n: tr('台北車站', 'Taipei Station'), x: 1450, z: -560 },
+  { n: tr('博愛特區', 'Bo-ai Quarter'), x: 950, z: 120 },
+  { n: tr('華山', 'Huashan'), x: 2660, z: -340 },
+  { n: tr('東門', 'East Gate'), x: 1500, z: 230 },
+  { n: tr('南門', 'South Gate'), x: 1470, z: 900 },
+  { n: tr('植物園', 'Botanical Garden'), x: 800, z: 950 },
+  { n: tr('古亭', 'Guting'), x: 1850, z: 1500 },
+  { n: tr('廈門街', 'Xiamen Street'), x: 1750, z: 2050 },
+  { n: tr('水源', 'Shuiyuan'), x: 3000, z: 2850 },
+  { n: tr('北門', 'North Gate'), x: 700, z: -1050 },
+  { n: tr('後車站', 'Rear Station'), x: 1250, z: -950 },
+  { n: tr('大稻埕', 'Dadaocheng'), x: 700, z: -1820 },
+  { n: tr('雙連', 'Shuanglian'), x: 1780, z: -1840 },
+  { n: tr('民權西路', 'Minquan West Road'), x: 1650, z: -2420 },
+  { n: tr('大橋頭', 'Daqiaotou'), x: 980, z: -2450 },
+  { n: tr('大龍峒', 'Dalongdong'), x: 1340, z: -3500 },
+);
 const sectorNames = SECTORS.map(s => s.n);
+/** v24.33 the boundaries of the districts added to 萬華 (set once the district index is in) */
+let extRings: V2[][] = [];
+let extBox = [0, 0, 0, 0];
+const inExtra = (x: number, z: number) =>
+  extRings.length > 0 &&
+  x > extBox[0] &&
+  x < extBox[2] &&
+  z > extBox[1] &&
+  z < extBox[3] &&
+  !inCore(x, z) &&
+  extRings.some(r => pip([x, z], r));
+/** the area a point belongs to: one of the campaign's in 萬華 (and anywhere else), one of the others in a new district */
 const sectorOf = (x: number, z: number) => {
   let bi = 0,
     bd = 1e18;
-  SECTORS.forEach((s, i) => {
-    const d = (s.x - x) ** 2 + (s.z - z) ** 2;
+  const [i0, i1] = inExtra(x, z) ? [NSEC, SECTORS.length] : [0, NSEC];
+  for (let i = i0; i < i1; i++) {
+    const d = (SECTORS[i].x - x) ** 2 + (SECTORS[i].z - z) ** 2;
     if (d < bd) ((bd = d), (bi = i));
-  });
+  }
   return bi;
+};
+/** how many of the campaign's areas are taken back */
+const libN = () => {
+  let n = 0;
+  for (const i of liberated) if (i < NSEC) n++;
+  return n;
 };
 const SECTOR_LABEL = (i: number) => sectorNames[i] ?? tr('第', 'Sector ') + (i + 1) + tr('區', '');
 const outerSector = (i: number) => !inCore(SECTORS[i].x, SECTORS[i].z);
@@ -1985,7 +2028,7 @@ function callSupport() {
 }
 function rocCheck(silent: boolean) {
   if (!started && !silent) return;
-  if (!ROC.unlocked && liberated.size >= 2) {
+  if (!ROC.unlocked && libN() >= 2) {
     ROC.unlocked = true;
     if (!silent) {
       phone(
@@ -2015,7 +2058,7 @@ function rocCheck(silent: boolean) {
     li.label = '受傷聯絡官的背包';
     (ROC as any).liaison = lp;
   }
-  if (ROC.unlocked && !ROC.offensive && liberated.size >= NSEC - 2 && roc && !silent) {
+  if (ROC.unlocked && !ROC.offensive && libN() >= NSEC - 2 && roc && !silent) {
     ROC.offensive = true;
     const rest = [...Array(NSEC).keys()].filter(i => !liberated.has(i));
     const r = nearestRoad(player.pos.x, player.pos.z, /西園路/) || mainRoads[0];
@@ -2036,7 +2079,7 @@ function rocCheck(silent: boolean) {
     );
     slowDown(tr('國軍反攻', 'ROC counteroffensive'));
   }
-  if (ROC.offensive && !ROC.ended && liberated.size >= NSEC && !silent) {
+  if (ROC.offensive && !ROC.ended && libN() >= NSEC && !silent) {
     ROC.ended = true;
     rocEnding();
   }
@@ -2076,8 +2119,8 @@ function rocCineStep(dt: number) {
     d.className = 'win';
     d.innerHTML =
       getLanguage() === 'en'
-        ? `<h1>Wanhua Reclaimed</h1><h2>Ending: ROC forces and the people of Wanhua stood together and drove the occupation forces out of Monga.</h2><p class="survend">${SV.endingText(surv)}</p><table><tr><td>Days survived</td><td>${day} days</td></tr><tr><td>Neighborhoods reclaimed</td><td>${liberated.size} / ${NSEC}</td></tr><tr><td>Occupation soldiers defeated</td><td>${player.kills}</td></tr><tr><td>Armored vehicles destroyed</td><td>${armor ? armor.list.filter(a => a.dead).length : 0}</td></tr></table><p>Two other endings await: evacuate by helicopter or small boat to the USS Gerald R. Ford.</p><button onclick="location.reload()">Play again</button>`
-        : `<h1>奪回萬華</h1><h2>結局：國軍與萬華的街坊並肩，把佔領軍趕出了艋舺。</h2><p class="survend">${SV.endingText(surv)}</p><table><tr><td>存活天數</td><td>${day} 天</td></tr><tr><td>奪回街區</td><td>${liberated.size} / ${NSEC}</td></tr><tr><td>擊倒佔領軍</td><td>${player.kills}</td></tr><tr><td>擊毀裝甲</td><td>${armor ? armor.list.filter(a => a.dead).length : 0}</td></tr></table><p>另有兩種結局：搭直升機或小艇撤離至福特號航空母艦。</p><button onclick="location.reload()">再玩一次</button>`;
+        ? `<h1>Wanhua Reclaimed</h1><h2>Ending: ROC forces and the people of Wanhua stood together and drove the occupation forces out of Monga.</h2><p class="survend">${SV.endingText(surv)}</p><table><tr><td>Days survived</td><td>${day} days</td></tr><tr><td>Neighborhoods reclaimed</td><td>${libN()} / ${NSEC}</td></tr><tr><td>Occupation soldiers defeated</td><td>${player.kills}</td></tr><tr><td>Armored vehicles destroyed</td><td>${armor ? armor.list.filter(a => a.dead).length : 0}</td></tr></table><p>Two other endings await: evacuate by helicopter or small boat to the USS Gerald R. Ford.</p><button onclick="location.reload()">Play again</button>`
+        : `<h1>奪回萬華</h1><h2>結局：國軍與萬華的街坊並肩，把佔領軍趕出了艋舺。</h2><p class="survend">${SV.endingText(surv)}</p><table><tr><td>存活天數</td><td>${day} 天</td></tr><tr><td>奪回街區</td><td>${libN()} / ${NSEC}</td></tr><tr><td>擊倒佔領軍</td><td>${player.kills}</td></tr><tr><td>擊毀裝甲</td><td>${armor ? armor.list.filter(a => a.dead).length : 0}</td></tr></table><p>另有兩種結局：搭直升機或小艇撤離至福特號航空母艦。</p><button onclick="location.reload()">再玩一次</button>`;
     document.body.appendChild(d);
   }
 }
@@ -6937,6 +6980,7 @@ function openRide(i: number) {
     (getLanguage() === 'en'
       ? `<h3>🚇 Monga Orange Line · ${translateLabel(metro[i].name)} Station</h3><p>Choose your stop (about a 3-minute ride).</p>`
       : `<h3>🚇 艋舺橘線・${translateLabel(metro[i].name)}站</h3><p>選擇下車站（約 3 分鐘車程）</p>`) +
+    '<div class="stops">' +
     metro
       .map((s, j) =>
         j === i
@@ -6946,6 +6990,7 @@ function openRide(i: number) {
             : `<button data-j="${j}">${translateLabel(s.name)}站 橘${s.no}</button>`,
       )
       .join('') +
+    '</div>' +
     tr('<button data-j="-1" class="x">取消</button>', '<button data-j="-1" class="x">Cancel</button>');
   d.onclick = e => {
     const j = Number((e.target as HTMLElement).dataset?.j ?? NaN);
@@ -7594,7 +7639,7 @@ function damageSol(s: Sol, dmg: number, stealth: boolean) {
 }
 const liberated = new Set<number>();
 function checkSectors(silent = false) {
-  for (let i = 0; i < NSEC; i++) {
+  for (let i = 0; i < SECTORS.length; i++) {
     if (liberated.has(i)) continue;
     let alive = sols.filter(s => s.sector === i && s.state !== 'dead').length;
     let total = sols.filter(s => s.sector === i).length;
@@ -7739,8 +7784,8 @@ function doEvac(mode: 'heli' | 'boat' = 'heli') {
     d.id = 'evacend';
     d.innerHTML =
       getLanguage() === 'en'
-        ? `<h1>You have reached safety aboard USS Gerald R. Ford (CVN-78)</h1><h2>An alternate ending: you survived and carried Wanhua's story to the world. (Evacuation route: ${mode === 'boat' ? 'Boat · Out to sea via the Tamsui River' : 'Helicopter · Riverside extraction zone'})</h2><table><tr><td>Evacuation route</td><td>${mode === 'boat' ? '🚤 Boat (contact pickup)' : '🚁 Helicopter'}</td></tr><tr><td>Days survived</td><td>${day} days (Day ${day}, ${hh2})</td></tr><tr><td>Districts reclaimed</td><td>${liberated.size} / ${NSEC}</td></tr><tr><td>Occupation troops defeated</td><td>${player.kills}</td></tr><tr><td>Items carried</td><td>${items} items</td></tr></table><div><button id=evcont>Stay in Wanhua (the road to liberation)</button><button id=evnew>New game</button></div><p style="font-size:12px;color:#678;margin-top:18px">A work of fiction · Ships and helicopters use generic low-poly models</p>`
-        : `<h1>您已成功撤離至 福特號航空母艦（USS Gerald R. Ford, CVN-78）</h1><h2>另一個結局：你活了下來，把萬華的故事帶出去。（撤離路線：${mode === 'boat' ? '小艇・淡水河出海' : '直升機・河濱撤離區'}）</h2><table><tr><td>撤離路線</td><td>${mode === 'boat' ? '🚤 小艇（聯絡人接應）' : '🚁 直升機'}</td></tr><tr><td>存活天數</td><td>${day} 天（第 ${day} 天 ${hh2}）</td></tr><tr><td>奪回街區</td><td>${liberated.size} / ${NSEC}</td></tr><tr><td>擊倒佔領軍</td><td>${player.kills}</td></tr><tr><td>攜帶物品</td><td>${items} 件</td></tr></table><div><button id=evcont>繼續留在萬華（奪回之路）</button><button id=evnew>新遊戲</button></div><p style="font-size:12px;color:#678;margin-top:18px">虛構作品・艦艇與直升機為通用低多邊形模型</p>`;
+        ? `<h1>You have reached safety aboard USS Gerald R. Ford (CVN-78)</h1><h2>An alternate ending: you survived and carried Wanhua's story to the world. (Evacuation route: ${mode === 'boat' ? 'Boat · Out to sea via the Tamsui River' : 'Helicopter · Riverside extraction zone'})</h2><table><tr><td>Evacuation route</td><td>${mode === 'boat' ? '🚤 Boat (contact pickup)' : '🚁 Helicopter'}</td></tr><tr><td>Days survived</td><td>${day} days (Day ${day}, ${hh2})</td></tr><tr><td>Districts reclaimed</td><td>${libN()} / ${NSEC}</td></tr><tr><td>Occupation troops defeated</td><td>${player.kills}</td></tr><tr><td>Items carried</td><td>${items} items</td></tr></table><div><button id=evcont>Stay in Wanhua (the road to liberation)</button><button id=evnew>New game</button></div><p style="font-size:12px;color:#678;margin-top:18px">A work of fiction · Ships and helicopters use generic low-poly models</p>`
+        : `<h1>您已成功撤離至 福特號航空母艦（USS Gerald R. Ford, CVN-78）</h1><h2>另一個結局：你活了下來，把萬華的故事帶出去。（撤離路線：${mode === 'boat' ? '小艇・淡水河出海' : '直升機・河濱撤離區'}）</h2><table><tr><td>撤離路線</td><td>${mode === 'boat' ? '🚤 小艇（聯絡人接應）' : '🚁 直升機'}</td></tr><tr><td>存活天數</td><td>${day} 天（第 ${day} 天 ${hh2}）</td></tr><tr><td>奪回街區</td><td>${libN()} / ${NSEC}</td></tr><tr><td>擊倒佔領軍</td><td>${player.kills}</td></tr><tr><td>攜帶物品</td><td>${items} 件</td></tr></table><div><button id=evcont>繼續留在萬華（奪回之路）</button><button id=evnew>新遊戲</button></div><p style="font-size:12px;color:#678;margin-top:18px">虛構作品・艦艇與直升機為通用低多邊形模型</p>`;
     document.body.appendChild(d);
     $('evcont').onclick = () => {
       d.remove();
@@ -8931,8 +8976,8 @@ function drawHud(inside: Bld | null) {
   if (!PRO.on)
     $('objective').textContent =
       (getLanguage() === 'en'
-        ? `Districts reclaimed ${liberated.size} / ${NSEC} | Occupation troops remaining ${alive}`
-        : `已奪回街區 ${liberated.size} / ${NSEC}｜殘存佔領軍 ${alive}`) +
+        ? `Districts reclaimed ${libN()} / ${NSEC}${liberated.size > libN() ? ` (+${liberated.size - libN()} beyond)` : ''} | Occupation troops remaining ${alive}`
+        : `已奪回街區 ${libN()} / ${NSEC}${liberated.size > libN() ? `（外區 ${liberated.size - libN()}）` : ''}｜殘存佔領軍 ${alive}`) +
       (evacOpen()
         ? getLanguage() === 'en'
           ? ` | 🚁 Evacuation closes in ${Math.floor((EV1 - gameMin) / 60)} h ${Math.floor((EV1 - gameMin) % 60)} min`
@@ -9417,6 +9462,12 @@ async function boot() {
   await district.ready;
   {
     const [x0, z0, x1, z1] = district.ix.bbox;
+    // v24.33 the rings after the first are the districts added to 萬華
+    extRings = district.ix.boundary.slice(1);
+    extBox = [1e9, 1e9, -1e9, -1e9];
+    for (const r of extRings)
+      for (const [x, z] of r)
+        extBox = [Math.min(extBox[0], x), Math.min(extBox[1], z), Math.max(extBox[2], x), Math.max(extBox[3], z)];
     WORLD_B.minx = x0;
     WORLD_B.minz = z0;
     WORLD_B.maxx = x1;
@@ -9761,7 +9812,7 @@ async function boot() {
     blocked: (x, z) => !!placeAt(x, z),
     groundY: (x, z) => walkH(x, z),
     sectorOf,
-    nSec: NSEC,
+    nSec: SECTORS.length,
     flagTex: rocFlagTex(),
   });
   rainFx.setFronts(arcFronts);
@@ -9848,6 +9899,11 @@ async function boot() {
       outposts: () => checkpoints,
       evac: () => (evac ? (evac.pos as V2) : null),
       home: () => start!.c as V2,
+      stations: METRO_STOPS.map(st => ({
+        n: translateLabel(st.name),
+        x: (st.e ?? [[st.x, st.z]])[0][0],
+        z: (st.e ?? [[st.x, st.z]])[0][1],
+      })),
     });
     // v21.6 北都地下鐵 stations (interior only; walk into an entrance to go down)
     {
@@ -10743,6 +10799,7 @@ async function boot() {
     shotRay,
     sandbags,
     metro: () => metro,
+    metroShown,
     metroUse,
     metroBoard,
     shopAt,
@@ -11005,6 +11062,26 @@ async function boot() {
         conts: conts.filter(c => /^sm\d/.test(c.id)).map(c => ({ id: c.id, label: c.label, p: c.p, items: c.items })),
       },
     sectorAt: (i: number) => [SECTORS[i].x, SECTORS[i].z, outerSector(i)],
+    // v24.33 the areas of the neighbouring districts (test hooks)
+    sectors: () => ({
+      campaign: NSEC,
+      all: SECTORS.length,
+      names: sectorNames,
+      lib: [...liberated],
+      libN: libN(),
+      districts: district.ix?.districts ?? [],
+    }),
+    garrisonKey: (i: number) => garrisonKey(i),
+    /** the garrison of area i is gone, as if each of its soldiers had been shot */
+    garrisonWipe: (i: number) => {
+      const k = garrisonKey(i);
+      if (!k) return false;
+      const dead: Record<number, number> = { ...(district.saved[k]?.dead || {}) };
+      for (let n = 0; n < GARRISON; n++) dead[n] = 1;
+      district.save(k, 'dead', dead);
+      checkSectors(false);
+      return liberated.has(i);
+    },
     // v24.17 紅樓、剝皮寮
     landmarks: () => ({
       ghosts: blds.filter(b => (b as any).ghost).map(b => [b.id, b.c]),
