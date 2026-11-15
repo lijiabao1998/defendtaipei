@@ -4,7 +4,7 @@
 // paid areas by the gate line + glass fence, and a B2 island platform with full-height screen doors.
 // War state: power is out (emergency lights only, flickering), escalators stopped, refugees sleeping on
 // cardboard in the concourse, dropped bags, scooters dumped at the entrances.
-// The interiors are built lazily the first time someone goes down (streamed) at z ≈ -7000; geometry is merged
+// The interiors are built lazily the first time someone goes down (streamed) far off the map (METRO_Z); geometry is merged
 // per material, and every random choice comes from a per-station seed, so all players see the same station.
 // B1 and B2 are laid out side by side on one plane (B1 north, B2 south) joined by the stair/escalator banks;
 // camera-side walls are cut down low so the interior reads from the fixed camera.
@@ -59,7 +59,7 @@ export const STATIONS: { name: string; x: number; z: number; e?: V2[] }[] = [
     x: 1989,
     z: 1579,
     e: [
-      [1977.2, 1595.2],
+      [1999.2, 1566.6],
       [1995.6, 1621.5],
     ],
   },
@@ -68,8 +68,8 @@ export const STATIONS: { name: string; x: number; z: number; e?: V2[] }[] = [
     x: 3153,
     z: 2883,
     e: [
-      [3062.2, 2937.6],
-      [3144.6, 3001.7],
+      [3145.6, 2860.2],
+      [3189.8, 2903.7],
     ],
   },
   {
@@ -113,8 +113,8 @@ export const STATIONS: { name: string; x: number; z: number; e?: V2[] }[] = [
     x: 1654,
     z: -2415,
     e: [
-      [1653.5, -2399],
-      [1649.7, -2353.9],
+      [1656.7, -2399.2],
+      [1684.9, -2398.5],
     ],
   },
   {
@@ -122,8 +122,8 @@ export const STATIONS: { name: string; x: number; z: number; e?: V2[] }[] = [
     x: 1785,
     z: -1839,
     e: [
-      [1777.6, -1832.2],
-      [1693.2, -1820.4],
+      [1785.7, -1835.1],
+      [1816.1, -1838.8],
     ],
   },
   {
@@ -133,6 +133,169 @@ export const STATIONS: { name: string; x: number; z: number; e?: V2[] }[] = [
     e: [
       [1723.3, -3403.7],
       [1714.1, -3338.8],
+    ],
+  },
+  // v24.34 大安區 and 中山區 (and four of the exits above, moved to pavement that the map now has)
+  {
+    name: '東門',
+    x: 2648,
+    z: 791,
+    e: [
+      [2630.7, 865],
+      [2609, 917.3],
+    ],
+  },
+  {
+    name: '大安森林公園',
+    x: 3256,
+    z: 822,
+    e: [
+      [3259.3, 824.3],
+      [3287.4, 845],
+    ],
+  },
+  {
+    name: '大安',
+    x: 4090,
+    z: 848,
+    e: [
+      [4078.2, 858.8],
+      [4112.7, 878],
+    ],
+  },
+  {
+    name: '忠孝新生',
+    x: 3009,
+    z: -143,
+    e: [
+      [3026.8, -164.6],
+      [3073.5, -154.1],
+    ],
+  },
+  {
+    name: '忠孝復興',
+    x: 4112,
+    z: -60,
+    e: [
+      [4098.7, -47.8],
+      [4127.2, -27.3],
+    ],
+  },
+  {
+    name: '忠孝敦化',
+    x: 4688,
+    z: -56,
+    e: [
+      [4641.7, -28.2],
+      [4695.6, -111.8],
+    ],
+  },
+  {
+    name: '信義安和',
+    x: 5016,
+    z: 870,
+    e: [
+      [5019.6, 879.3],
+      [5048.2, 880.1],
+    ],
+  },
+  {
+    name: '科技大樓',
+    x: 4081,
+    z: 1647,
+    e: [
+      [4065.5, 1642.9],
+      [4097.9, 1683.3],
+    ],
+  },
+  {
+    name: '六張犁',
+    x: 5055,
+    z: 1899,
+    e: [
+      [5054.2, 1925],
+      [5091, 1936.8],
+    ],
+  },
+  {
+    name: '台電大樓',
+    x: 2542,
+    z: 2247,
+    e: [
+      [2533.7, 2265.2],
+      [2587.4, 2259.1],
+    ],
+  },
+  {
+    name: '中山',
+    x: 1754,
+    z: -1285,
+    e: [
+      [1773.5, -1295.2],
+      [1855.7, -1212.7],
+    ],
+  },
+  {
+    name: '松江南京',
+    x: 3029,
+    z: -1217,
+    e: [
+      [3011.3, -1200.8],
+      [3010.2, -1172.2],
+    ],
+  },
+  {
+    name: '行天宮',
+    x: 3042,
+    z: -2035,
+    e: [
+      [3042, -2035],
+      [3058.9, -1998.7],
+    ],
+  },
+  {
+    name: '中山國小',
+    x: 2380,
+    z: -2396,
+    e: [
+      [2378.2, -2411.9],
+      [2411.4, -2373],
+    ],
+  },
+  {
+    name: '南京復興',
+    x: 4132,
+    z: -1198,
+    e: [
+      [4124.3, -1200],
+      [4124.4, -1166.1],
+    ],
+  },
+  {
+    name: '中山國中',
+    x: 4155,
+    z: -2176,
+    e: [
+      [4139.6, -2166.7],
+      [4140, -2132.6],
+    ],
+  },
+  {
+    name: '大直',
+    x: 4482,
+    z: -4296,
+    e: [
+      [4489.4, -4292.9],
+      [4461.9, -4284.3],
+    ],
+  },
+  {
+    name: '劍南路',
+    x: 5310,
+    z: -4847,
+    e: [
+      [5311.6, -4864.9],
+      [5346.2, -4817.6],
     ],
   },
 ];
@@ -496,7 +659,14 @@ export type MetroDeps = {
   snap: (x: number, z: number) => V2;
   removeSeg: (s: Seg) => void;
 };
-const OXZ = (i: number) => [-1200 + i * 240, -7000] as const;
+/**
+ * v24.34 where the interiors are kept: far north of anything the map will reach. They were at z = -7000, and the
+ * north of 中山區 (z = -5645) comes close to that.
+ */
+export const METRO_Z = -20000;
+/** a point that is down in the metro, not on the map */
+export const inMetro = (z: number) => z < METRO_Z + 2000;
+const OXZ = (i: number) => [-1200 + i * 240, METRO_Z] as const;
 export const stationOrigin = OXZ;
 // interior layout constants (local)
 const EXITS = [-17, 17]; // B1 exit passages (x)

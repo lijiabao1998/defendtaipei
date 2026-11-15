@@ -142,8 +142,29 @@ async function fixture(page, inventory, loot, lang) {
     },
     { inventory, loot, lang },
   );
-  await page.keyboard.press('KeyE');
-  await page.waitForSelector('#loot-items', { state: 'visible' });
+  // The interact key goes to whatever is nearest of its own order (a door to open, someone to talk to) before a crate.
+  // Now and then one of those is beside this crate, and the check used to wait two minutes for a panel that the key
+  // had not been asked for: press again, as a player would, and say what the key did first.
+  for (let i = 0; ; i++) {
+    const hint = await page.evaluate(() => {
+      const e = document.getElementById('prompt');
+      return e && e.style.display !== 'none' ? e.textContent : '';
+    });
+    await page.keyboard.press('KeyE');
+    try {
+      await page.waitForSelector('#loot-items', { state: 'visible', timeout: i < 4 ? 5000 : 120000 });
+      return;
+    } catch (e) {
+      if (i >= 4) throw e;
+      const open = await page.evaluate(() => {
+        const ids = ['shop', 'ride', 'surv', 'modal'].filter(k => document.getElementById(k));
+        document.getElementById('shop')?.remove();
+        document.getElementById('ride')?.remove();
+        return ids.join(' ');
+      });
+      console.log(`   (the interact key did something else first; prompt "${hint}"; open: ${open || 'nothing'})`);
+    }
+  }
 }
 async function exercise(mobile, lang) {
   const context = await browser.newContext({

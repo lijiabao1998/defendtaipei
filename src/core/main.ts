@@ -113,6 +113,8 @@ import {
   metroShown,
   svc,
   stationOrigin,
+  METRO_Z,
+  inMetro,
   STATIONS as METRO_STOPS,
   pryLoot,
   setPried,
@@ -633,7 +635,7 @@ function collide(pos: THREE.Vector3, r: number) {
         pos.z = cz + (oz / d) * r;
       }
     }
-  // v23.4 the off-map spaces (metro at z < -6000, upstairs floors east of the district) have their own walls;
+  // v23.4 the off-map spaces (the metro far to the north, upstairs floors far to the east) have their own walls;
   // clamping them to the map bounds snapped the player out of the station on the first step
   if (offMap(pos.x, pos.z)) return;
   pos.x = clamp(pos.x, WORLD.minx, WORLD.maxx);
@@ -744,7 +746,7 @@ const bounds = { minx: -500, maxx: 500, minz: -500, maxz: 500 };
 const WORLD = { minx: -500, maxx: 500, minz: -500, maxz: 500 };
 const WORLD_B = { ...WORLD };
 /** v23.4 metro (below) or upstairs floor (east): spaces outside the map with their own walls */
-const offMap = (x: number, z: number) => z < -6000 || UP.isUp(x);
+const offMap = (x: number, z: number) => inMetro(z) || UP.isUp(x);
 /** v23.4 the 2F the player is on (one at a time, off-map), with the ground point it is anchored to */
 type UpState = {
   b: Bld | DEnter;
@@ -983,7 +985,7 @@ const SECTORS: { n: string; x: number; z: number }[] = [
 ];
 /** the 萬華 campaign: these are the areas that have to be taken back to win */
 const NSEC = SECTORS.length;
-// v24.33 the neighbouring districts (中正, then 大同). Their areas are held by a garrison like the outer areas of 萬華
+// v24.33 the neighbouring districts (中正, then 大同; v24.34 大安 and 中山). Their areas are held by a garrison like the outer areas of 萬華
 // and can be taken back the same way, but they are not part of the campaign: its count, the offensive and the ending
 // are about the fifteen above.
 SECTORS.push(
@@ -1003,6 +1005,27 @@ SECTORS.push(
   { n: tr('民權西路', 'Minquan West Road'), x: 1650, z: -2420 },
   { n: tr('大橋頭', 'Daqiaotou'), x: 980, z: -2450 },
   { n: tr('大龍峒', 'Dalongdong'), x: 1340, z: -3500 },
+  // v24.34 大安區
+  { n: tr('永康街', 'Yongkang Street'), x: 2700, z: 900 },
+  { n: tr('大安森林公園', 'Forest Park'), x: 3250, z: 1050 },
+  { n: tr('師大路', 'Shida Road'), x: 2500, z: 1750 },
+  { n: tr('溫州街', 'Wenzhou Street'), x: 3000, z: 2350 },
+  { n: tr('光華', 'Guanghua'), x: 3050, z: -150 },
+  { n: tr('東區', 'East District'), x: 4400, z: -50 },
+  { n: tr('敦南', 'Dunnan'), x: 4700, z: 700 },
+  { n: tr('復興南路', 'Fuxing South Road'), x: 4080, z: 1650 },
+  { n: tr('通化街', 'Tonghua Street'), x: 5100, z: 1000 },
+  { n: tr('六張犁', 'Liuzhangli'), x: 5050, z: 1900 },
+  // v24.34 中山區
+  { n: tr('條通', 'Tiaotong'), x: 2100, z: -950 },
+  { n: tr('晴光', 'Qingguang'), x: 1950, z: -2500 },
+  { n: tr('松江路', 'Songjiang Road'), x: 3030, z: -1200 },
+  { n: tr('行天宮', 'Xingtian Temple'), x: 3040, z: -2050 },
+  { n: tr('遼寧街', 'Liaoning Street'), x: 4000, z: -950 },
+  { n: tr('民生東路', 'Minsheng East Road'), x: 4150, z: -2200 },
+  { n: tr('濱江', 'Binjiang'), x: 3400, z: -3000 },
+  { n: tr('大直', 'Dazhi'), x: 4480, z: -4300 },
+  { n: tr('劍南', 'Jiannan'), x: 5300, z: -4850 },
 );
 const sectorNames = SECTORS.map(s => s.n);
 /** v24.33 the boundaries of the districts added to 萬華 (set once the district index is in) */
@@ -3157,7 +3180,8 @@ const drive = new DriveSystem({
   roadW: roadWAt,
   roofAt: (x, z) => roofAt(x, z),
   canLand: (x, z) => walkable(x, z) && roofAt(x, z) <= 0,
-  inMap: (x, z) => Math.hypot(x - 0, z - 0) < 2400 && z > -6000,
+  // v24.34 anywhere over the districts (it was a circle of 2.4 km round the core)
+  inMap: (x, z) => x > WORLD.minx && x < WORLD.maxx && z > WORLD.minz && z < WORLD.maxz,
   rotorSound: (rate, dt) => {
     rotorT -= dt;
     if (rotorT <= 0 && rate > 0.2) {
@@ -3561,7 +3585,7 @@ let umbOpen = false,
   sneezeT = 12,
   sneezes = 0;
 /** on the street map: not upstairs, not underground */
-const onStreet = () => !UP.isUp(player.pos.x) && player.pos.z > -6000;
+const onStreet = () => !UP.isUp(player.pos.x) && !inMetro(player.pos.z);
 const NR = 2500;
 const rainPos = new Float32Array(NR * 6);
 const rainG = new THREE.BufferGeometry();
@@ -5857,7 +5881,7 @@ AU.unlockAudio();
 BC.unlockBroadcast();
 const pDist = (x: number, z: number) => Math.hypot(player.pos.x - x, player.pos.z - z);
 function surfaceAt(x: number, z: number): AU.Surface {
-  if (z < -6000) return 'metro';
+  if (inMetro(z)) return 'metro';
   if (UP.isUp(x)) return 'wood';
   const b = bldAt(x, z);
   if (b) return b.type === 'home' || b.type === 'house' || b.type === 'residential' ? 'wood' : 'tile';
@@ -5882,10 +5906,10 @@ function audioTick(dt: number) {
   const inside = indoorAt(player.pos.x, player.pos.z);
   AU.ambience(dt, {
     rain: WX.amt,
-    indoor: inside || player.pos.z < -6000,
+    indoor: inside || inMetro(player.pos.z),
     home: atHome(),
     night: isNight(),
-    metro: player.pos.z < -6000,
+    metro: inMetro(player.pos.z),
     combat: sols.some(s => s.state === 'combat'),
   });
 }
@@ -6898,7 +6922,7 @@ const PS: { src?: string[] } = {};
 const wallet = () => (surv.cash ??= 1200);
 const SHOP_LOOT = /^m\d+:[0678]$/; // shop shelves: only lootable once the shops are dead
 function shopAt(): Shop | null {
-  if (player.pos.z > -6000) return null;
+  if (!inMetro(player.pos.z)) return null;
   let best: Shop | null = null,
     bd = 1.3;
   for (const st of metro) {
@@ -8044,6 +8068,7 @@ function save() {
     surv,
     g: player.gender,
     p: mapPos(), // v23.4 saved upstairs → resume at the foot of the stairs
+    ov: 1, // v24.34 the metro is at METRO_Z
     hp: player.hp,
     hu: player.hunger,
     th: player.thirst,
@@ -8120,7 +8145,15 @@ function update(dt: number) {
   for (const s of sols) if (s.state === 'dead' && s.rig.deadT < 1) animate(s.rig, 'death', 0, dt);
   if (evac) evac.update(dt, evacOpen());
   if (metro.length && PS.src !== surv.pried) setPried(new Set((PS.src = surv.pried ||= [])));
-  if (metro.length) metroTick(performance.now() / 1000, gameMin, UT.power, player.pos.x, player.pos.z);
+  if (metro.length) {
+    // v24.34 a game saved down in a station comes back down there: the interior is built on the way in from the
+    // street, so a save loaded straight into it stood in the dark with the walls and nothing to see
+    if (inMetro(player.pos.z)) {
+      const i = Math.round((player.pos.x - stationOrigin(0)[0]) / (stationOrigin(1)[0] - stationOrigin(0)[0]));
+      if (metro[i] && !metro[i].built) ensureInterior(scene, metro[i], i);
+    }
+    metroTick(performance.now() / 1000, gameMin, UT.power, player.pos.x, player.pos.z);
+  }
   if (evac && evacOpen()) gmap?.intel('evac0', evac.pos[0], evac.pos[1], 'evac', tr('撤離點', 'Extraction point'));
   if (started) {
     gmap?.update();
@@ -8400,7 +8433,7 @@ function update(dt: number) {
       ? up.roof
         ? roofShed() // v24.32 inside a tin house on the roof: its roof comes off like any other room's
         : up.room.box
-      : player.pos.z < -6000 || roofB || aloft
+      : inMetro(player.pos.z) || roofB || aloft
         ? null
         : (district.enterAt(player.pos.x, player.pos.z) ??
           district.landmarkCut(player.pos.x, player.pos.z) ??
@@ -8845,7 +8878,7 @@ function update(dt: number) {
   (scene.fog as THREE.Fog).color.copy(fogC);
   renderer.setClearColor(fogC);
   hemi.color.setHSL(0.6, 0.5, 0.35 + dayF * 0.45);
-  if (player.pos.z < -6000) {
+  if (inMetro(player.pos.z)) {
     // v22.3 underground: no sun or sky; only the station's own lights (or emergency lights after the cut)
     sun.intensity = 0;
     hemi.intensity = UT.power ? 0.5 : 0.07;
@@ -10073,6 +10106,8 @@ async function boot() {
     player.rig = spawnRig({ gender, ...ROLE.look[gender as 'm' | 'f'], outfit: ROLE.id });
     player.mesh = player.rig.root;
     if (load && sv) {
+      // v24.34 a save made down in the metro when the stations were at z = -7000: they have moved
+      if (!sv.ov && sv.p[1] < -6000) sv.p[1] += METRO_Z + 7000;
       player.pos.set(sv.p[0], 0, sv.p[1]);
       Object.assign(player, {
         hp: sv.hp,
@@ -11072,6 +11107,17 @@ async function boot() {
       districts: district.ix?.districts ?? [],
     }),
     garrisonKey: (i: number) => garrisonKey(i),
+    /** v24.34 push a body in a straight line against the walls (test hook): where it ends up */
+    pushLine: (ax: number, az: number, bx: number, bz: number) => {
+      const v = new THREE.Vector3(ax, 0, az);
+      const n = Math.ceil(Math.hypot(bx - ax, bz - az) / 0.25);
+      for (let i = 1; i <= n; i++) {
+        v.x += (bx - ax) / n;
+        v.z += (bz - az) / n;
+        collide(v, 0.35);
+      }
+      return [v.x, v.z];
+    },
     /** the garrison of area i is gone, as if each of its soldiers had been shot */
     garrisonWipe: (i: number) => {
       const k = garrisonKey(i);

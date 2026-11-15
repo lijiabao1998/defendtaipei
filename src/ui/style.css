@@ -1348,13 +1348,13 @@ body.mobile.portrait #coverind {
 /* v24.33 fifteen stops: two columns, and the list scrolls if the screen is short */
 #ride {
   max-height: 88vh;
-  width: min(92vw, 440px);
+  width: min(94vw, 640px);
   overflow-y: auto;
   box-sizing: border-box;
 }
 #ride .stops {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); /* v24.34: thirty-two stops */
   gap: 0 8px;
 }
 #ride h3,

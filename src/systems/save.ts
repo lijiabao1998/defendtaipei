@@ -29,6 +29,8 @@ export const MAP_SAVE_KEY = 'defendtaipei-map-v2';
  */
 export interface GameSave {
   r: string;
+  /** v24.34 layout of the off-map spaces the save was made in (absent: the metro at z = -7000) */
+  ov?: number;
   surv: any;
   g: string;
   p: [number, number];

@@ -9,13 +9,17 @@
 // Input: one Overpass JSON (out geom) per district — its admin relation, building / highway / railway / water /
 // park / landuse ways, building and park multipolygons — and the relation of the city (out body), whose member
 // ways mark the edges that are the river.
-// Usage: node scripts/expand.mjs --city raw-city.json raw-中正區.json raw-大同區.json
+// A river that runs through a district (基隆河 in 中山區) is a multipolygon of its own: give those relations with
+// --water. Its water is drawn, nothing is built in it, and its banks are walls except under the bridges.
+// Usage: node scripts/expand.mjs --city raw-city.json [--water raw-water.json] raw-中正區.json raw-大同區.json
 // Same local projection as public/data/wanhua.json. Data © OpenStreetMap contributors, ODbL.
 import fs from 'fs';
 const T = 200;
 const args = process.argv.slice(2);
 const ci = args.indexOf('--city');
 const cityFile = ci >= 0 ? args.splice(ci, 2)[1] : null;
+const wi = args.indexOf('--water');
+const waterFile = wi >= 0 ? args.splice(wi, 2)[1] : null;
 const lat0 = (25.0365 + 25.0455) / 2,
   lon0 = (121.4975 + 121.5085) / 2;
 const kx = 111320 * Math.cos((lat0 * Math.PI) / 180),
@@ -147,9 +151,81 @@ if (cityFile)
 
 // ---------------------------------------------------------------- the new districts
 const oldRings = ix.boundary.slice();
+/** rings of the big water added in this run: their banks become walls at the end */
+const rivers = [];
+if (waterFile) {
+  // the part of them that lies over the districts being added (a river goes on for kilometres either way)
+  let box = [1e9, 1e9, -1e9, -1e9];
+  for (const file of args) {
+    const rel = JSON.parse(fs.readFileSync(file, 'utf8')).elements.find(
+      e => e.type === 'relation' && e.tags?.boundary === 'administrative',
+    );
+    for (const m of rel.members)
+      for (const g of m.geometry || []) {
+        const q = P(g);
+        box = [Math.min(box[0], q[0]), Math.min(box[1], q[1]), Math.max(box[2], q[0]), Math.max(box[3], q[1])];
+      }
+  }
+  box = [box[0] - 120, box[1] - 120, box[2] + 120, box[3] + 120];
+  // Sutherland–Hodgman against the four sides of the box
+  const clip = poly => {
+    const sides = [
+      [q => q[0] >= box[0], (a, b) => [box[0], a[1] + ((b[1] - a[1]) * (box[0] - a[0])) / (b[0] - a[0])]],
+      [q => q[0] <= box[2], (a, b) => [box[2], a[1] + ((b[1] - a[1]) * (box[2] - a[0])) / (b[0] - a[0])]],
+      [q => q[1] >= box[1], (a, b) => [a[0] + ((b[0] - a[0]) * (box[1] - a[1])) / (b[1] - a[1]), box[1]]],
+      [q => q[1] <= box[3], (a, b) => [a[0] + ((b[0] - a[0]) * (box[3] - a[1])) / (b[1] - a[1]), box[3]]],
+    ];
+    for (const [inside, cut] of sides) {
+      const out = [];
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i],
+          b = poly[(i + 1) % poly.length];
+        if (inside(a)) out.push(a);
+        if (inside(a) !== inside(b)) out.push(cut(a, b));
+      }
+      poly = out;
+      if (poly.length < 3) return [];
+    }
+    return poly.map(q => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10]);
+  };
+  const eq = (a, b) => Math.abs(a[0] - b[0]) < 0.5 && Math.abs(a[1] - b[1]) < 0.5;
+  for (const e of JSON.parse(fs.readFileSync(waterFile, 'utf8')).elements) {
+    if (e.type !== 'relation' || !(e.tags?.natural === 'water' || e.tags?.waterway === 'riverbank')) continue;
+    const ws = e.members.filter(m => m.role === 'outer' && m.geometry).map(m => m.geometry.map(P));
+    while (ws.length) {
+      let ring = ws.shift();
+      for (let grow = true; grow && !eq(ring[0], ring[ring.length - 1]);) {
+        grow = false;
+        for (let i = 0; i < ws.length; i++) {
+          const w = ws[i],
+            end = ring[ring.length - 1];
+          if (eq(w[0], end)) ring = ring.concat(w.slice(1));
+          else if (eq(w[w.length - 1], end)) ring = ring.concat(w.slice(0, -1).reverse());
+          else continue;
+          ws.splice(i, 1);
+          grow = true;
+          break;
+        }
+      }
+      if (ring.length < 4) continue;
+      if (eq(ring[0], ring[ring.length - 1])) ring = ring.slice(0, -1);
+      const c = clip(simpR(ring, 2));
+      if (c.length < 4) continue;
+      const cc = cen(c);
+      if (ix.water.some(o => Math.hypot(cen(o)[0] - cc[0], cen(o)[1] - cc[1]) < 2)) continue; // already there
+      ix.water.push(c);
+      if (polyArea(c) > 20000) rivers.push(c);
+    }
+  }
+  console.log(
+    'water from relations:',
+    rivers.length,
+    'river(s)',
+    rivers.map(r => Math.round(polyArea(r))),
+  );
+}
 const newRoads = []; // { t, n, p, b }: the kept runs of each way (for road detail and the paper map)
 const report = [];
-let riBase = 200000;
 for (const file of args) {
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
   const rel = raw.elements.find(e => e.type === 'relation' && e.tags?.boundary === 'administrative');
@@ -315,7 +391,12 @@ for (const file of args) {
     });
   };
   for (const w of water) if (w.length > 3 && fresh(ix.water, w)) ix.water.push(w);
-  for (const q of park) if (q.p.length > 3 && fresh(ix.park, q.p)) ix.park.push(q);
+  // (a park or a lawn whose middle is outside every district belongs to the neighbour: an airfield's grass, say)
+  const mine = q => {
+    const c = cen(q);
+    return inNew(c[0], c[1]) || inOld(c[0], c[1]);
+  };
+  for (const q of park) if (q.p.length > 3 && mine(q.p) && fresh(ix.park, q.p)) ix.park.push(q);
   for (const q of landuse) if (q.p.length > 3 && fresh(ix.landuse, q.p)) ix.landuse.push(q);
   // ---- roads into tiles (runs split by the tile of each segment's middle, as district.mjs does)
   for (const r of myRoads) {
@@ -376,7 +457,12 @@ for (const file of args) {
   // ---- infill: OSM maps only part of the buildings, so empty road frontage gets walk-up footprints
   // (deterministic, flagged g:1), exactly as district.mjs does for 萬華, from this district's own stream
   {
-    const blockers = [...ix.water, ...ix.park.map(q => q.p)];
+    // (with their boxes: there are a thousand of them and tens of thousands of places to try)
+    const blockers = [...ix.water, ...ix.park.map(q => q.p)].map(p => {
+      const xs = p.map(q => q[0]),
+        zs = p.map(q => q[1]);
+      return { p, x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };
+    });
     const clear = (x, z, r) => {
       for (const [a, b, w] of gnear(segG, x, z)) if (segDist(x, z, a, b) < w + r) return false;
       for (const p of bG.get(Math.floor(x / G) + ',' + Math.floor(z / G)) || []) if (pip([x, z], p)) return false;
@@ -404,7 +490,8 @@ for (const file of args) {
             const cx = a[0] + ux * s + nx * (off + dp / 2),
               cz = a[1] + uz * s + nz * (off + dp / 2);
             if (inCore(cx, cz) || inOld(cx, cz) || !inNew(cx, cz)) continue;
-            if (blockers.some(bp => pip([cx, cz], bp)) || nearRiver(cx, cz)) continue;
+            if (blockers.some(b => cx > b.x0 && cx < b.x1 && cz > b.z0 && cz < b.z1 && pip([cx, cz], b.p))) continue;
+            if (nearRiver(cx, cz)) continue;
             const cs = [
               [-1, -1],
               [1, -1],
@@ -451,6 +538,51 @@ for (const r of newRoads)
       p: simp(r.p, 2).map(q => [Math.round(q[0]), Math.round(q[1])]),
     });
 fs.writeFileSync(`${DD}/map.json`, JSON.stringify(paper));
+// the banks of the rivers added in this run: walls along the water, open where a bridge crosses
+if (rivers.length) {
+  const bridges = [];
+  for (const t of tiles.values())
+    for (const r of t.r)
+      if (r.b)
+        for (let i = 0; i < r.p.length - 1; i++)
+          bridges.push([r.p[i], r.p[i + 1], (RW[r.t.replace('_link', '')] || 4) / 2]);
+  const BG2 = new Map();
+  for (const b of bridges)
+    gput(
+      BG2,
+      Math.min(b[0][0], b[1][0]) - 12,
+      Math.min(b[0][1], b[1][1]) - 12,
+      Math.max(b[0][0], b[1][0]) + 12,
+      Math.max(b[0][1], b[1][1]) + 12,
+      b,
+    );
+  const under = (x, z) =>
+    (BG2.get(Math.floor(x / G) + ',' + Math.floor(z / G)) || []).some(([a, b, w]) => segDist(x, z, a, b) < w + 2.5);
+  const inAny = (x, z) => ix.boundary.some(r => pip([x, z], r));
+  ix.banks ||= [];
+  let nb = 0;
+  for (const ring of rivers)
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i],
+        b = ring[(i + 1) % ring.length];
+      const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (L < 0.5) continue;
+      const n = Math.max(1, Math.ceil(L / 2));
+      let run = null;
+      for (let k = 0; k <= n; k++) {
+        const x = a[0] + ((b[0] - a[0]) * k) / n,
+          z = a[1] + ((b[1] - a[1]) * k) / n;
+        const wall = !under(x, z) && inAny(x, z);
+        if (wall) ((run ||= [x, z, x, z]), ((run[2] = x), (run[3] = z)));
+        if ((!wall || k === n) && run) {
+          if (Math.hypot(run[2] - run[0], run[3] - run[1]) > 0.5)
+            (ix.banks.push(run.map(v => Math.round(v * 10) / 10)), nb++);
+          run = null;
+        }
+      }
+    }
+  console.log('bank walls:', nb, 'bridge segments:', bridges.length);
+}
 fs.writeFileSync(`${DD}/index.json`, JSON.stringify(ix));
 
 // ---------------------------------------------------------------- road detail (as scripts/tiles.mjs), new roads only
@@ -492,6 +624,9 @@ const rtile = k => {
   }
   return rt.get(k);
 };
+// road numbers go on from the highest one in use (a second run must not hand out the numbers of the first)
+let riBase = 200000;
+for (const t of rt.values()) for (const g of t.segs) if (g[6] >= riBase) riBase = g[6] + 1;
 const S = [];
 newRoads.forEach((r, i) => {
   const ri = riBase + i;
