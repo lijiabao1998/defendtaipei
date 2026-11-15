@@ -23,6 +23,9 @@ export type MapDeps = {
     landmarks: { n: string; x: number; z: number }[];
     /** v24.33 the name of each ring of the boundary */
     districts?: string[];
+    /** v24.35 woodland, and airfields (lawn, paving, runway paint) */
+    wood?: V2[][];
+    air?: { lawn: V2[][]; paved: V2[][]; marks: V2[][] };
     more?: () => Promise<{ b: number[][]; r: MapRoad[] }>;
   };
   /** v24.33 metro stations (their first street exit) */
@@ -40,6 +43,8 @@ const DISTRICT_NAME: Record<string, string> = {
   大同區: tr('大同區', 'Datong'),
   大安區: tr('大安區', "Da'an"),
   中山區: tr('中山區', 'Zhongshan'),
+  松山區: tr('松山區', 'Songshan'),
+  信義區: tr('信義區', 'Xinyi'),
 };
 type Note = { x: number; z: number; k: string; t?: string; intel?: boolean; id?: string };
 const KINDS: Record<string, [string, string]> = {
@@ -212,10 +217,40 @@ export class GameMap {
         poly(w);
         c.fill();
       }
+      // v24.35 woodland (darker than the parks, which lie in it), inside the districts only
+      if (D.wood?.length) {
+        c.save();
+        c.beginPath();
+        for (const b of D.boundary) {
+          b.forEach(([x, z], i) => (i ? c.lineTo(this.wx(x), this.wy(z)) : c.moveTo(this.wx(x), this.wy(z))));
+          c.closePath();
+        }
+        c.clip();
+        c.fillStyle = '#6f9a5c';
+        for (const w of D.wood) {
+          poly(w);
+          c.fill();
+        }
+        c.restore();
+      }
       c.fillStyle = '#7fa860';
       for (const pk of D.park) {
         poly(pk.p);
         c.fill();
+      }
+      // v24.35 an airfield: its lawns, what is paved, the paint of the runway
+      if (D.air) {
+        for (const [list, col] of [
+          [D.air.lawn, '#a9c48a'],
+          [D.air.paved, '#9a9aa0'],
+          [D.air.marks, '#f4f2ea'],
+        ] as [V2[][], string][]) {
+          c.fillStyle = col;
+          for (const q of list) {
+            poly(q);
+            c.fill();
+          }
+        }
       }
     } else {
       c.fillStyle = '#e8dfc8';

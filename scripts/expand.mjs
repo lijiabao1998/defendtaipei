@@ -10,8 +10,14 @@
 // park / landuse ways, building and park multipolygons — and the relation of the city (out body), whose member
 // ways mark the edges that are the river.
 // A river that runs through a district (基隆河 in 中山區) is a multipolygon of its own: give those relations with
-// --water. Its water is drawn, nothing is built in it, and its banks are walls except under the bridges.
-// Usage: node scripts/expand.mjs --city raw-city.json [--water raw-water.json] raw-中正區.json raw-大同區.json
+// --water. Its water is drawn, nothing is built in it, and its banks are walls except under the bridges. Every run
+// with --water cuts those rivers again, to the box of all the districts they were ever cut for, and makes the banks
+// again: a river that was cut at the edge of 中山區 goes on when 松山區 is added.
+// --wood: woodland (natural=wood, landuse=forest; ways and multipolygons). The hillsides of 信義區 are a third of the
+// district; without it they are bare ground. Kept where it touches a district, drawn green and planted by the game.
+// An airfield in a district (aeroway=*, with the district's extract: 松山機場) becomes ix.air: its aprons, runway and
+// taxiways as paved ground, its grass as lawn without trees, the runway's paint. Nothing is generated inside it.
+// Usage: node scripts/expand.mjs --city raw-city.json [--water raw-water.json] [--wood raw-wood.json] raw-中正區.json …
 // Same local projection as public/data/wanhua.json. Data © OpenStreetMap contributors, ODbL.
 import fs from 'fs';
 const T = 200;
@@ -20,6 +26,8 @@ const ci = args.indexOf('--city');
 const cityFile = ci >= 0 ? args.splice(ci, 2)[1] : null;
 const wi = args.indexOf('--water');
 const waterFile = wi >= 0 ? args.splice(wi, 2)[1] : null;
+const fi = args.indexOf('--wood');
+const woodFile = fi >= 0 ? args.splice(fi, 2)[1] : null;
 const lat0 = (25.0365 + 25.0455) / 2,
   lon0 = (121.4975 + 121.5085) / 2;
 const kx = 111320 * Math.cos((lat0 * Math.PI) / 180),
@@ -151,78 +159,147 @@ if (cityFile)
 
 // ---------------------------------------------------------------- the new districts
 const oldRings = ix.boundary.slice();
+const eq = (a, b) => Math.abs(a[0] - b[0]) < 0.5 && Math.abs(a[1] - b[1]) < 0.5;
+/** ways (lists of points) joined end to end into rings; what does not close is returned open */
+const joinWays = ws => {
+  ws = ws.slice();
+  const out = [];
+  while (ws.length) {
+    let ring = ws.shift();
+    for (let grow = true; grow && !eq(ring[0], ring[ring.length - 1]);) {
+      grow = false;
+      for (let i = 0; i < ws.length; i++) {
+        const w = ws[i],
+          end = ring[ring.length - 1];
+        if (eq(w[0], end)) ring = ring.concat(w.slice(1));
+        else if (eq(w[w.length - 1], end)) ring = ring.concat(w.slice(0, -1).reverse());
+        else continue;
+        ws.splice(i, 1);
+        grow = true;
+        break;
+      }
+    }
+    out.push(ring);
+  }
+  return out;
+};
+/** Sutherland–Hodgman against the four sides of a box */
+const clipBox = (poly, box) => {
+  const sides = [
+    [q => q[0] >= box[0], (a, b) => [box[0], a[1] + ((b[1] - a[1]) * (box[0] - a[0])) / (b[0] - a[0])]],
+    [q => q[0] <= box[2], (a, b) => [box[2], a[1] + ((b[1] - a[1]) * (box[2] - a[0])) / (b[0] - a[0])]],
+    [q => q[1] >= box[1], (a, b) => [a[0] + ((b[0] - a[0]) * (box[1] - a[1])) / (b[1] - a[1]), box[1]]],
+    [q => q[1] <= box[3], (a, b) => [a[0] + ((b[0] - a[0]) * (box[3] - a[1])) / (b[1] - a[1]), box[3]]],
+  ];
+  for (const [inside, cut] of sides) {
+    const out = [];
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i],
+        b = poly[(i + 1) % poly.length];
+      if (inside(a)) out.push(a);
+      if (inside(a) !== inside(b)) out.push(cut(a, b));
+    }
+    poly = out;
+    if (poly.length < 3) return [];
+  }
+  return poly.map(q => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10]);
+};
+const boxOf = (pts, box = [1e9, 1e9, -1e9, -1e9]) => {
+  for (const q of pts)
+    box = [Math.min(box[0], q[0]), Math.min(box[1], q[1]), Math.max(box[2], q[0]), Math.max(box[3], q[1])];
+  return box;
+};
+/** the districts of this run, before anything is made of them: their rings (the woods and the rivers are cut to them) */
+const coming = [];
+for (const file of args) {
+  const rel = JSON.parse(fs.readFileSync(file, 'utf8')).elements.find(
+    e => e.type === 'relation' && e.tags?.boundary === 'administrative',
+  );
+  if (ix.districts.includes(rel.tags.name)) continue;
+  for (const ring of joinWays(rel.members.filter(m => m.role === 'outer' && m.geometry).map(m => m.geometry.map(P))))
+    if (ring.length > 10) coming.push(ring);
+}
 /** rings of the big water added in this run: their banks become walls at the end */
 const rivers = [];
-if (waterFile) {
-  // the part of them that lies over the districts being added (a river goes on for kilometres either way)
-  let box = [1e9, 1e9, -1e9, -1e9];
-  for (const file of args) {
-    const rel = JSON.parse(fs.readFileSync(file, 'utf8')).elements.find(
-      e => e.type === 'relation' && e.tags?.boundary === 'administrative',
-    );
-    for (const m of rel.members)
-      for (const g of m.geometry || []) {
-        const q = P(g);
-        box = [Math.min(box[0], q[0]), Math.min(box[1], q[1]), Math.max(box[2], q[0]), Math.max(box[3], q[1])];
-      }
-  }
-  box = [box[0] - 120, box[1] - 120, box[2] + 120, box[3] + 120];
-  // Sutherland–Hodgman against the four sides of the box
-  const clip = poly => {
-    const sides = [
-      [q => q[0] >= box[0], (a, b) => [box[0], a[1] + ((b[1] - a[1]) * (box[0] - a[0])) / (b[0] - a[0])]],
-      [q => q[0] <= box[2], (a, b) => [box[2], a[1] + ((b[1] - a[1]) * (box[2] - a[0])) / (b[0] - a[0])]],
-      [q => q[1] >= box[1], (a, b) => [a[0] + ((b[0] - a[0]) * (box[1] - a[1])) / (b[1] - a[1]), box[1]]],
-      [q => q[1] <= box[3], (a, b) => [a[0] + ((b[0] - a[0]) * (box[3] - a[1])) / (b[1] - a[1]), box[3]]],
-    ];
-    for (const [inside, cut] of sides) {
-      const out = [];
-      for (let i = 0; i < poly.length; i++) {
-        const a = poly[i],
-          b = poly[(i + 1) % poly.length];
-        if (inside(a)) out.push(a);
-        if (inside(a) !== inside(b)) out.push(cut(a, b));
-      }
-      poly = out;
-      if (poly.length < 3) return [];
-    }
-    return poly.map(q => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10]);
-  };
-  const eq = (a, b) => Math.abs(a[0] - b[0]) < 0.5 && Math.abs(a[1] - b[1]) < 0.5;
+if (waterFile && coming.length) {
+  // the part of them that lies over the districts (a river goes on for kilometres either way). The box grows with
+  // every run; what was cut to the smaller box of an earlier run is taken out and cut again.
+  // (the first such run, v24.34, did not write its box down: it was the box of 大安區 and 中山區)
+  const before =
+    ix.rbox ||
+    (() => {
+      const b = boxOf([...ix.boundary[3], ...ix.boundary[4]]);
+      return [b[0] - 120, b[1] - 120, b[2] + 120, b[3] + 120];
+    })();
+  let box = boxOf(coming.flat());
+  box = [
+    Math.min(before[0], box[0] - 120),
+    Math.min(before[1], box[1] - 120),
+    Math.max(before[2], box[2] + 120),
+    Math.max(before[3], box[3] + 120),
+  ];
+  ix.rbox = box.map(Math.round);
+  const same = (o, c) => Math.hypot(cen(o)[0] - cen(c)[0], cen(o)[1] - cen(c)[1]) < 2;
+  let recut = 0;
   for (const e of JSON.parse(fs.readFileSync(waterFile, 'utf8')).elements) {
     if (e.type !== 'relation' || !(e.tags?.natural === 'water' || e.tags?.waterway === 'riverbank')) continue;
-    const ws = e.members.filter(m => m.role === 'outer' && m.geometry).map(m => m.geometry.map(P));
-    while (ws.length) {
-      let ring = ws.shift();
-      for (let grow = true; grow && !eq(ring[0], ring[ring.length - 1]);) {
-        grow = false;
-        for (let i = 0; i < ws.length; i++) {
-          const w = ws[i],
-            end = ring[ring.length - 1];
-          if (eq(w[0], end)) ring = ring.concat(w.slice(1));
-          else if (eq(w[w.length - 1], end)) ring = ring.concat(w.slice(0, -1).reverse());
-          else continue;
-          ws.splice(i, 1);
-          grow = true;
-          break;
-        }
-      }
+    for (let ring of joinWays(e.members.filter(m => m.role === 'outer' && m.geometry).map(m => m.geometry.map(P)))) {
       if (ring.length < 4) continue;
       if (eq(ring[0], ring[ring.length - 1])) ring = ring.slice(0, -1);
-      const c = clip(simpR(ring, 2));
+      const sr = simpR(ring, 2);
+      const c = clipBox(sr, box);
       if (c.length < 4) continue;
-      const cc = cen(c);
-      if (ix.water.some(o => Math.hypot(cen(o)[0] - cc[0], cen(o)[1] - cc[1]) < 2)) continue; // already there
-      ix.water.push(c);
+      if (!ix.water.some(o => same(o, c))) {
+        const old = clipBox(sr, before);
+        const i = old.length < 4 ? -1 : ix.water.findIndex(o => same(o, old));
+        if (i >= 0) (ix.water.splice(i, 1), recut++);
+        ix.water.push(c);
+      }
       if (polyArea(c) > 20000) rivers.push(c);
     }
   }
+  ix.banks = []; // (all of them are made again at the end, from the rivers as they are now)
   console.log(
     'water from relations:',
     rivers.length,
     'river(s)',
     rivers.map(r => Math.round(polyArea(r))),
+    'cut again:',
+    recut,
   );
+}
+// ---- woodland: what touches a district (one already in the map, or one of this run), cut to the box of them all
+if (woodFile) {
+  ix.wood ||= [];
+  const all = [...ix.boundary, ...coming];
+  const b0 = boxOf(all.flat());
+  const box = [b0[0] - 40, b0[1] - 40, b0[2] + 40, b0[3] + 40];
+  const touches = p => p.some(q => all.some(r => pip(q, r))) || all.some(r => r.some(q => pip(q, p)));
+  let n = 0,
+    m2 = 0;
+  for (const e of JSON.parse(fs.readFileSync(woodFile, 'utf8')).elements) {
+    const t = e.tags || {};
+    if (!(t.natural === 'wood' || t.landuse === 'forest')) continue;
+    const ws =
+      e.type === 'relation'
+        ? e.members.filter(m => m.role === 'outer' && m.geometry).map(m => m.geometry.map(P))
+        : e.geometry
+          ? [e.geometry.map(P)]
+          : [];
+    for (let ring of joinWays(ws)) {
+      if (ring.length < 4 || !eq(ring[0], ring[ring.length - 1])) continue;
+      ring = ring.slice(0, -1);
+      if (polyArea(ring) < 400) continue; // (a clump of trees: the parks and the lots have those already)
+      const c = clipBox(simpR(ring, 4), box);
+      if (c.length < 4 || polyArea(c) < 400 || !touches(c)) continue;
+      const cc = cen(c);
+      if (ix.wood.some(o => Math.hypot(cen(o)[0] - cc[0], cen(o)[1] - cc[1]) < 2)) continue; // already there
+      ix.wood.push(c.map(q => [Math.round(q[0]), Math.round(q[1])]));
+      n++;
+      m2 += polyArea(c);
+    }
+  }
+  console.log('woodland:', n, 'polygons,', Math.round(m2 / 1e4) / 100, 'km² (with what lies outside the districts)');
 }
 const newRoads = []; // { t, n, p, b }: the kept runs of each way (for road detail and the paper map)
 const report = [];
@@ -266,6 +343,9 @@ for (const file of args) {
   const inNew = (x, z) => rings.some(r => pip([x, z], r));
   const inOld = (x, z) => oldRings.some(r => pip([x, z], r));
   const st = { name, buildings: 0, dupB: 0, inside: 0, thin: 0, round: 0, roads: 0, generated: 0, river: 0 };
+  // an airfield: the outline of the aerodrome, what is paved (polygons, and lines with a width), and its lawns
+  const air = { ring: null, aprons: [], lines: [] };
+  const grass = [];
   const myRoads = [];
   const water = [],
     park = [],
@@ -337,6 +417,13 @@ for (const file of args) {
     const t = e.tags || {};
     if (e.type === 'relation') {
       if (t.boundary) continue;
+      if (t.aeroway === 'aerodrome') {
+        const rs = joinWays(e.members.filter(m => m.role === 'outer' && m.geometry).map(m => m.geometry.map(P)))
+          .filter(r => r.length > 3 && eq(r[0], r[r.length - 1]))
+          .sort((x, y) => polyArea(y) - polyArea(x));
+        if (rs.length) air.ring = simpR(rs[0].slice(0, -1), 2);
+        continue;
+      }
       // multipolygons: the outer rings of a building with a courtyard, or of a park
       for (const m of e.members || []) {
         if (m.role !== 'outer' || !m.geometry || m.geometry.length < 4) continue;
@@ -351,7 +438,13 @@ for (const file of args) {
     const p = e.geometry.map(P);
     const name = t.name || '';
     if (t.building) footprint(p, t);
-    else if (t.highway) {
+    else if (t.aeroway) {
+      const closed = p.length > 3 && eq(p[0], p[p.length - 1]);
+      if (/^(apron|helipad)$/.test(t.aeroway) && closed) {
+        if (polyArea(p) > 150) air.aprons.push(simpR(p.slice(0, -1), 1));
+      } else if (/^(runway|stopway|taxiway)$/.test(t.aeroway) && !closed && p.length > 1)
+        air.lines.push({ k: t.aeroway, w: +t.width || (t.aeroway === 'taxiway' ? (t.ref ? 23 : 18) : 45), p });
+    } else if (t.highway) {
       if (/^(motorway|motorway_link|construction|proposed|platform|corridor|elevator|bus_stop)$/.test(t.highway))
         continue;
       if (t.tunnel === 'yes' || t.layer < 0) continue;
@@ -376,7 +469,10 @@ for (const file of args) {
     } else if (t.railway) {
       if (t.tunnel !== 'yes' && /^(rail|light_rail)$/.test(t.railway)) ix.rail.push(simp(p, 3));
     } else if (t.natural === 'water' || t.waterway === 'riverbank' || t.water) water.push(simpR(p, 3));
-    else if (t.leisure === 'park' || t.leisure === 'garden' || t.landuse === 'grass' || t.leisure === 'pitch')
+    else if (t.landuse === 'grass') {
+      // (a strip of lawn smaller than a parking space is not worth an entry that every tile looks at)
+      if (polyArea(p) >= 60) grass.push({ n: name || undefined, p: simpR(p, 2) });
+    } else if (t.leisure === 'park' || t.leisure === 'garden' || t.leisure === 'pitch')
       park.push({ n: name || undefined, p: simpR(p, 2) });
     else if (t.landuse) landuse.push({ t: t.landuse, p: simpR(p, 3) });
   }
@@ -396,8 +492,75 @@ for (const file of args) {
     const c = cen(q);
     return inNew(c[0], c[1]) || inOld(c[0], c[1]);
   };
+  // ---- the airfield. Lawn inside the aerodrome is lawn (no trees on an airfield); the rest of the grass is park.
+  const lawn = [];
+  for (const q of grass) {
+    const c = cen(q.p);
+    if (air.ring && pip(c, air.ring)) lawn.push(q.p);
+    else park.push(q);
+  }
+  if (air.ring) {
+    /** a line with a width, as a polygon (the line may bend: the corners are mitred by the mean of the two normals) */
+    const strip = (p, w, off = 0) => {
+      const L = [],
+        R = [];
+      for (let i = 0; i < p.length; i++) {
+        const a = p[Math.max(0, i - 1)],
+          b = p[Math.min(p.length - 1, i + 1)];
+        const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+        const nx = -(b[1] - a[1]) / l,
+          nz = (b[0] - a[0]) / l;
+        L.push([p[i][0] + nx * (off + w / 2), p[i][1] + nz * (off + w / 2)]);
+        R.push([p[i][0] + nx * (off - w / 2), p[i][1] + nz * (off - w / 2)]);
+      }
+      return [...L, ...R.reverse()].map(q => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10]);
+    };
+    /** the stretch of a line from s to e metres along it */
+    const part = (p, s, e) => {
+      const out = [];
+      let d = 0;
+      for (let i = 0; i < p.length - 1; i++) {
+        const a = p[i],
+          b = p[i + 1],
+          l = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        const at = t => [a[0] + ((b[0] - a[0]) * (t - d)) / l, a[1] + ((b[1] - a[1]) * (t - d)) / l];
+        if (l > 0 && e > d && s < d + l) {
+          if (!out.length) out.push(at(Math.max(s, d)));
+          out.push(at(Math.min(e, d + l)));
+        }
+        d += l;
+      }
+      return out;
+    };
+    const len = p => p.reduce((a, q, i) => (i ? a + Math.hypot(q[0] - p[i - 1][0], q[1] - p[i - 1][1]) : 0), 0);
+    const paved = [...air.aprons],
+      marks = [];
+    for (const l of air.lines) {
+      const p = simp(l.p, 0.5);
+      paved.push(strip(p, l.w));
+      if (l.k !== 'runway') continue;
+      const L = len(p);
+      // the paint of a runway: edge lines, the dashed centre line, the bars of each threshold, the aiming points
+      for (const sd of [1, -1]) marks.push(strip(p, 0.9, sd * (l.w / 2 - 2)));
+      for (let d = 90; d + 30 < L - 90; d += 60) marks.push(strip(part(p, d, d + 30), 0.9));
+      for (const [s, e] of [
+        [6, 36],
+        [L - 36, L - 6],
+      ])
+        for (let k = 0; k < 12; k++)
+          marks.push(strip(part(p, s, e), 1.8, (k - 5.5) * (l.w / 14) + (k < 6 ? -1.5 : 1.5)));
+      for (const d of [300, L - 345]) for (const sd of [1, -1]) marks.push(strip(part(p, d, d + 45), 6, sd * 9));
+    }
+    ix.air ||= { ring: [], paved: [], lawn: [], marks: [] };
+    ix.air.ring.push(air.ring);
+    ix.air.paved.push(...paved);
+    ix.air.lawn.push(...lawn);
+    ix.air.marks.push(...marks);
+    st.air = { paved: paved.length, lawn: lawn.length, marks: marks.length, m2: Math.round(polyArea(air.ring)) };
+  }
   for (const q of park) if (q.p.length > 3 && mine(q.p) && fresh(ix.park, q.p)) ix.park.push(q);
-  for (const q of landuse) if (q.p.length > 3 && fresh(ix.landuse, q.p)) ix.landuse.push(q);
+  // (the land-use polygons are read by the core's block infill only, which never looks this far out: they are used
+  // below to keep generated flats off graves, barracks and fields, and are not written to the index any more)
   // ---- roads into tiles (runs split by the tile of each segment's middle, as district.mjs does)
   for (const r of myRoads) {
     let run = null,
@@ -458,7 +621,15 @@ for (const file of args) {
   // (deterministic, flagged g:1), exactly as district.mjs does for 萬華, from this district's own stream
   {
     // (with their boxes: there are a thousand of them and tens of thousands of places to try)
-    const blockers = [...ix.water, ...ix.park.map(q => q.p)].map(p => {
+    const blockers = [
+      ...ix.water,
+      ...ix.park.map(q => q.p),
+      ...(ix.wood || []),
+      ...(ix.air?.ring || []),
+      ...landuse
+        .filter(q => /^(military|cemetery|farmland|allotments|forest|railway|recreation_ground)$/.test(q.t))
+        .map(q => q.p),
+    ].map(p => {
       const xs = p.map(q => q[0]),
         zs = p.map(q => q[1]);
       return { p, x0: Math.min(...xs), x1: Math.max(...xs), z0: Math.min(...zs), z1: Math.max(...zs) };

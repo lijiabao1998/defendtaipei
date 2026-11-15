@@ -37,6 +37,10 @@ export type DIndex = {
   districts?: string[];
   /** v24.34 the banks of rivers inside the map: [ax, az, bx, bz] walls */
   banks?: number[][];
+  /** v24.35 woodland (the hillsides): polygons, drawn green and planted tile by tile */
+  wood?: V2[][];
+  /** v24.35 airfields: the outline of each, what is paved (aprons, runway, taxiways), the lawns, the runway's paint */
+  air?: { ring: V2[][]; paved: V2[][]; lawn: V2[][]; marks: V2[][] };
   landmarks: { kind: string; n: string; x: number; z: number }[];
   water: V2[][];
   park: { n?: string; p: V2[] }[];
@@ -155,13 +159,31 @@ function hash32(key: string) {
 export function seeded(key: string) {
   let h = 2166136261;
   for (let i = 0; i < key.length; i++) h = Math.imul(h ^ key.charCodeAt(i), 16777619);
-  return () => {
+  const f = () => {
     h = (h + 0x6d2b79f5) | 0;
     let t = Math.imul(h ^ (h >>> 15), 1 | h);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+  /** v24.35 the stream as it would be after n more draws (the state only ever steps by a constant) */
+  f.skip = (n: number) => {
+    h = (h + Math.imul(n, 0x6d2b79f5)) | 0;
+  };
+  return f;
 }
+const boxOf = (p: V2[]) => {
+  let x0 = 1e9,
+    z0 = 1e9,
+    x1 = -1e9,
+    z1 = -1e9;
+  for (const q of p) {
+    if (q[0] < x0) x0 = q[0];
+    if (q[0] > x1) x1 = q[0];
+    if (q[1] < z0) z0 = q[1];
+    if (q[1] > z1) z1 = q[1];
+  }
+  return [x0, z0, x1, z1];
+};
 export function pip(pt: V2, poly: V2[]) {
   let c = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -304,6 +326,11 @@ const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5a4632, roughness: 1 
 const lampMat = new THREE.MeshStandardMaterial({ color: 0x8f9692, roughness: 0.5, metalness: 0.6 });
 const waterMat = new THREE.MeshStandardMaterial({ color: 0x4f6f78, roughness: 0.25, metalness: 0.2 });
 const parkMat = new THREE.MeshStandardMaterial({ color: 0x5f7f44, roughness: 1 });
+// v24.35 the floor of a wood, an airfield's lawn, its paving and the paint on the runway
+const woodMat = new THREE.MeshStandardMaterial({ color: 0x486438, roughness: 1 });
+const lawnMat = new THREE.MeshStandardMaterial({ color: 0x6d8a4c, roughness: 1 });
+const pavedMat = new THREE.MeshStandardMaterial({ color: 0x47494d, roughness: 0.95 });
+const paintMat = new THREE.MeshStandardMaterial({ color: 0xd9d7cf, roughness: 0.85 });
 
 const col = new THREE.Color();
 function paint(g: THREE.BufferGeometry, hex: number, jitter = 0) {
@@ -435,6 +462,19 @@ export class District {
     );
     if (pg) {
       const m = new THREE.Mesh(pg, parkMat);
+      m.receiveShadow = true;
+      this.d.scene.add(m);
+    }
+    // v24.35 woodland under the parks and the ponds that lie in it; the airfield: lawn, paving over it, paint on that
+    for (const [polys, y, mat] of [
+      [this.ix.wood, -0.022, woodMat],
+      [this.ix.air?.lawn, -0.02, lawnMat],
+      [this.ix.air?.paved, -0.014, pavedMat],
+      [this.ix.air?.marks, -0.008, paintMat],
+    ] as [V2[][] | undefined, number, THREE.Material][]) {
+      const geo = polys?.length ? flat(polys, y) : null;
+      if (!geo) continue;
+      const m = new THREE.Mesh(geo, mat);
       m.receiveShadow = true;
       this.d.scene.add(m);
     }
@@ -678,6 +718,9 @@ export class District {
   }
   /** distance to nearest loaded/cached district road edge (centre distance minus half width) */
   private kept: ReturnType<typeof District.keepOut> | null = null;
+  /** v24.35 the boxes of the parks and of the woods (a tile looks only at the ones it overlaps) */
+  private pbox: number[][] | null = null;
+  private wbox: number[][] | null = null;
   /** v24.25 how much of the open ground has been given something to be */
   lotStats = { veg: 0, weeds: 0, park: 0, corner: 0, slab: 0, cells: 0, tris: 0 };
   roadDist(x: number, z: number) {
@@ -1444,11 +1487,26 @@ export class District {
         z = a[1] + uz * s + ux * (w / 2 - 1.2);
       if (this.d.inCore(x, z)) continue;
       const kr = rnd();
+      // v24.35 nobody parks on an airfield's service roads (the draw above is made all the same)
+      if (this.ix.air?.ring.some(q => pip([x, z], q))) continue;
       veh.push({ x, z, ang: Math.atan2(ux, uz), kind: kr < 0.35 ? 'taxi' : kr < 0.55 ? 'truck' : 'car' });
     }
     // v21.4 parks inside this tile: dense mixed Taipei park trees (big 榕樹 canopies), shrubs, benches, lamps
+    // v24.35 there are four thousand parks by now and nearly all of them are nowhere near this tile. Those are passed
+    // over without a look: the 140 draws each would have made and thrown away are skipped in one step, so everything
+    // that draws after them in this tile gets what it always got.
     const T = this.ix.T;
-    for (const pk of this.ix.park) {
+    const onTile = (b: number[]) =>
+      b[0] <= cx + T / 2 && b[2] >= cx - T / 2 && b[1] <= cz + T / 2 && b[3] >= cz - T / 2;
+    const pbox = (this.pbox ||= this.ix.park.map(pk => boxOf(pk.p)));
+    const pkHere: V2[][] = [];
+    for (let pi = 0; pi < this.ix.park.length; pi++) {
+      const pk = this.ix.park[pi];
+      if (!onTile(pbox[pi])) {
+        rnd.skip(140);
+        continue;
+      }
+      pkHere.push(pk.p);
       let n = 0;
       for (let s = 0; s < 70 && n < 34; s++) {
         const x = cx + (rnd() - 0.5) * T,
@@ -1460,6 +1518,28 @@ export class District {
         else if (v < 0.85) forest.add('shrub', x, z, rnd() * 6, 0.8 + rnd() * 0.6, 0, 0.85 + rnd() * 0.3);
         else if (v < 0.93) forest.add('bench', x, z, rnd() * 6);
         else forest.add('plamp', x, z, 0);
+      }
+    }
+    // v24.35 woodland: trees from a stream of their own (the tile's stream is left alone), off the paths, off the
+    // houses that stand in it, and not where a park has planted already
+    const wbox = (this.wbox ||= (this.ix.wood ?? []).map(boxOf));
+    const woodHere = (this.ix.wood ?? []).filter((_, i) => onTile(wbox[i]));
+    const airHere = (this.ix.air?.ring ?? []).filter(r => onTile(boxOf(r)));
+    if (woodHere.length) {
+      const wr = seeded('wood:' + key);
+      for (let s = 0, N = PHONE ? 110 : 260; s < N; s++) {
+        const x = cx + (wr() - 0.5) * T,
+          z = cz + (wr() - 0.5) * T,
+          v = wr();
+        if (this.d.inCore(x, z) || !woodHere.some(w => pip([x, z], w))) continue;
+        if (this.roadDist(x, z) < 1.6 || pkHere.some(q => pip([x, z], q))) continue;
+        if (
+          this.enterAt(x, z) ||
+          enter.some(e => x > e.minx - 1 && x < e.maxx + 1 && z > e.minz - 1 && z < e.maxz + 1 && pip([x, z], e.pts))
+        )
+          continue;
+        if (v < 0.8) trunk(x, z, forest.park(x, z, wr).r);
+        else forest.add('shrub', x, z, wr() * 6, 0.9 + wr() * 0.8, 0, 0.8 + wr() * 0.3);
       }
     }
     const add = (gs: THREE.BufferGeometry[], mat: THREE.Material, par: THREE.Object3D, shadow = true) => {
@@ -1529,7 +1609,9 @@ export class District {
           this.d.inCore(x, z) ||
           this.roadDist(x, z) < 3.5 ||
           enter.some(e => x > e.minx && x < e.maxx && z > e.minz && z < e.maxz && pip([x, z], e.pts)) ||
-          this.ix.park.some(pk => pip([x, z], pk.p)) ||
+          pkHere.some(q => pip([x, z], q)) ||
+          woodHere.some(q => pip([x, z], q)) ||
+          airHere.some(q => pip([x, z], q)) ||
           keep.some(r => x > r[0] && z > r[1] && x < r[2] && z < r[3]),
       });
       for (const k of ['veg', 'weeds', 'park', 'corner', 'slab', 'cells', 'tris'] as const)
