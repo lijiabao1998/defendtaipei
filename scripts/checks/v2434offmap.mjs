@@ -44,8 +44,11 @@ const down = await p.evaluate(async () => {
   };
 });
 console.log('   down', JSON.stringify(down));
+// (v24.36: everything north of METRO_Z + 2000 counts as down in the metro, so the map has to end south of that. 2.5 km
+// from where the player stands in the station is that band and the 520 m of streaming besides; it was a round 10 km
+// when the map ended at 中山區, and 士林區 goes 11 km further north than that)
 check(
-  down.pos[1] < down.B.minz - 10000 && down.shown === 1,
+  down.pos[1] < down.B.minz - 2500 && down.shown === 1,
   `the station is far outside the map (z ${Math.round(down.pos[1])}, the map ends at ${down.B.minz})`,
 );
 check(down.ov === 1 && Math.abs(down.p[1] - down.pos[1]) < 0.01, 'the save says which layout it was made in');

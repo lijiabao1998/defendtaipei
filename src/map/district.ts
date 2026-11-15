@@ -27,7 +27,8 @@ import { readDistrictTiles, writeDistrictTiles } from '../systems/save';
 type V2 = [number, number];
 export type DBld = { p: V2[]; l?: number; n?: string; k?: string; s?: string; g?: 1 };
 export type DRoad = { t: string; p: V2[]; n?: string; b?: 1 };
-type TileData = { b: DBld[]; r: DRoad[] };
+/** w (v24.36): the pieces of woodland in the tile */
+type TileData = { b: DBld[]; r: DRoad[]; w?: V2[][] };
 export type DIndex = {
   attribution: string;
   T: number;
@@ -37,7 +38,8 @@ export type DIndex = {
   districts?: string[];
   /** v24.34 the banks of rivers inside the map: [ax, az, bx, bz] walls */
   banks?: number[][];
-  /** v24.35 woodland (the hillsides): polygons, drawn green and planted tile by tile */
+  /** v24.35 woodland (the hillsides) as whole polygons. Since v24.36 the woods are in the tiles (TileData.w) and
+   * this is gone from the data; an index that still has it is drawn as before. */
   wood?: V2[][];
   /** v24.35 airfields: the outline of each, what is paved (aprons, runway, taxiways), the lawns, the runway's paint */
   air?: { ring: V2[][]; paved: V2[][]; lawn: V2[][]; marks: V2[][] };
@@ -501,8 +503,14 @@ export class District {
     for (const [ax, az, bx, bz] of this.ix.banks ?? []) this.d.addSeg({ a: [ax, az], b: [bx, bz] });
     this.buildLandmarks();
   }
+  private ringBox: number[][] | null = null;
   inside(x: number, z: number) {
-    return !this.ix || this.ix.boundary.some(b => pip([x, z], b));
+    if (!this.ix) return true;
+    const bx = (this.ringBox ||= this.ix.boundary.map(boxOf));
+    return this.ix.boundary.some((b, i) => {
+      const q = bx[i];
+      return x >= q[0] && x <= q[2] && z >= q[1] && z <= q[3] && pip([x, z], b);
+    });
   }
   /** v23.3 the enterable building whose footprint contains (x, z), if its tile is loaded */
   enterAt(x: number, z: number): DEnter | null {
@@ -1523,7 +1531,24 @@ export class District {
     // v24.35 woodland: trees from a stream of their own (the tile's stream is left alone), off the paths, off the
     // houses that stand in it, and not where a park has planted already
     const wbox = (this.wbox ||= (this.ix.wood ?? []).map(boxOf));
-    const woodHere = (this.ix.wood ?? []).filter((_, i) => onTile(wbox[i]));
+    const woodHere = td.w ?? (this.ix.wood ?? []).filter((_, i) => onTile(wbox[i]));
+    // v24.36 the floor of the woods of this tile comes and goes with the tile
+    if (td.w?.length) {
+      const gs: THREE.BufferGeometry[] = [];
+      for (const q of td.w) {
+        if (q.length < 3) continue;
+        const sg = new THREE.ShapeGeometry(new THREE.Shape(q.map(v => new THREE.Vector2(v[0], -v[1]))));
+        sg.rotateX(-Math.PI / 2);
+        sg.translate(0, -0.022, 0);
+        gs.push(sg);
+      }
+      if (gs.length) {
+        const wm = new THREE.Mesh(mergeGeometries(gs), woodMat);
+        wm.receiveShadow = true;
+        wm.userData.noChunk = true;
+        g.add(wm);
+      }
+    }
     const airHere = (this.ix.air?.ring ?? []).filter(r => onTile(boxOf(r)));
     if (woodHere.length) {
       const wr = seeded('wood:' + key);
