@@ -370,7 +370,13 @@ const field = await p.evaluate(async () => {
     to = at(1500);
   await settle(from[0], from[1]);
   const end = g.pushLine(from[0], from[1], to[0], to[1]);
-  const onField = trees(from[0], from[1]);
+  // the trees drawn in the tiles around, the ones that stand inside the airfield
+  const onField = { n: 0, tiles: g.enterStats().district.tiles };
+  g.scene.traverse(o => {
+    if (!o.isInstancedMesh || !/^forest:/.test(o.name) || /grate|bench|plamp|shrub/.test(o.name)) return;
+    const m = o.instanceMatrix.array;
+    for (let i = 0; i < o.count; i++) if (ix.air.ring.some(r => pip(m[i * 16 + 12], m[i * 16 + 14], r))) onField.n++;
+  });
   // footprints generated along the streets: none of them stands inside an airfield
   let gen = 0;
   for (const k of Object.keys(ix.tiles)) {
@@ -418,8 +424,8 @@ check(
   `a body runs ${field.ran} m down the runway and meets nothing (${field.want} m asked)`,
 );
 check(
-  field.onField.tile && field.onField.n < 12,
-  `nothing is planted out there (${field.onField.n} trees in the tile)`,
+  field.onField.tiles >= 9 && field.onField.n < 12,
+  `nothing is planted on the airfield (${field.onField.n} trees inside it, ${field.onField.tiles} tiles loaded around)`,
 );
 check(field.gen === 0, `no flats were generated inside the airfield (${field.gen})`);
 check(

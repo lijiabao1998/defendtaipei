@@ -342,7 +342,7 @@ for (const file of args) {
   }
   const inNew = (x, z) => rings.some(r => pip([x, z], r));
   const inOld = (x, z) => oldRings.some(r => pip([x, z], r));
-  const st = { name, buildings: 0, dupB: 0, inside: 0, thin: 0, round: 0, roads: 0, generated: 0, river: 0 };
+  const st = { name, buildings: 0, dupB: 0, inside: 0, over: 0, thin: 0, round: 0, roads: 0, generated: 0, river: 0 };
   // an airfield: the outline of the aerodrome, what is paved (polygons, and lines with a width), and its lawns
   const air = { ring: null, aprons: [], lines: [] };
   const grass = [];
@@ -363,6 +363,22 @@ for (const file of args) {
     if (gnear(cG, c[0], c[1]).some(q => Math.hypot(q[0] - c[0], q[1] - c[1]) < 3)) return void st.dupB++;
     // the same building drawn twice, a part of a building drawn over it, a kiosk inside a hall: one footprint only
     if ((bG.get(Math.floor(c[0] / G) + ',' + Math.floor(c[1] / G)) || []).some(o => pip(c, o))) return void st.inside++;
+    // a row of houses drawn twice a few metres apart: the two footprints lie half over each other, neither has its
+    // middle in the other, and the one behind has no wall left for a door. The larger was taken first; this one goes.
+    {
+      const xs = pp.map(q => q[0]),
+        zs = pp.map(q => q[1]);
+      const step = Math.max(1.5, Math.sqrt(a) / 8);
+      let mine = 0,
+        over = 0;
+      for (let x = Math.min(...xs) + step / 2; x < Math.max(...xs); x += step)
+        for (let z = Math.min(...zs) + step / 2; z < Math.max(...zs); z += step) {
+          if (!pip([x, z], pp)) continue;
+          mine++;
+          if ((bG.get(Math.floor(x / G) + ',' + Math.floor(z / G)) || []).some(o => pip([x, z], o))) over++;
+        }
+      if (mine >= 6 && over > mine * 0.4) return void st.over++;
+    }
     // a wall mapped as a building (long, and too thin to stand in) is not one
     {
       let li = 0,
