@@ -413,6 +413,7 @@ export class Forest {
     for (const [k, ms] of this.items) {
       if (!ms.length) continue;
       const im = new THREE.InstancedMesh(geo(k), TREE_MAT, ms.length);
+      im.name = 'forest:' + k; // (v24.35: so that a check can count the trees of a tile)
       ms.forEach((m, i) => im.setMatrixAt(i, m));
       this.tints.get(k)!.forEach((t, i) => im.setColorAt(i, col.setScalar(t)));
       im.castShadow = shadow && k !== 'grate';

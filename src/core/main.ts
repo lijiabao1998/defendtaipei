@@ -985,7 +985,7 @@ const SECTORS: { n: string; x: number; z: number }[] = [
 ];
 /** the 萬華 campaign: these are the areas that have to be taken back to win */
 const NSEC = SECTORS.length;
-// v24.33 the neighbouring districts (中正, then 大同; v24.34 大安 and 中山). Their areas are held by a garrison like the outer areas of 萬華
+// v24.33 the neighbouring districts (中正, then 大同; v24.34 大安 and 中山; v24.35 松山 and 信義). Their areas are held by a garrison like the outer areas of 萬華
 // and can be taken back the same way, but they are not part of the campaign: its count, the offensive and the ending
 // are about the fifteen above.
 SECTORS.push(
@@ -1026,6 +1026,27 @@ SECTORS.push(
   { n: tr('濱江', 'Binjiang'), x: 3400, z: -3000 },
   { n: tr('大直', 'Dazhi'), x: 4480, z: -4300 },
   { n: tr('劍南', 'Jiannan'), x: 5300, z: -4850 },
+  // v24.35 松山區
+  { n: tr('敦化北路', 'Dunhua North Road'), x: 4650, z: -1700 },
+  { n: tr('小巨蛋', 'Arena'), x: 4900, z: -1150 },
+  { n: tr('八德路', 'Bade Road'), x: 5600, z: -700 },
+  { n: tr('三民路', 'Sanmin Road'), x: 6180, z: -1150 },
+  { n: tr('民生社區', 'Minsheng Community'), x: 5450, z: -2050 },
+  { n: tr('松山機場', 'Songshan Airport'), x: 5000, z: -2800 },
+  { n: tr('撫遠街', 'Fuyuan Street'), x: 6550, z: -1900 },
+  { n: tr('饒河街', 'Raohe Street'), x: 7450, z: -1050 },
+  // v24.35 信義區
+  { n: tr('國父紀念館', 'Sun Yat-sen Hall'), x: 5750, z: 100 },
+  { n: tr('信義計畫區', 'Xinyi Centre'), x: 6300, z: 400 },
+  { n: tr('世貿', 'World Trade Centre'), x: 6000, z: 850 },
+  { n: tr('吳興街', 'Wuxing Street'), x: 6050, z: 1550 },
+  { n: tr('象山', 'Elephant Mountain'), x: 6900, z: 1300 },
+  { n: tr('虎山', 'Tiger Mountain'), x: 8000, z: 900 },
+  { n: tr('永春', 'Yongchun'), x: 7350, z: 100 },
+  { n: tr('虎林街', 'Hulin Street'), x: 7000, z: -350 },
+  { n: tr('五分埔', 'Wufenpu'), x: 7500, z: -650 },
+  { n: tr('福德街', 'Fude Street'), x: 8300, z: 250 },
+  { n: tr('崇德街', 'Chongde Street'), x: 6500, z: 2500 },
 );
 const sectorNames = SECTORS.map(s => s.n);
 /** v24.33 the boundaries of the districts added to 萬華 (set once the district index is in) */
@@ -1058,6 +1079,12 @@ const libN = () => {
 };
 const SECTOR_LABEL = (i: number) => sectorNames[i] ?? tr('第', 'Sector ') + (i + 1) + tr('區', '');
 const outerSector = (i: number) => !inCore(SECTORS[i].x, SECTORS[i].z);
+/** v24.35 the name of an area as the street sign gives it: "…區" / "… district", once (東區, 信義計畫區 and 民生社區 end
+ * in the word already, and were shown as 東區區) */
+const areaLabel = (i: number) => {
+  const n = SECTOR_LABEL(i);
+  return getLanguage() === 'en' ? (/district$/i.test(n) ? n : n + ' district') : /區$/.test(n) ? n : n + '區';
+};
 
 // ---------- build map ----------
 function shopType(s: string, n: string) {
@@ -8964,8 +8991,8 @@ function updateStreet() {
   const sec = sectorOf(qx, qz);
   $('street').textContent =
     getLanguage() === 'en'
-      ? `📍 ${translateLabel(best) || 'Alley'}・${SECTOR_LABEL(sec)} district ${liberated.has(sec) ? '(reclaimed)' : '(occupied)'}`
-      : `📍 ${translateLabel(best) || '巷弄'}・${SECTOR_LABEL(sec)}區 ${liberated.has(sec) ? '（已奪回）' : '（佔領中）'}`;
+      ? `📍 ${translateLabel(best) || 'Alley'}・${areaLabel(sec)} ${liberated.has(sec) ? '(reclaimed)' : '(occupied)'}`
+      : `📍 ${translateLabel(best) || '巷弄'}・${areaLabel(sec)} ${liberated.has(sec) ? '（已奪回）' : '（佔領中）'}`;
 }
 /**
  * v23.5 natural healing in HP per game hour: 6 when fed and watered (> 50, as before), 18 when both are nearly
