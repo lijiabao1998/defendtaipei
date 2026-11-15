@@ -26,7 +26,7 @@ export type MapDeps = {
     /** v24.35 woodland, and airfields (lawn, paving, runway paint) */
     wood?: V2[][];
     air?: { lawn: V2[][]; paved: V2[][]; marks: V2[][] };
-    more?: () => Promise<{ b: number[][]; r: MapRoad[] }>;
+    more?: () => Promise<{ b: number[][]; r: MapRoad[]; w?: V2[][] }>;
   };
   /** v24.33 metro stations (their first street exit) */
   stations?: { n: string; x: number; z: number }[];
@@ -45,6 +45,8 @@ const DISTRICT_NAME: Record<string, string> = {
   中山區: tr('中山區', 'Zhongshan'),
   松山區: tr('松山區', 'Songshan'),
   信義區: tr('信義區', 'Xinyi'),
+  士林區: tr('士林區', 'Shilin'),
+  內湖區: tr('內湖區', 'Neihu'),
 };
 type Note = { x: number; z: number; k: string; t?: string; intel?: boolean; id?: string };
 const KINDS: Record<string, [string, string]> = {
@@ -217,8 +219,10 @@ export class GameMap {
         poly(w);
         c.fill();
       }
-      // v24.35 woodland (darker than the parks, which lie in it), inside the districts only
-      if (D.wood?.length) {
+      // v24.35 woodland (darker than the parks, which lie in it), inside the districts only. Since v24.36 it comes
+      // with the footprints, when the map is first opened (the woods of 陽明山 are not something to load at the start)
+      const woods = D.wood ?? this.extraW;
+      if (woods?.length) {
         c.save();
         c.beginPath();
         for (const b of D.boundary) {
@@ -227,7 +231,7 @@ export class GameMap {
         }
         c.clip();
         c.fillStyle = '#6f9a5c';
-        for (const w of D.wood) {
+        for (const w of woods) {
           poly(w);
           c.fill();
         }
@@ -450,6 +454,7 @@ export class GameMap {
     this.save();
   }
   private asked = false;
+  private extraW: V2[][] | null = null;
   /**
    * v24.34 the footprints and streets of the districts (3 MB of them by now, forty thousand buildings to draw) are
    * fetched when the map is first opened. They used to come in as the game started, whether the map was looked at or not.
@@ -460,6 +465,7 @@ export class GameMap {
     this.d.district?.more?.().then(m => {
       this.extraB = m.b;
       this.extraR = m.r;
+      this.extraW = m.w ?? null;
       this.drawBase();
       this.dirty = true;
     });
@@ -621,9 +627,17 @@ export class GameMap {
       const N = 320,
         cv = (this.secCv ||= document.createElement('canvas'));
       const rings = d.district?.boundary;
+      const boxes = rings?.map(r => {
+        let bx = [1e9, 1e9, -1e9, -1e9];
+        for (const [x, z] of r) bx = [Math.min(bx[0], x), Math.min(bx[1], z), Math.max(bx[2], x), Math.max(bx[3], z)];
+        return bx;
+      });
       const inMap = (x: number, z: number) => {
         if (!rings) return true;
-        for (const r of rings) {
+        for (let ri = 0; ri < rings.length; ri++) {
+          const r = rings[ri],
+            bx = boxes![ri];
+          if (x < bx[0] || x > bx[2] || z < bx[1] || z > bx[3]) continue;
           let c = false;
           for (let a = 0, b = r.length - 1; a < r.length; b = a++)
             if (
@@ -655,15 +669,19 @@ export class GameMap {
     }
     c.imageSmoothingEnabled = false;
     c.drawImage(this.secCv, 0, 0, this.S, this.S);
-    d.sectors.forEach((q, s) => {
-      c.font = 'bold 34px "Noto Sans TC", sans-serif';
-      c.lineWidth = 6;
-      c.strokeStyle = 'rgba(239,233,218,.85)';
-      const t = `${d.sectorName(s)}（${L.has(s) ? tr('已奪回', 'Liberated') : tr('佔領中', 'Occupied')}）`;
-      c.strokeText(t, this.wx(q.x), this.wy(q.z));
-      c.fillStyle = L.has(s) ? 'rgba(30,110,40,.9)' : 'rgba(150,30,20,.85)';
-      c.fillText(t, this.wx(q.x), this.wy(q.z));
-    });
+    // v24.36 ninety-five areas on a map twenty kilometres long: their names are sized to the ground as they were when
+    // the map was 萬華 alone (a name is about as wide as its area), and are left out while that is too small to read
+    const fpx = 34 * Math.min(1, this.k / 0.67);
+    if (fpx * this.zoom >= 10)
+      d.sectors.forEach((q, s) => {
+        c.font = `bold ${fpx}px "Noto Sans TC", sans-serif`;
+        c.lineWidth = fpx / 5.5;
+        c.strokeStyle = 'rgba(239,233,218,.85)';
+        const t = `${d.sectorName(s)}（${L.has(s) ? tr('已奪回', 'Liberated') : tr('佔領中', 'Occupied')}）`;
+        c.strokeText(t, this.wx(q.x), this.wy(q.z));
+        c.fillStyle = L.has(s) ? 'rgba(30,110,40,.9)' : 'rgba(150,30,20,.85)';
+        c.fillText(t, this.wx(q.x), this.wy(q.z));
+      });
     // fog of war
     if (this.dirty) {
       const fc = this.fog.getContext('2d')!;

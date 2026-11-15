@@ -985,7 +985,7 @@ const SECTORS: { n: string; x: number; z: number }[] = [
 ];
 /** the 萬華 campaign: these are the areas that have to be taken back to win */
 const NSEC = SECTORS.length;
-// v24.33 the neighbouring districts (中正, then 大同; v24.34 大安 and 中山; v24.35 松山 and 信義). Their areas are held by a garrison like the outer areas of 萬華
+// v24.33 the neighbouring districts (中正, then 大同; v24.34 大安 and 中山; v24.35 松山 and 信義; v24.36 士林 and 內湖). Their areas are held by a garrison like the outer areas of 萬華
 // and can be taken back the same way, but they are not part of the campaign: its count, the offensive and the ending
 // are about the fifteen above.
 SECTORS.push(
@@ -1047,11 +1047,41 @@ SECTORS.push(
   { n: tr('五分埔', 'Wufenpu'), x: 7500, z: -650 },
   { n: tr('福德街', 'Fude Street'), x: 8300, z: 250 },
   { n: tr('崇德街', 'Chongde Street'), x: 6500, z: 2500 },
+  // v24.36 士林區
+  { n: tr('士林夜市', 'Shilin Night Market'), x: 2100, z: -5200 },
+  { n: tr('後港', 'Hougang'), x: 1300, z: -4900 },
+  { n: tr('社子', 'Shezi'), x: 400, z: -5300 },
+  { n: tr('社子島', 'Shezi Island'), x: -2300, z: -7200 },
+  { n: tr('士林官邸', 'Shilin Residence'), x: 2850, z: -5650 },
+  { n: tr('芝山', 'Zhishan'), x: 2100, z: -6900 },
+  { n: tr('蘭雅', 'Lanya'), x: 2400, z: -7400 },
+  { n: tr('天母', 'Tianmu'), x: 2700, z: -8500 },
+  { n: tr('外雙溪', 'Waishuangxi'), x: 4500, z: -6600 },
+  { n: tr('內雙溪', 'Neishuangxi'), x: 8270, z: -9300 },
+  { n: tr('山仔后', 'Shanzihou'), x: 3700, z: -10500 },
+  { n: tr('平等里', 'Pingdeng'), x: 7400, z: -10200 },
+  { n: tr('菁山', 'Jingshan'), x: 6350, z: -11600 },
+  { n: tr('擎天崗', 'Qingtiangang'), x: 7260, z: -13900 },
+  // v24.36 內湖區
+  { n: tr('西湖', 'Xihu'), x: 6500, z: -4600 },
+  { n: tr('港墘', 'Gangqian'), x: 7280, z: -4320 },
+  { n: tr('內湖科學園區', 'Technology Park'), x: 7500, z: -3500 },
+  { n: tr('舊宗路', 'Jiuzong Road'), x: 7560, z: -2320 },
+  { n: tr('潭美', 'Tanmei'), x: 8780, z: -1880 },
+  { n: tr('文德', 'Wende'), x: 8260, z: -4150 },
+  { n: tr('內湖路', 'Neihu Road'), x: 9200, z: -4700 },
+  { n: tr('大湖', 'Dahu'), x: 10020, z: -4730 },
+  { n: tr('葫洲', 'Huzhou'), x: 10530, z: -3500 },
+  { n: tr('東湖', 'Donghu'), x: 10950, z: -2920 },
+  { n: tr('內溝', 'Neigou'), x: 11100, z: -4860 },
+  { n: tr('碧山', 'Bishan'), x: 8570, z: -6300 },
 );
 const sectorNames = SECTORS.map(s => s.n);
 /** v24.33 the boundaries of the districts added to 萬華 (set once the district index is in) */
 let extRings: V2[][] = [];
 let extBox = [0, 0, 0, 0];
+/** v24.36 the box of each of them (士林's ring alone is a thousand points: it is walked only for a point in its box) */
+let extBoxes: number[][] = [];
 const inExtra = (x: number, z: number) =>
   extRings.length > 0 &&
   x > extBox[0] &&
@@ -1059,7 +1089,10 @@ const inExtra = (x: number, z: number) =>
   z > extBox[1] &&
   z < extBox[3] &&
   !inCore(x, z) &&
-  extRings.some(r => pip([x, z], r));
+  extRings.some((r, i) => {
+    const b = extBoxes[i];
+    return x > b[0] && x < b[2] && z > b[1] && z < b[3] && pip([x, z], r);
+  });
 /** the area a point belongs to: one of the campaign's in 萬華 (and anywhere else), one of the others in a new district */
 const sectorOf = (x: number, z: number) => {
   let bi = 0,
@@ -9525,9 +9558,18 @@ async function boot() {
     // v24.33 the rings after the first are the districts added to 萬華
     extRings = district.ix.boundary.slice(1);
     extBox = [1e9, 1e9, -1e9, -1e9];
-    for (const r of extRings)
-      for (const [x, z] of r)
-        extBox = [Math.min(extBox[0], x), Math.min(extBox[1], z), Math.max(extBox[2], x), Math.max(extBox[3], z)];
+    extBoxes = extRings.map(r => {
+      let bx = [1e9, 1e9, -1e9, -1e9];
+      for (const [x, z] of r) bx = [Math.min(bx[0], x), Math.min(bx[1], z), Math.max(bx[2], x), Math.max(bx[3], z)];
+      return bx;
+    });
+    for (const bx of extBoxes)
+      extBox = [
+        Math.min(extBox[0], bx[0]),
+        Math.min(extBox[1], bx[1]),
+        Math.max(extBox[2], bx[2]),
+        Math.max(extBox[3], bx[3]),
+      ];
     WORLD_B.minx = x0;
     WORLD_B.minz = z0;
     WORLD_B.maxx = x1;

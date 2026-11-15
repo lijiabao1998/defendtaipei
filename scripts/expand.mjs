@@ -12,14 +12,23 @@
 // A river that runs through a district (基隆河 in 中山區) is a multipolygon of its own: give those relations with
 // --water. Its water is drawn, nothing is built in it, and its banks are walls except under the bridges. Every run
 // with --water cuts those rivers again, to the box of all the districts they were ever cut for, and makes the banks
-// again: a river that was cut at the edge of 中山區 goes on when 松山區 is added.
+// again: a river that was cut at the edge of 中山區 goes on when 松山區 is added. The same file tells which stretches
+// of the city's boundary are river and which are a ridge (士林區 and 內湖區 border New Taipei along the hills): an edge
+// of the city is drawn as the river only where it lies in mapped water. The river that IS the boundary (淡水河,
+// 新店溪) stays what it always was, a strip along the boundary line, and is not taken a second time as a polygon.
 // --wood: woodland (natural=wood, landuse=forest; ways and multipolygons). The hillsides of 信義區 are a third of the
-// district; without it they are bare ground. Kept where it touches a district, drawn green and planted by the game.
+// district, and 士林區 is mostly 陽明山; without it they are bare ground. It is cut by the grid of tiles and written
+// into the tiles of the districts (`w`: the pieces of woodland in that tile; a tile that holds nothing else is made
+// for it), so the game draws and plants a wood with the tile it is in; the whole polygons go to map.json for the
+// paper map. v24.35 kept them whole in the index (ix.wood), which the first run after it takes out again.
 // An airfield in a district (aeroway=*, with the district's extract: 松山機場) becomes ix.air: its aprons, runway and
 // taxiways as paved ground, its grass as lawn without trees, the runway's paint. Nothing is generated inside it.
+// A footprint the game could give no door (scripts/shutin.mjs: shut in on every side, and the neighbour whose wall it
+// could go through is in the next tile) is left out, if this run added it.
 // Usage: node scripts/expand.mjs --city raw-city.json [--water raw-water.json] [--wood raw-wood.json] raw-中正區.json …
 // Same local projection as public/data/wanhua.json. Data © OpenStreetMap contributors, ODbL.
 import fs from 'fs';
+import { shutIn } from './shutin.mjs';
 const T = 200;
 const args = process.argv.slice(2);
 const ci = args.indexOf('--city');
@@ -221,6 +230,51 @@ for (const file of args) {
 }
 /** rings of the big water added in this run: their banks become walls at the end */
 const rivers = [];
+/** every closed ring of the mapped big water, whole */
+const wetRings = [];
+if (waterFile)
+  for (const e of JSON.parse(fs.readFileSync(waterFile, 'utf8')).elements) {
+    if (e.type !== 'relation' || !(e.tags?.natural === 'water' || e.tags?.waterway === 'riverbank')) continue;
+    for (const ring of joinWays(e.members.filter(m => m.role === 'outer' && m.geometry).map(m => m.geometry.map(P))))
+      if (ring.length > 3 && eq(ring[0], ring[ring.length - 1])) {
+        const r = ring.slice(0, -1);
+        wetRings.push({ r, box: boxOf(r) });
+      }
+  }
+/** the rings that are the river on the city's boundary: the ones a good length of that boundary lies in (基隆河
+ * is crossed by it for a few metres where it enters the city: that does not make it one). Those are drawn as strips
+ * along the boundary (ix.river), by the districts they bound; the others are rivers that run through. */
+const edgeRiver = new Set();
+if (waterFile) {
+  const edges = ix.river.map(([ax, az, bx, bz]) => [(ax + bx) / 2, (az + bz) / 2, Math.hypot(bx - ax, bz - az)]);
+  for (const file of args) {
+    const rel = JSON.parse(fs.readFileSync(file, 'utf8')).elements.find(
+      e => e.type === 'relation' && e.tags?.boundary === 'administrative',
+    );
+    if (ix.districts.includes(rel.tags.name)) continue;
+    for (const m of rel.members)
+      if (m.role === 'outer' && m.geometry && cityWays.has(m.ref)) {
+        const g = m.geometry.map(P);
+        for (let i = 0; i < g.length - 1; i++)
+          edges.push([
+            (g[i][0] + g[i + 1][0]) / 2,
+            (g[i][1] + g[i + 1][1]) / 2,
+            Math.hypot(g[i + 1][0] - g[i][0], g[i + 1][1] - g[i][1]),
+          ]);
+      }
+  }
+  for (const w of wetRings) {
+    let len = 0;
+    for (const q of edges)
+      if (q[0] > w.box[0] && q[0] < w.box[2] && q[1] > w.box[1] && q[1] < w.box[3] && pip(q, w.r)) len += q[2];
+    if (len > 500) edgeRiver.add(w.r);
+  }
+  console.log('mapped water:', wetRings.length, 'rings;', edgeRiver.size, 'of them are the river on the city boundary');
+}
+const inWet = (x, z) =>
+  wetRings.some(
+    w => edgeRiver.has(w.r) && x > w.box[0] && x < w.box[2] && z > w.box[1] && z < w.box[3] && pip([x, z], w.r),
+  );
 if (waterFile && coming.length) {
   // the part of them that lies over the districts (a river goes on for kilometres either way). The box grows with
   // every run; what was cut to the smaller box of an earlier run is taken out and cut again.
@@ -241,22 +295,32 @@ if (waterFile && coming.length) {
   ix.rbox = box.map(Math.round);
   const same = (o, c) => Math.hypot(cen(o)[0] - cen(c)[0], cen(o)[1] - cen(c)[1]) < 2;
   let recut = 0;
-  for (const e of JSON.parse(fs.readFileSync(waterFile, 'utf8')).elements) {
-    if (e.type !== 'relation' || !(e.tags?.natural === 'water' || e.tags?.waterway === 'riverbank')) continue;
-    for (let ring of joinWays(e.members.filter(m => m.role === 'outer' && m.geometry).map(m => m.geometry.map(P)))) {
-      if (ring.length < 4) continue;
-      if (eq(ring[0], ring[ring.length - 1])) ring = ring.slice(0, -1);
-      const sr = simpR(ring, 2);
-      const c = clipBox(sr, box);
-      if (c.length < 4) continue;
-      if (!ix.water.some(o => same(o, c))) {
-        const old = clipBox(sr, before);
-        const i = old.length < 4 ? -1 : ix.water.findIndex(o => same(o, old));
-        if (i >= 0) (ix.water.splice(i, 1), recut++);
-        ix.water.push(c);
-      }
-      if (polyArea(c) > 20000) rivers.push(c);
+  const allRings = [...ix.boundary, ...coming];
+  const touches = p => p.some(q => allRings.some(r => pip(q, r))) || allRings.some(r => r.some(q => pip(q, p)));
+  for (const { r: ring } of wetRings) {
+    if (edgeRiver.has(ring)) continue;
+    const sr = simpR(ring, 2);
+    const c = clipBox(sr, box);
+    if (c.length < 4) continue;
+    if (!ix.water.some(o => same(o, c))) {
+      // the same water as an earlier run cut it, to a smaller box (the ring may start at another point this time,
+      // which moves its middle a little): the old piece lies inside the new one
+      const cb = boxOf(c);
+      const i = ix.water.findIndex(o => {
+        if (polyArea(o) < 20000) return false;
+        const ob = boxOf(o);
+        if (ob[0] < cb[0] - 5 || ob[1] < cb[1] - 5 || ob[2] > cb[2] + 5 || ob[3] > cb[3] + 5) return false;
+        let inO = 0,
+          both = 0;
+        for (let x = ob[0] + 10; x < ob[2]; x += 20)
+          for (let z = ob[1] + 10; z < ob[3]; z += 20) if (pip([x, z], o)) (inO++, pip([x, z], c) && both++);
+        return inO > 20 && both > inO * 0.9;
+      });
+      if (i >= 0) (ix.water.splice(i, 1), recut++);
+      else if (!touches(c)) continue; // (a canal across the river, a lake two valleys away)
+      ix.water.push(c);
     }
+    if (polyArea(c) > 20000 && touches(c)) rivers.push(c);
   }
   ix.banks = []; // (all of them are made again at the end, from the rivers as they are now)
   console.log(
@@ -269,8 +333,8 @@ if (waterFile && coming.length) {
   );
 }
 // ---- woodland: what touches a district (one already in the map, or one of this run), cut to the box of them all
+const woodPolys = [];
 if (woodFile) {
-  ix.wood ||= [];
   const all = [...ix.boundary, ...coming];
   const b0 = boxOf(all.flat());
   const box = [b0[0] - 40, b0[1] - 40, b0[2] + 40, b0[3] + 40];
@@ -290,11 +354,10 @@ if (woodFile) {
       if (ring.length < 4 || !eq(ring[0], ring[ring.length - 1])) continue;
       ring = ring.slice(0, -1);
       if (polyArea(ring) < 400) continue; // (a clump of trees: the parks and the lots have those already)
-      const c = clipBox(simpR(ring, 4), box);
+      // (a whole mountainside is one polygon of thousands of points: it is drawn coarser than a grove is)
+      const c = clipBox(simpR(ring, polyArea(ring) > 3e5 ? 9 : 4), box);
       if (c.length < 4 || polyArea(c) < 400 || !touches(c)) continue;
-      const cc = cen(c);
-      if (ix.wood.some(o => Math.hypot(cen(o)[0] - cc[0], cen(o)[1] - cc[1]) < 2)) continue; // already there
-      ix.wood.push(c.map(q => [Math.round(q[0]), Math.round(q[1])]));
+      woodPolys.push(c.map(q => [Math.round(q[0]), Math.round(q[1])]));
       n++;
       m2 += polyArea(c);
     }
@@ -616,6 +679,11 @@ for (const file of args) {
         const mx = (a[0] + c[0]) / 2,
           mz = (a[1] + c[1]) / 2;
         if (!cityLines.some(l => l.some((q, j) => j && segDist(mx, mz, l[j - 1], q) < 8))) continue;
+        // (with the water at hand: only where the boundary runs in it. The rest is a ridge, and stays land)
+        if (waterFile && !inWet(mx, mz)) {
+          st.ridge = (st.ridge || 0) + Math.round(L);
+          continue;
+        }
         let nx = (c[1] - a[1]) / L,
           nz = -(c[0] - a[0]) / L; // outward
         if (pip([mx + nx * 3, mz + nz * 3], b)) ((nx = -nx), (nz = -nz));
@@ -640,10 +708,14 @@ for (const file of args) {
     const blockers = [
       ...ix.water,
       ...ix.park.map(q => q.p),
-      ...(ix.wood || []),
+      ...woodPolys,
       ...(ix.air?.ring || []),
       ...landuse
-        .filter(q => /^(military|cemetery|farmland|allotments|forest|railway|recreation_ground)$/.test(q.t))
+        .filter(q =>
+          /^(military|cemetery|farmland|allotments|forest|railway|recreation_ground|orchard|meadow|basin|farmyard|plant_nursery|greenhouse_horticulture|quarry|landfill)$/.test(
+            q.t,
+          ),
+        )
         .map(q => q.p),
     ].map(p => {
       const xs = p.map(q => q[0]),
@@ -654,6 +726,23 @@ for (const file of args) {
       for (const [a, b, w] of gnear(segG, x, z)) if (segDist(x, z, a, b) < w + r) return false;
       for (const p of bG.get(Math.floor(x / G) + ',' + Math.floor(z / G)) || []) if (pip([x, z], p)) return false;
       return true;
+    };
+    // a mountain road is not a street: flats are generated only where mapped buildings stand around (six of them
+    // within a hundred metres or so). In town that is everywhere; up the hill it is the villages.
+    const TG = 100,
+      tg = new Map();
+    for (const t of tiles.values())
+      for (const b of t.b) {
+        if (b.g) continue;
+        const c = cen(b.p);
+        const k = Math.floor(c[0] / TG) + ',' + Math.floor(c[1] / TG);
+        tg.set(k, (tg.get(k) || 0) + 1);
+      }
+    const town = (x, z) => {
+      let n = 0;
+      for (let i = -1; i <= 1; i++)
+        for (let j = -1; j <= 1; j++) n += tg.get(Math.floor(x / TG) + i + ',' + (Math.floor(z / TG) + j)) || 0;
+      return n >= 6;
     };
     let rs = 1;
     for (const ch of name) rs = (rs * 31 + ch.codePointAt(0)) % 2147483647;
@@ -677,6 +766,7 @@ for (const file of args) {
             const cx = a[0] + ux * s + nx * (off + dp / 2),
               cz = a[1] + uz * s + nz * (off + dp / 2);
             if (inCore(cx, cz) || inOld(cx, cz) || !inNew(cx, cz)) continue;
+            if (!town(cx, cz)) continue;
             if (blockers.some(b => cx > b.x0 && cx < b.x1 && cz > b.z0 && cz < b.z1 && pip([cx, cz], b.p))) continue;
             if (nearRiver(cx, cz)) continue;
             const cs = [
@@ -703,13 +793,92 @@ for (const file of args) {
   report.push(st);
 }
 
+// ---------------------------------------------------------------- woodland into the tiles
+// The first run that does this takes every tile of the map; later runs only the tiles of the districts they add
+// (a tile that has its woods keeps them: a newer extract does not move the trees of a district that is done).
+if (woodFile) {
+  const first = !ix.wt;
+  const rings = first ? ix.boundary : coming;
+  const mine = new Map();
+  const inMap = (tx, tz) => {
+    const k = tx + '_' + tz;
+    if (!mine.has(k))
+      mine.set(
+        k,
+        [
+          [0.5, 0.5],
+          [0, 0],
+          [1, 0],
+          [0, 1],
+          [1, 1],
+        ].some(([i, j]) => rings.some(r => pip([(tx + i) * T, (tz + j) * T], r))),
+      );
+    return mine.get(k);
+  };
+  const per = new Map();
+  for (const poly of woodPolys) {
+    const bb = boxOf(poly);
+    for (let tx = Math.floor(bb[0] / T); tx <= Math.floor(bb[2] / T); tx++)
+      for (let tz = Math.floor(bb[1] / T); tz <= Math.floor(bb[3] / T); tz++) {
+        if (!inMap(tx, tz)) continue;
+        const piece = clipBox(poly, [tx * T, tz * T, tx * T + T, tz * T + T]);
+        if (piece.length < 3 || polyArea(piece) < 150) continue;
+        const k = tx + '_' + tz;
+        (per.get(k) || per.set(k, []).get(k)).push(piece.map(q => [Math.round(q[0]), Math.round(q[1])]));
+      }
+  }
+  let nt = 0,
+    only = 0,
+    m2 = 0;
+  for (const [k, ps] of per) {
+    const had = tiles.has(k);
+    const t = tile(k);
+    if (!first && t.w) continue;
+    t.w = ps;
+    t.wNew = true;
+    nt++;
+    if (!had) only++;
+    for (const q of ps) m2 += polyArea(q);
+  }
+  delete ix.wood;
+  ix.wt = 1;
+  paper.w = woodPolys;
+  console.log(
+    'woodland in tiles:',
+    nt,
+    'tiles,',
+    only,
+    'of them made for it,',
+    Math.round(m2 / 1e4) / 100,
+    'km² of wood in the districts',
+  );
+}
+
+// ---------------------------------------------------------------- footprints that would have no door
+// v24.36 a stair tower between two wings of a school, drawn as a building of its own: every wall of it is another
+// building's wall, and the wings are in the next tile, where the game does not look for a wall to go through. In the
+// game it would be a box nobody can enter. Only what this run added is looked at, and only that can go; taking one
+// away shuts nobody else in.
+{
+  const get = k => tiles.get(k);
+  const gone = [];
+  for (const [k, t] of tiles) {
+    if (t.b.length === t.nb0) continue;
+    const out = shutIn(get, k).filter(bi => bi >= t.nb0);
+    if (!out.length) continue;
+    for (const bi of out) gone.push(cen(t.b[bi].p).map(Math.round).join(','));
+    t.b = t.b.filter((_, bi) => !out.includes(bi));
+  }
+  console.log('shut in, left out:', gone.length, gone.join('  '));
+}
+
 // ---------------------------------------------------------------- write the district tiles, the index, the paper map
 let wrote = 0,
   grew = 0;
 for (const [k, t] of tiles) {
-  if (t.b.length === t.nb0 && t.r.length === t.nr0) continue;
-  t.nb0 || t.nr0 ? grew++ : wrote++;
-  fs.writeFileSync(`${DD}/${k}.json`, JSON.stringify({ b: t.b, r: t.r }));
+  if (t.b.length === t.nb0 && t.r.length === t.nr0 && !t.wNew) continue;
+  if (t.b.length !== t.nb0 || t.r.length !== t.nr0) t.nb0 || t.nr0 ? grew++ : wrote++;
+  fs.writeFileSync(`${DD}/${k}.json`, JSON.stringify(t.w ? { b: t.b, r: t.r, w: t.w } : { b: t.b, r: t.r }));
   ix.tiles[k] = [t.b.length, t.r.length];
 }
 let mx = [1e9, 1e9, -1e9, -1e9];
