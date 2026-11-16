@@ -30,6 +30,9 @@ async function stroll(dx, dz) {
   return G(`return g.autoState().p`);
 }
 // 1. metro: the first steps underground used to snap the player to the map edge (z = -962)
+// (v24.37 measured from where the map ends: it reaches z = -18,710 and x = 16,432 now, and a player snapped to its edge
+// passed the old fixed thresholds)
+const WB = await G(`return g.worldB()`);
 {
   const st = (await G(`return g.metro().map(s=>({ent:s.ent}))`))[0];
   await G(`g.tp(${st.ent[0]},${st.ent[1]})`);
@@ -37,7 +40,7 @@ async function stroll(dx, dz) {
   await G(`g.metroUse()`);
   const q = await stroll(1.2, 1.2);
   res.metro = q;
-  if (!(q[1] < -6000)) fail.push(`metro: walked out of the station to ${q}`);
+  if (!(q[1] < WB.minz - 2500)) fail.push(`metro: walked out of the station to ${q}`);
   await G(`g.tp(${st.ent[0]},${st.ent[1]})`); // back to the street (debug teleport)
 }
 /** try the stairs of one building: up, look, walk, save, down */
@@ -54,12 +57,12 @@ async function tryStairs(s, tag) {
   r.promptTop = await prompt();
   await p.screenshot({ path: `${out}/upstairs-${tag}.png`, timeout: 120000 });
   const walked = await stroll(-1.5, 0.8);
-  r.stillUp = walked[0] > 5000;
+  r.stillUp = walked[0] > WB.maxx + 2500;
   // save while upstairs: the save must hold the ground-floor stairwell
   await G(`g.save()`);
   r.savedAt = await p.evaluate(() => JSON.parse(localStorage.getItem('defendtaipei-save-v1') || 'null')?.p);
   r.saveOnMap =
-    !!r.savedAt && r.savedAt[0] < 5000 && Math.hypot(r.savedAt[0] - s.foot[0], r.savedAt[1] - s.foot[1]) < 4;
+    !!r.savedAt && r.savedAt[0] < WB.maxx && Math.hypot(r.savedAt[0] - s.foot[0], r.savedAt[1] - s.foot[1]) < 4;
   // back to the landing, then down
   await G(`const L=g.upState().land;g.tp(L[0],L[1])`);
   await wait(800);
@@ -67,7 +70,7 @@ async function tryStairs(s, tag) {
   await wait(1500);
   const after = await G(`return {p:g.autoState().p,indoor:g.indoor(),up:g.upState().up}`);
   r.back = after.p;
-  r.backInside = after.indoor && !after.up && after.p[0] < 5000;
+  r.backInside = after.indoor && !after.up && after.p[0] < WB.maxx;
   const moved = await stroll(0.6, 0.6);
   r.backWalks = Math.hypot(moved[0] - after.p[0], moved[1] - after.p[1]) > 0.2 || true; // furniture may block
   const ok =

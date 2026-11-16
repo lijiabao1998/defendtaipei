@@ -76,6 +76,7 @@ import { SwingTrail } from '../systems/trail';
 import * as SQ from '../npc/squadai';
 import * as CL from '../map/clutter';
 import * as UP from '../map/upstairs';
+import { DATA_V, dataUrl } from './datav';
 import { setLitWindows, litStats } from '../map/litwin';
 import * as BC from '../story/broadcasts/broadcast';
 import { Nav, smooth } from '../systems/nav';
@@ -985,7 +986,7 @@ const SECTORS: { n: string; x: number; z: number }[] = [
 ];
 /** the 萬華 campaign: these are the areas that have to be taken back to win */
 const NSEC = SECTORS.length;
-// v24.33 the neighbouring districts (中正, then 大同; v24.34 大安 and 中山; v24.35 松山 and 信義; v24.36 士林 and 內湖). Their areas are held by a garrison like the outer areas of 萬華
+// v24.33 the neighbouring districts (中正, then 大同; v24.34 大安 and 中山; v24.35 松山 and 信義; v24.36 士林 and 內湖; v24.37 文山, 南港 and 北投: all twelve). Their areas are held by a garrison like the outer areas of 萬華
 // and can be taken back the same way, but they are not part of the campaign: its count, the offensive and the ending
 // are about the fifteen above.
 SECTORS.push(
@@ -1076,28 +1077,86 @@ SECTORS.push(
   { n: tr('內溝', 'Neigou'), x: 11100, z: -4860 },
   { n: tr('碧山', 'Bishan'), x: 8570, z: -6300 },
 );
+/** v24.37 the areas of 文山, 南港 and 北投 begin here (the land of a district goes to the areas added with it: areaSet) */
+const NSEC36 = SECTORS.length;
+SECTORS.push(
+  // v24.37 文山區
+  { n: tr('景美', 'Jingmei'), x: 3800, z: 5300 },
+  { n: tr('萬隆', 'Wanlong'), x: 3650, z: 4300 },
+  { n: tr('興隆路', 'Xinglong Road'), x: 4700, z: 4550 },
+  { n: tr('辛亥', 'Xinhai'), x: 5450, z: 3950 },
+  { n: tr('萬芳', 'Wanfang'), x: 5900, z: 4650 },
+  { n: tr('木柵', 'Muzha'), x: 7000, z: 4900 },
+  { n: tr('動物園', 'Zoo'), x: 7800, z: 4800 },
+  { n: tr('政大', 'Chengchi University'), x: 7400, z: 5950 },
+  { n: tr('木新路', 'Muxin Road'), x: 5850, z: 6600 },
+  { n: tr('指南', 'Zhinan'), x: 8450, z: 6750 },
+  { n: tr('老泉', 'Laoquan'), x: 6250, z: 7600 },
+  { n: tr('貓空', 'Maokong'), x: 8500, z: 8000 },
+  // v24.37 南港區
+  { n: tr('後山埤', 'Houshanpi'), x: 8050, z: -420 },
+  { n: tr('昆陽', 'Kunyang'), x: 9100, z: -1050 },
+  { n: tr('南港車站', 'Nangang Station'), x: 10500, z: -1250 },
+  { n: tr('展覽館', 'Exhibition Hall'), x: 11500, z: -1500 },
+  { n: tr('軟體園區', 'Software Park'), x: 11400, z: -2100 },
+  { n: tr('中研院', 'Academia Sinica'), x: 11300, z: -200 },
+  { n: tr('舊莊', 'Jiuzhuang'), x: 12000, z: 350 },
+  { n: tr('茶山', 'Tea Hills'), x: 13400, z: 1550 },
+  { n: tr('大坑', 'Dakeng'), x: 14500, z: 1800 },
+  // v24.37 北投區
+  { n: tr('洲美', 'Zhoumei'), x: 200, z: -6400 },
+  { n: tr('明德', 'Mingde'), x: 1600, z: -7600 },
+  { n: tr('石牌', 'Shipai'), x: 1250, z: -8150 },
+  { n: tr('榮總', 'Veterans Hospital'), x: 1750, z: -8750 },
+  { n: tr('唭哩岸', 'Qilian'), x: 300, z: -8850 },
+  { n: tr('奇岩', 'Qiyan'), x: -200, z: -9350 },
+  { n: tr('北投市場', 'Beitou Market'), x: -500, z: -10000 },
+  { n: tr('新北投', 'Xinbeitou'), x: 50, z: -10600 },
+  { n: tr('復興崗', 'Fuxinggang'), x: -1750, z: -10650 },
+  { n: tr('忠義', 'Zhongyi'), x: -3000, z: -9950 },
+  { n: tr('關渡', 'Guandu'), x: -3600, z: -9350 },
+  { n: tr('關渡平原', 'Guandu Plain'), x: -2000, z: -8300 },
+  { n: tr('行義路', 'Xingyi Road'), x: 2400, z: -10600 },
+  { n: tr('十八份', 'Shibafen'), x: 700, z: -11600 },
+  { n: tr('陽明公園', 'Yangming Park'), x: 4050, z: -12700 },
+  { n: tr('竹子湖', 'Zhuzihu'), x: 3750, z: -14900 },
+  { n: tr('大屯山', 'Mount Datun'), x: 2200, z: -14000 },
+);
 const sectorNames = SECTORS.map(s => s.n);
 /** v24.33 the boundaries of the districts added to 萬華 (set once the district index is in) */
 let extRings: V2[][] = [];
 let extBox = [0, 0, 0, 0];
 /** v24.36 the box of each of them (士林's ring alone is a thousand points: it is walked only for a point in its box) */
 let extBoxes: number[][] = [];
-const inExtra = (x: number, z: number) =>
-  extRings.length > 0 &&
-  x > extBox[0] &&
-  x < extBox[2] &&
-  z > extBox[1] &&
-  z < extBox[3] &&
-  !inCore(x, z) &&
-  extRings.some((r, i) => {
+/** v24.37 the ring of 文山區 in the boundary: from it on, the districts of v24.37 */
+let ring37 = Infinity;
+/** v24.37 the ring of the district a point is in (1 is 中正區; 萬華 is 0 and not in extRings), -1 in none or in the core */
+const extraRing = (x: number, z: number) => {
+  if (!extRings.length || x <= extBox[0] || x >= extBox[2] || z <= extBox[1] || z >= extBox[3] || inCore(x, z))
+    return -1;
+  for (let i = 0; i < extRings.length; i++) {
     const b = extBoxes[i];
-    return x > b[0] && x < b[2] && z > b[1] && z < b[3] && pip([x, z], r);
-  });
-/** the area a point belongs to: one of the campaign's in 萬華 (and anywhere else), one of the others in a new district */
+    if (x > b[0] && x < b[2] && z > b[1] && z < b[3] && pip([x, z], extRings[i])) return i + 1;
+  }
+  return -1;
+};
+/**
+ * v24.37 the set of areas a point belongs to: 0 the campaign's (萬華, the core, and anywhere off the districts), 1 those of
+ * the districts of v24.33 – v24.36, 2 those of 文山, 南港 and 北投. The areas added with a district take that district's
+ * land only: searched among all the others, the anchors of v24.37 took a hundred tiles of 士林, 大安, 信義 and 內湖 from
+ * the areas they had been part of, and a street taken back in an old save was occupied again.
+ */
+const areaSet = (x: number, z: number) => {
+  const r = extraRing(x, z);
+  return r < 0 ? 0 : r < ring37 ? 1 : 2;
+};
+/** the first and the last + 1 of the areas of each set */
+const setRange = (k: number) => (k === 0 ? [0, NSEC] : k === 1 ? [NSEC, NSEC36] : [NSEC36, SECTORS.length]);
+/** the area a point belongs to: the nearest anchor of its set */
 const sectorOf = (x: number, z: number) => {
   let bi = 0,
     bd = 1e18;
-  const [i0, i1] = inExtra(x, z) ? [NSEC, SECTORS.length] : [0, NSEC];
+  const [i0, i1] = setRange(areaSet(x, z));
   for (let i = i0; i < i1; i++) {
     const d = (SECTORS[i].x - x) ** 2 + (SECTORS[i].z - z) ** 2;
     if (d < bd) ((bd = d), (bi = i));
@@ -3098,6 +3157,22 @@ function dSoldier(key: string, tid: number, route: V2[], sector: number, post?: 
   sols.push(s);
   return s;
 }
+/** v24.37 an outpost at cp: its five posts (2.5 m out) and ten sandbags (4.2 m) stand in no building */
+function outpostClear(cp: V2, t: TileInfo) {
+  const solid = (x: number, z: number) =>
+    !!bldAt(x, z) ||
+    !!district.enterAt(x, z) ||
+    t.enter.some(e => x > e.minx && x < e.maxx && z > e.minz && z < e.maxz && pip([x, z], e.pts));
+  for (let k = 0; k < 10; k++) {
+    const a = (k / 10) * Math.PI * 2;
+    if (solid(cp[0] + Math.cos(a) * 4.2, cp[1] + Math.sin(a) * 4.2)) return false;
+  }
+  for (let k = 0; k < GARRISON; k++) {
+    const a = (k / GARRISON) * Math.PI * 2;
+    if (solid(cp[0] + Math.cos(a) * 2.5, cp[1] + Math.sin(a) * 2.5)) return false;
+  }
+  return !solid(cp[0], cp[1]);
+}
 function onTileLoad(t: TileInfo) {
   const rec = { sols: [] as Sol[], conts: [] as Cont[], marks: [] as THREE.Object3D[], cps: [] as V2[] };
   dTile.set(t.key, rec);
@@ -3122,14 +3197,27 @@ function onTileLoad(t: TileInfo) {
   const big = t.roads.filter(q => q.p.length >= 2 && !/foot|path|steps|cycle|service/.test(q.t));
   // garrison outpost for the area this tile anchors
   const gs = SECTORS.findIndex((_, i) => outerSector(i) && garrisonKey(i) === t.key);
-  if (gs >= 0 && big.length) {
-    let cp: V2 = big[0].p[0],
+  // v24.37 on a tile whose roads are all footpaths, steps and service lanes (a park: 青年公園, 大安森林公園, 萬芳…) the
+  // outpost was never built, so its area could never be taken back. 青年公園 is one of the fifteen: the campaign could
+  // not be won. The outpost goes on whatever road the tile has (no random number is drawn for it).
+  const postOn = big.length ? big : t.roads.filter(q => q.p.length >= 2);
+  if (gs >= 0 && postOn.length) {
+    let cp: V2 = postOn[0].p[0],
       bd = 1e9;
-    for (const q of big)
+    for (const q of postOn)
       for (const v of q.p) {
         const d = Math.hypot(v[0] - t.cx, v[1] - t.cz);
         if (d < bd) ((bd = d), (cp = v));
       }
+    // (a footpath often ends at a building's door, and a park's tile can have a building in its middle: of the
+    // footpaths' points, the nearest whose ring of posts and sandbags is clear of every building)
+    if (!big.length) {
+      const pts = postOn
+        .flatMap(q => q.p)
+        .sort((a, b) => Math.hypot(a[0] - t.cx, a[1] - t.cz) - Math.hypot(b[0] - t.cx, b[1] - t.cz));
+      const ok = pts.find(v => outpostClear(v, t));
+      if (ok) cp = ok;
+    }
     const g = new THREE.Group();
     for (let k = 0; k < 10; k++) {
       const a = (k / 10) * Math.PI * 2;
@@ -6935,6 +7023,19 @@ function openSurv(kind: 'home' | 'trade' | 'moral') {
   render();
   document.body.appendChild(d);
 }
+/** v24.37 the station whose interior the player is in (when inMetro) */
+function stationHere() {
+  const i = Math.round((player.pos.x - stationOrigin(0)[0]) / (stationOrigin(1)[0] - stationOrigin(0)[0]));
+  return Math.max(0, Math.min(metro.length - 1, i));
+}
+/**
+ * v24.37 where the player is on the map, for the paper map and the street sign: upstairs the foot of the stairs
+ * (mapPos), down in a station its first street exit (the interiors are far off the map: the map opened there showed
+ * nothing at all, and the sign named an area of 萬華)
+ */
+function streetPos(): V2 {
+  return inMetro(player.pos.z) && metro.length ? metro[stationHere()].ent : mapPos();
+}
 /** v21.6 / v22.1 the metro entrance / exit the player stands at, if any */
 function metroAt() {
   for (const st of metro)
@@ -7800,8 +7901,9 @@ function reclaimDressTile(t: TileInfo) {
 }
 function reclaimParty(i: number) {
   const name = SECTOR_LABEL(i);
-  // the neighbours come out around you, wherever you are when the district falls
-  const here = mapPos();
+  // the neighbours come out around you, wherever you are when the district falls (v24.37 down in a station: in the
+  // street above it)
+  const here = streetPos();
   reclaim?.gather(i, here[0], here[1]);
   ((surv as any).libAt ||= {})[i] = here;
   const L = RECLAIM_LINES[i % RECLAIM_LINES.length];
@@ -8128,7 +8230,7 @@ function save() {
     surv,
     g: player.gender,
     p: mapPos(), // v23.4 saved upstairs → resume at the foot of the stairs
-    ov: 1, // v24.34 the metro is at METRO_Z
+    ov: 2, // v24.34 the metro is at METRO_Z (1: z = -20000; 2, v24.37: z = -26000)
     hp: player.hp,
     hu: player.hunger,
     th: player.thirst,
@@ -8209,7 +8311,7 @@ function update(dt: number) {
     // v24.34 a game saved down in a station comes back down there: the interior is built on the way in from the
     // street, so a save loaded straight into it stood in the dark with the walls and nothing to see
     if (inMetro(player.pos.z)) {
-      const i = Math.round((player.pos.x - stationOrigin(0)[0]) / (stationOrigin(1)[0] - stationOrigin(0)[0]));
+      const i = stationHere();
       if (metro[i] && !metro[i].built) ensureInterior(scene, metro[i], i);
     }
     metroTick(performance.now() / 1000, gameMin, UT.power, player.pos.x, player.pos.z);
@@ -9002,7 +9104,8 @@ function flashRed() {
   setTimeout(() => (renderer.domElement.style.filter = ''), 150);
 }
 function updateStreet() {
-  const [qx, qz] = mapPos();
+  const [qx, qz] = streetPos();
+  const under = inMetro(player.pos.z) && metro.length ? metro[stationHere()] : null;
   let best = '',
     bd = 25;
   for (const r of roads) {
@@ -9022,10 +9125,12 @@ function updateStreet() {
     }
   }
   const sec = sectorOf(qx, qz);
+  // (v24.37 down in a station: its name, and the area of the street above)
+  const at = under ? null : translateLabel(best);
   $('street').textContent =
     getLanguage() === 'en'
-      ? `📍 ${translateLabel(best) || 'Alley'}・${areaLabel(sec)} ${liberated.has(sec) ? '(reclaimed)' : '(occupied)'}`
-      : `📍 ${translateLabel(best) || '巷弄'}・${areaLabel(sec)} ${liberated.has(sec) ? '（已奪回）' : '（佔領中）'}`;
+      ? `📍 ${under ? (/station$/i.test(translateLabel(under.name)) ? translateLabel(under.name) : `${translateLabel(under.name)} station`) : at || 'Alley'}・${areaLabel(sec)} ${liberated.has(sec) ? '(reclaimed)' : '(occupied)'}`
+      : `📍 ${under ? (/站$/.test(under.name) ? under.name : `${under.name}站`) : at || '巷弄'}・${areaLabel(sec)} ${liberated.has(sec) ? '（已奪回）' : '（佔領中）'}`;
 }
 /**
  * v23.5 natural healing in HP per game hour: 6 when fed and watered (> 50, as before), 18 when both are nearly
@@ -9551,12 +9656,37 @@ function pumpRoofs(px: number, pz: number, budgetMs: number, maxD = 1e9) {
 }
 async function boot() {
   await prog(0.3, tr('下載萬華地圖資料（OpenStreetMap）…', 'Downloading Wanhua map data (OpenStreetMap)...'));
-  const data = await (await fetch(import.meta.env.BASE_URL + 'data/wanhua.json')).json();
+  const data = await (await fetch(dataUrl(import.meta.env.BASE_URL + 'data/wanhua.json'))).json();
   await district.ready;
+  // v24.37 a district index an older service worker kept (core/datav.ts): drop the caches and load again, once a session
+  if (district.stale && import.meta.env.PROD) {
+    let again = false;
+    try {
+      again = !!sessionStorage.getItem('dt-data-heal');
+      sessionStorage.setItem('dt-data-heal', '1');
+    } catch {
+      again = true; // (no way to remember having done it: not at all, rather than at every load)
+    }
+    // (only when the server answers: offline, the cached index is all there is, and wiping the caches would leave the
+    // game nothing to start from. sw.js is not in any cache, so an older worker passes this to the network)
+    let online = false;
+    if (!again)
+      try {
+        online = (await fetch(import.meta.env.BASE_URL + 'sw.js?probe=' + Date.now(), { cache: 'no-store' })).ok;
+      } catch {}
+    if (!again && online) {
+      await dropGameCaches();
+      location.reload();
+      return;
+    }
+    console.warn('district index: not the one this build was made with, even after dropping the caches');
+  }
   {
     const [x0, z0, x1, z1] = district.ix.bbox;
     // v24.33 the rings after the first are the districts added to 萬華
     extRings = district.ix.boundary.slice(1);
+    const w37 = district.ix.districts?.indexOf('文山區') ?? -1;
+    ring37 = w37 > 0 ? w37 : Infinity;
     extBox = [1e9, 1e9, -1e9, -1e9];
     extBoxes = extRings.map(r => {
       let bx = [1e9, 1e9, -1e9, -1e9];
@@ -9986,16 +10116,20 @@ async function boot() {
       roads: roads as any,
       bounds: WORLD,
       sectors: SECTORS,
+      sets: [NSEC, NSEC36],
+      areaSet,
+      core: CORE,
       sectorOf,
       sectorName: SECTOR_LABEL,
       district: {
         ...district.ix,
-        more: async () => (await fetch(import.meta.env.BASE_URL + 'data/district/map.json')).json(),
+        more: async () => (await fetch(dataUrl(import.meta.env.BASE_URL + 'data/district/map.json'))).json(),
       },
       liberated: () => liberated,
       player: () => {
-        const [x, z] = mapPos();
-        return { x, z, rot: player.mesh ? player.mesh.rotation.y : 0 };
+        // (v24.37 down in a station: the street above it, and nothing uncovered there from below)
+        const [x, z] = streetPos();
+        return { x, z, rot: player.mesh ? player.mesh.rotation.y : 0, under: inMetro(player.pos.z) };
       },
       parks: (parks?.clusters || []) as V2[],
       outposts: () => checkpoints,
@@ -10175,8 +10309,27 @@ async function boot() {
     player.rig = spawnRig({ gender, ...ROLE.look[gender as 'm' | 'f'], outfit: ROLE.id });
     player.mesh = player.rig.root;
     if (load && sv) {
-      // v24.34 a save made down in the metro when the stations were at z = -7000: they have moved
-      if (!sv.ov && sv.p[1] < -6000) sv.p[1] += METRO_Z + 7000;
+      // v24.34 a save made down in the metro when the stations were at z = -7000: they have moved. And again in
+      // v24.37 (北投區 reaches z = -18,700, where the stations of v24.34 began): a save marked `ov: 1` was made with
+      // them at z = -20000, and the floors upstairs at x = 20000 (before v24.34: x = 6000). v24.37 moves every point of
+      // the save that was in one of those spaces (the player, rain buckets and crates left there, where the crowd of a
+      // district taken back stood), and only what was in them: a v24.37 save that an older version opened and saved
+      // again is marked `ov: 1` with its points where v24.37 puts them, and they stay.
+      const fromOld = (q: V2): V2 => {
+        if (!Array.isArray(q) || q.length < 2) return q;
+        if (!sv.ov) {
+          if (q[1] < -6000) return [q[0], q[1] + METRO_Z + 7000];
+          if (q[0] > 5000) return [q[0] + UP.UP_O[0] - 6000, q[1]];
+        } else if (sv.ov === 1) {
+          if (q[1] > -20200 && q[1] < -19800) return [q[0], q[1] + METRO_Z + 20000];
+          if (q[0] > 19000 && q[0] < 21000) return [q[0] + UP.UP_O[0] - 20000, q[1]];
+        }
+        return q;
+      };
+      sv.p = fromOld(sv.p);
+      for (const c of sv.conts || []) if (c[2]) c[2] = fromOld(c[2]);
+      const at = sv.surv?.libAt as Record<number, V2> | undefined;
+      if (at) for (const k of Object.keys(at)) at[+k] = fromOld(at[+k]);
       player.pos.set(sv.p[0], 0, sv.p[1]);
       Object.assign(player, {
         hp: sv.hp,
@@ -11176,6 +11329,26 @@ async function boot() {
       districts: district.ix?.districts ?? [],
     }),
     garrisonKey: (i: number) => garrisonKey(i),
+    /** v24.37 the player is dead (the game stops), the data's version, the posts of a loaded tile's outpost */
+    dead: () => dead,
+    dataV: () => DATA_V,
+    posts: (key: string) => {
+      const rec = dTile.get(key);
+      if (!rec) return null;
+      return rec.sols
+        .filter(q => q.post)
+        .map(q => ({
+          p: q.post as V2,
+          sector: q.sector,
+          inside: !!bldAt(q.post![0], q.post![1]) || !!district.enterAt(q.post![0], q.post![1]),
+        }));
+    },
+    /** v24.37 a container by its id (where it stands, what it holds), and where the crowds of areas taken back stand */
+    cont: (id: string) => {
+      const c = conts.find(q => q.id === id);
+      return c ? { p: c.p, items: c.items } : null;
+    },
+    libAt: () => (surv as any).libAt ?? null,
     /** v24.34 push a body in a straight line against the walls (test hook): where it ends up */
     pushLine: (ax: number, az: number, bx: number, bz: number) => {
       const v = new THREE.Vector3(ax, 0, az);
@@ -11375,6 +11548,18 @@ async function boot() {
     checkpoints: () => checkpoints,
   };
 }
+/**
+ * v24.37 this game's service worker and caches, and nothing else: the address is shared with other games (their
+ * workers have other scopes, their caches other names)
+ */
+async function dropGameCaches() {
+  try {
+    const base = new URL(import.meta.env.BASE_URL, location.href).href;
+    for (const r of (await navigator.serviceWorker?.getRegistrations?.()) || [])
+      if (r.scope.startsWith(base)) await r.unregister();
+    for (const k of (await caches?.keys?.()) || []) if (k.startsWith('dt-')) await caches.delete(k);
+  } catch {}
+}
 /** v22.7.1 show a 「重新載入」 button that drops the service-worker cache (stale assets after a deploy) */
 function bootRescue(why: string) {
   if (document.getElementById('rescue')) return;
@@ -11382,10 +11567,7 @@ function bootRescue(why: string) {
   b.id = 'rescue';
   b.textContent = getLanguage() === 'en' ? `${why}: clear cache and reload` : `${why}：清除快取並重新載入`;
   b.onclick = async () => {
-    try {
-      for (const r of (await navigator.serviceWorker?.getRegistrations?.()) || []) await r.unregister();
-      for (const k of (await caches?.keys?.()) || []) if (k.startsWith('dt-')) await caches.delete(k);
-    } catch {}
+    await dropGameCaches();
     location.reload();
   };
   $('title').appendChild(b);

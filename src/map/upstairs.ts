@@ -10,9 +10,9 @@ import { ARCADE_MATS, lotTex, worldUV } from './paving';
 type V2 = [number, number];
 /** centre of the off-map upstairs space */
 // v24.34 moved from x = 6000: 大安區 and 中山區 reach x = 6776
-export const UP_O: V2 = [20000, 0];
+export const UP_O: V2 = [24000, 0]; // (v24.37: 南港區 reaches x = 16,400)
 /** x beyond the district where the upstairs space lives (the district bbox ends near x = 1000) */
-export const isUp = (x: number) => x > 15000;
+export const isUp = (x: number) => x > 20000;
 export const FLOOR_H = 3.2;
 /** v24.1 the street seen from floor f (2 = one storey up) */
 const streetY = (f: number) => -(3.8 + (Math.max(2, f) - 2) * FLOOR_H);

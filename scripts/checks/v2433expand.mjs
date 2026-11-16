@@ -1,4 +1,4 @@
-// v24.33 – v24.36 the map reaches past 萬華: 中正, 大同, 大安, 中山, 松山, 信義, 士林 and 內湖 stream in like the rest (same tiles, same walk-ups, every one of
+// v24.33 – v24.37 the map reaches past 萬華: the other eleven districts of the city stream in like the rest (same tiles, same walk-ups, every one of
 // them entered), they have areas of their own with a garrison each, taking one back does not touch the campaign's
 // count, the metro has stations there with street exits on clear pavement, and a map explored in an older save is
 // still explored. argv: [url] (default: vite preview)
@@ -45,6 +45,9 @@ const w = await p.evaluate(() => {
       [6300, 400],
       [2700, -8500],
       [10950, -2920],
+      [3800, 5300],
+      [10500, -1250],
+      [1250, -8150],
     ].map(q => S.names[g.sectorOf(q[0], q[1])]),
     stations: g.metro().map(s => ({ name: s.name, no: s.no, gates: s.gates })),
     hud: document.getElementById('street')?.textContent,
@@ -60,8 +63,11 @@ console.log(
   '+',
   w.S.all - w.S.campaign,
 );
-check(w.S.districts.length === 9, `nine districts are in the map (${w.S.districts.join('、')})`);
-check(w.B.maxx > 12500 && w.B.minz < -17000, 'the world reaches the east of 內湖 and the north of 士林');
+check(w.S.districts.length === 12, `all twelve districts are in the map (${w.S.districts.join('、')})`);
+check(
+  w.B.maxx > 16000 && w.B.minz < -18500 && w.B.maxz > 8500,
+  'the world reaches the east of 南港, the north of 北投 and the south of 文山',
+);
 check(w.S.campaign === 15, 'the campaign is still the fifteen areas of 萬華');
 check(
   w.wan.every(i => i < 15),
@@ -69,7 +75,22 @@ check(
 );
 check(
   w.ext.join() ===
-    ['台北車站', '南門', '古亭', '大稻埕', '大龍峒', '東區', '大直', '民生社區', '信義計畫區', '天母', '東湖'].join() ||
+    [
+      '台北車站',
+      '南門',
+      '古亭',
+      '大稻埕',
+      '大龍峒',
+      '東區',
+      '大直',
+      '民生社區',
+      '信義計畫區',
+      '天母',
+      '東湖',
+      '景美',
+      '南港車站',
+      '石牌',
+    ].join() ||
     w.ext.join() ===
       [
         'Taipei Station',
@@ -83,6 +104,9 @@ check(
         'Xinyi Centre',
         'Tianmu',
         'Donghu',
+        'Jingmei',
+        'Nangang Station',
+        'Shipai',
       ].join(),
   `a place in the new districts belongs to an area of its own (${w.ext.join('、')})`,
 );
@@ -107,6 +131,11 @@ for (const [name, x, z] of [
   ['天母', 2700, -8500],
   ['內湖科學園區', 7500, -3500],
   ['東湖', 10950, -2920],
+  ['景美', 3800, 5300],
+  ['木柵', 7000, 4900],
+  ['南港車站', 10500, -1250],
+  ['石牌', 1250, -8150],
+  ['新北投', 50, -10600],
 ]) {
   const r = await p.evaluate(
     async ([x, z]) => {
@@ -145,7 +174,7 @@ check(
   visits.every(
     v =>
       v.hud.includes(v.name) ||
-      /Taipei Station|South Gate|Dadaocheng|Dalongdong|Shuiyuan|East District|Tonghua|Xingtian|Dazhi|Minsheng|Raohe|Xinyi Centre|Wuxing|Night Market|Tianmu|Technology Park|Donghu/.test(
+      /Taipei Station|South Gate|Dadaocheng|Dalongdong|Shuiyuan|East District|Tonghua|Xingtian|Dazhi|Minsheng|Raohe|Xinyi Centre|Wuxing|Night Market|Tianmu|Technology Park|Donghu|Jingmei|Muzha|Nangang Station|Shipai|Xinbeitou/.test(
         v.hud,
       ),
   ),
@@ -189,8 +218,93 @@ check(
 );
 check(!gar.ended, 'and nothing ends');
 
+// ---- v24.37 every area outside the core has an outpost to take back: a garrison tile whose roads were all footpaths
+// (a park: 青年公園, one of the campaign's fifteen; 大安森林公園; 萬芳…) had none, and its area could never be taken
+const posts = await p.evaluate(async () => {
+  const g = window.__game;
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const S = g.sectors();
+  // (out of the middle of 大稻埕's garrison first: its dead flags are written, but its soldiers still shoot)
+  g.tp(0, 0);
+  await wait(500);
+  // the areas outside the core whose garrison tile has no road for vehicles: their outposts stand on a footpath
+  const foot = [];
+  for (let i = 0; i < S.all; i++) {
+    if (!g.sectorAt(i)[2]) continue; // (in the core box: its soldiers stand in the streets of 萬華)
+    const k = g.garrisonKey(i);
+    const t = await (await fetch(`data/district/${k}.json`)).json();
+    if (!t.r.some(r => r.p.length >= 2 && !/foot|path|steps|cycle|service/.test(r.t))) foot.push(i);
+  }
+  const here = {},
+    inside = [];
+  let died = false;
+  for (const i of foot) {
+    const [tx, tz] = g.garrisonKey(i).split('_').map(Number);
+    g.tp((tx + 0.5) * 200 + 60, (tz + 0.5) * 200 + 60);
+    let n = 0;
+    for (let w = 0; w < 120 && n < 5; w++) {
+      await wait(250);
+      g.player.hp = 100; // (the garrison shoots: kept alive, and asked whether it is)
+      if (g.dead()) break;
+      n = g.sols.filter(q => q.sector === i && q.state !== 'dead').length;
+    }
+    if (g.dead()) {
+      died = true;
+      break;
+    }
+    here[S.names[i]] = n;
+    for (const q of g.posts(g.garrisonKey(i)) || []) if (q.sector === i && q.inside) inside.push(S.names[i]);
+  }
+  g.tp(0, 0);
+  await wait(500);
+  return { foot: foot.length, here, inside, died };
+});
+console.log('   outposts', JSON.stringify(posts));
+check(!posts.died, 'the player stays alive among the garrisons (the game would stop, and the rest prove nothing)');
+check(
+  posts.foot >= 9 && Object.keys(posts.here).length === posts.foot && Object.values(posts.here).every(n => n >= 5),
+  `the outposts on footpaths are there, 青年公園's among them (${JSON.stringify(posts.here)})`,
+);
+check(posts.inside.length === 0, `and none of their posts stands in a building (${posts.inside.join('、') || 'none'})`);
+
+// ---- v24.37 the land of a district goes to the areas added with it: the anchors of 文山, 南港 and 北投 took a hundred
+// tiles of 士林, 大安, 信義 and 內湖, and in an old save streets taken back were occupied again
+const sets = await p.evaluate(() => {
+  const g = window.__game;
+  const ix = g.district.ix;
+  const S = g.sectors();
+  const first37 = S.names.indexOf('景美');
+  const pip = (x, z, r) => {
+    let c = false;
+    for (let a = 0, b = r.length - 1; a < r.length; b = a++)
+      if (r[a][1] > z !== r[b][1] > z && x < ((r[b][0] - r[a][0]) * (z - r[a][1])) / (r[b][1] - r[a][1]) + r[a][0])
+        c = !c;
+    return c;
+  };
+  let n = 0;
+  const wrong = [];
+  for (const k of Object.keys(ix.tiles)) {
+    const [tx, tz] = k.split('_').map(Number);
+    const x = (tx + 0.5) * ix.T,
+      z = (tz + 0.5) * ix.T;
+    if (x > -555 && x < 555 && z > -497 && z < 497) continue; // (the core box: the campaign's)
+    const ring = ix.boundary.findIndex(r => pip(x, z, r));
+    if (ring < 1) continue;
+    n++;
+    const i = g.sectorOf(x, z);
+    const ok = ring >= ix.districts.indexOf('文山區') ? i >= first37 : i >= S.campaign && i < first37;
+    if (!ok) wrong.push(`${k}:${S.names[i]}`);
+  }
+  return { n, first37, wrong: wrong.slice(0, 8), nw: wrong.length };
+});
+console.log('   sets', JSON.stringify(sets));
+check(
+  sets.n > 6000 && sets.first37 === 95 && sets.nw === 0,
+  `every tile of a district is in an area added with that district (${sets.n} tiles)`,
+);
+
 // ---- the metro: fifteen stations, every street exit of the new ones goes down and comes back up
-check(w.stations.length === 52, `fifty-two stations (${w.stations.length})`);
+check(w.stations.length === 73, `seventy-three stations (${w.stations.length})`);
 const ex = await p.evaluate(async () => {
   const g = window.__game;
   const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -207,9 +321,14 @@ const ex = await p.evaluate(async () => {
       g.tp(gt.exit[0], gt.exit[1]);
       g.metroUse();
       const u = [g.player.pos.x, g.player.pos.z];
-      await wait(120);
+      // (the interiors are hidden on the next frame: waited for, up to 1.5 s, rather than a fixed 120 ms)
+      let shown = 1;
+      for (let w = 0; w < 30 && shown; w++) {
+        await wait(50);
+        shown = g.metroShown().filter(Boolean).length;
+      }
       out.push({
-        shown: g.metroShown().filter(Boolean).length,
+        shown,
         st: sts[i].name + gt.no,
         clear,
         down: Math.hypot(d[0] - gt.inn[0], d[1] - gt.inn[1]) < 1,
@@ -220,7 +339,7 @@ const ex = await p.evaluate(async () => {
 });
 const badEx = ex.filter(e => !e.clear || !e.down || !e.up);
 check(
-  ex.length === 96 && !badEx.length,
+  ex.length === 138 && !badEx.length,
   `the ${ex.length} street exits of the new stations go down and come back up, none inside a building (${badEx.map(e => e.st).join(' ') || 'all good'})`,
 );
 // (every interior carries some twenty lights: left in the scene they add up, and the fifth station lost the tab)
@@ -248,8 +367,25 @@ const under = await p.evaluate(async () => {
 });
 console.log('   underground', JSON.stringify(under));
 await p.screenshot({ path: shot('v2433-station.png'), timeout: 120000 });
-check(under.shown === 1 && under.built >= 48, `down in a station only that one is drawn (${under.built} built)`);
+check(under.shown === 1 && under.built >= 69, `down in a station only that one is drawn (${under.built} built)`);
 check(under.ms < 250, `and a frame down there is not the 900 ms it was with three of them lit (${under.ms} ms)`);
+// v24.37 the paper map opened down there shows the street above the station (it showed nothing: the interiors are 7 km
+// north of the map), and the sign names the station
+const umap = await p.evaluate(async () => {
+  const g = window.__game,
+    m = g.map;
+  const st = g.metro()[12];
+  m.toggle(true);
+  await new Promise(r => setTimeout(r, 900));
+  const [cx, cz] = m.toWorld(innerWidth / 2, innerHeight / 2);
+  const off = Math.hypot(cx - st.ent[0], cz - st.ent[1]);
+  m.toggle(false);
+  await new Promise(r => setTimeout(r, 1200));
+  return { off: Math.round(off), street: document.getElementById('street')?.textContent || '', name: st.name };
+});
+console.log('   map underground', JSON.stringify(umap));
+check(umap.off < 30, `opened down in a station, the map shows the street above it (${umap.off} m from its exit)`);
+check(umap.street.includes(umap.name), `and the street sign names the station (${umap.street.trim()})`);
 await p.evaluate(async () => {
   const g = window.__game;
   const gt = g.metro()[12].gates[0];
@@ -277,8 +413,8 @@ const ride = await p.evaluate(async () => {
 await p.screenshot({ path: shot('v2433-ride.png'), timeout: 120000 });
 await p.evaluate(() => document.getElementById('ride')?.remove());
 check(
-  ride.n === 51 && ride.top >= 0 && ride.bottom <= ride.h,
-  `the ride menu lists the other fifty-one and fits the screen (${Math.round(ride.bottom - ride.top)} of ${ride.h} px)`,
+  ride.n === 72 && ride.top >= 0 && ride.bottom <= ride.h,
+  `the ride menu lists the other seventy-two and fits the screen (${Math.round(ride.bottom - ride.top)} of ${ride.h} px)`,
 );
 
 // ---- 基隆河 runs through 中山區: its banks are walls, and a bridge is mapped over it
@@ -295,7 +431,10 @@ const river = await p.evaluate(async () => {
   const area = r =>
     Math.abs(r.reduce((s, q, i) => s + q[0] * r[(i + 1) % r.length][1] - r[(i + 1) % r.length][0] * q[1], 0) / 2);
   const riv = ix.water.reduce((a, r) => (area(r) > area(a) ? r : a));
-  // from the land side of each long bank wall, straight at the water
+  // from the land side of each long bank wall, straight at the water (v24.37 of every river that runs through the city,
+  // 景美溪, 新店溪 above 景美 and 基隆河 at 汐止 as well, outside the districts too)
+  const big = ix.water.filter(r => area(r) > 20000);
+  const wetAt = (x, z) => big.find(r => pip(x, z, r));
   let tried = 0,
     wet = 0;
   for (const [ax, az, bx, bz] of ix.banks) {
@@ -305,12 +444,59 @@ const river = await p.evaluate(async () => {
       mz = (az + bz) / 2;
     let nx = -(bz - az) / L,
       nz = (bx - ax) / L;
-    if (!pip(mx + nx * 4, mz + nz * 4, riv)) ((nx = -nx), (nz = -nz));
-    if (!pip(mx + nx * 4, mz + nz * 4, riv) || pip(mx - nx * 5, mz - nz * 5, riv)) continue;
+    if (!wetAt(mx + nx * 4, mz + nz * 4)) ((nx = -nx), (nz = -nz));
+    const w = wetAt(mx + nx * 4, mz + nz * 4);
+    if (!w || wetAt(mx - nx * 5, mz - nz * 5)) continue;
+    // (from inside the world: outside it a body is put back on its edge, wherever that is)
+    const WB = g.worldB();
+    const sx = mx - nx * 5,
+      sz = mz - nz * 5;
+    if (sx < WB.minx + 1 || sx > WB.maxx - 1 || sz < WB.minz + 1 || sz > WB.maxz - 1) continue;
     tried++;
     const e = g.pushLine(mx - nx * 5, mz - nz * 5, mx + nx * 8, mz + nz * 8);
-    if (pip(e[0], e[1], riv)) wet++;
+    if (pip(e[0], e[1], w)) wet++;
   }
+  // v24.37 along the edge of the world where a river runs out of it (基隆河 at 汐止, its shore is outside the world)
+  const WB2 = g.worldB();
+  let edgeTried = 0,
+    edgeWet = 0;
+  for (const r of big)
+    for (let z = WB2.minz + 2; z < WB2.maxz - 2; z += 4) {
+      const x = WB2.maxx - 0.5;
+      if (!pip(x, z, r)) continue;
+      // from land just beside the water on the world's edge, along the edge into it
+      for (const dz of [-1, 1]) {
+        let lz = z;
+        for (let k = 0; k < 60 && pip(x, lz, r); k++) lz += dz * 2;
+        if (pip(x, lz, r) || wetAt(x, lz)) continue;
+        edgeTried++;
+        const e = g.pushLine(x, lz, x, lz - dz * 12);
+        if (pip(e[0], e[1], r)) edgeWet++;
+      }
+      break;
+    }
+  // v24.37 from 景美's riverside, out of the city where its boundary crosses the river, and into 景美溪
+  const j1 = g.pushLine(3190, 4150, 3110, 4195);
+  const j2 = g.pushLine(j1[0], j1[1], 3080, 4250);
+  const jingmei = !!wetAt(j2[0], j2[1]);
+  // the strips (the river on the city's boundary drawn as a band) of the new districts are where that river is:
+  // 新店溪 at 文山's north-west corner, 淡水河 at 關渡; 南港's edge is land and 基隆河
+  const sd = (q, a, b) => {
+    const dx = b[0] - a[0],
+      dz = b[1] - a[1],
+      l2 = dx * dx + dz * dz || 1;
+    const t = Math.max(0, Math.min(1, ((q[0] - a[0]) * dx + (q[1] - a[1]) * dz) / l2));
+    return Math.hypot(q[0] - a[0] - dx * t, q[1] - a[1] - dz * t);
+  };
+  const by = (q, r) => r.some((a, i) => sd(q, a, r[(i + 1) % r.length]) < 20);
+  const mids = ix.river.map(([ax, az, bx, bz]) => [(ax + bx) / 2, (az + bz) / 2]);
+  const ring = n => ix.boundary[ix.districts.indexOf(n)];
+  const strips = {
+    文山: mids.filter(q => by(q, ring('文山區'))).filter(q => !(q[0] < 3100 && q[1] < 4100)).length,
+    南港: mids.filter(q => by(q, ring('南港區'))).length,
+    北投: mids.filter(q => by(q, ring('北投區'))).filter(q => !(q[0] < -4000)).length,
+    關渡: mids.filter(q => by(q, ring('北投區'))).length,
+  };
   // and a bridge: a road that is flagged as one, with a point over the water
   let bridge = null;
   for (const k of Object.keys(ix.tiles)) {
@@ -322,14 +508,37 @@ const river = await p.evaluate(async () => {
       if (r.p.some(q => pip(q[0], q[1], riv))) bridge = { n: r.n, t: r.t };
     }
   }
-  return { area: Math.round(area(riv)), banks: ix.banks.length, tried, wet, bridge };
+  return {
+    area: Math.round(area(riv)),
+    banks: ix.banks.length,
+    tried,
+    wet,
+    bridge,
+    jingmei,
+    j2,
+    strips,
+    edgeTried,
+    edgeWet,
+  };
 });
 console.log('   river', JSON.stringify(river));
 check(
   river.area > 500000 && river.banks > 100,
   `the river is water (${river.area} m²) with banks (${river.banks} walls)`,
 );
-check(river.tried > 20 && river.wet === 0, `nobody walks into it from the bank (${river.tried} places tried)`);
+check(river.tried > 20 && river.wet === 0, `nobody walks into a river from its bank (${river.tried} places tried)`);
+check(
+  !river.jingmei,
+  `nor out of the city and into 景美溪 where the city's edge crosses it (stopped at ${river.j2.map(Math.round)})`,
+);
+check(
+  river.edgeTried > 0 && river.edgeWet === 0,
+  `nor along the edge of the world where 基隆河 runs out of it (${river.edgeTried} tried)`,
+);
+check(
+  river.strips.文山 === 0 && river.strips.南港 === 0 && river.strips.北投 === 0 && river.strips.關渡 > 3,
+  `the new districts' edge is a river band only along 新店溪 and at 關渡; ridges and 基隆河 are not (${JSON.stringify(river.strips)})`,
+);
 check(!!river.bridge, `a bridge is mapped over it (${river.bridge?.n || river.bridge?.t})`);
 
 // ---- v24.35 松山機場: the runway is paved and painted, nothing is planted or generated on the airfield, and a
@@ -515,12 +724,17 @@ const fog = await p.evaluate(() => {
     was: Math.round(49 * ocs * ocs),
     far: at(1460, -530),
   };
+  // v24.37 on foot (38 m around the player) in the middle of a cell of the city-wide grid (62 m): that cell is
+  // uncovered. Measured to the corners of the cells, as it was, nothing was.
+  const mid = [m.ox + (Math.floor((3000 - m.ox) / cs) + 0.5) * cs, m.oy + (Math.floor((-4000 - m.oy) / cs) + 0.5) * cs];
+  m.reveal(mid[0], mid[1]);
+  const foot = at(mid[0], mid[1]);
   // and one written by this version comes back as it was
   m.reveal(2000, -3000, 60);
   m.save();
   const kept = at(2000, -3000);
   m.load(JSON.parse(localStorage.getItem('defendtaipei-map-v2')));
-  return { ...old, now, kept, back: at(2000, -3000), still: at(-600, 1100) };
+  return { ...old, now, foot, kept, back: at(2000, -3000), still: at(-600, 1100) };
 });
 console.log('   fog', JSON.stringify(fog));
 check(fog.now, 'the map has uncovered where the player has just been, far outside 萬華');
@@ -529,6 +743,7 @@ check(
   fog.at === 255 && fog.far === 0 && Math.abs(fog.area - fog.was) < Math.max(fog.was * 0.35, fog.cell * 2.2),
   `the patch an older save had explored in 萬華 is where it was, and the size it was (${fog.area} m² for ${fog.was})`,
 );
+check(fog.foot === 255, 'a person on foot uncovers the cell of the map they stand in, in the middle of it too');
 check(
   fog.kept > 0 && fog.back === fog.kept && fog.still === 255,
   'and a map saved by this version comes back as it was',
@@ -536,6 +751,164 @@ check(
 await p.evaluate(() => window.__game.map.toggle(true));
 await p.waitForTimeout(2500);
 await p.screenshot({ path: shot('v2433-map.png'), timeout: 120000 });
+
+// ---- v24.37 the paper map close up: 28 km of city on one canvas is 9 m to the pixel, so past a certain zoom what is
+// in view is drawn again at the size of the screen — once for a view, not once a frame
+const near = await p.evaluate(async () => {
+  const g = window.__game,
+    m = g.map;
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  for (let i = 0; i < 120 && !m.extraB.length; i++) await wait(500);
+  await wait(1500);
+  m.fit();
+  await wait(600);
+  const d0 = m.nearStats.draws; // (it opened on the player, close enough to have been drawn already)
+  await wait(600);
+  const far = { s: m.k * m.zoom, drawn: m.nearStats.draws - d0 };
+  // in on 東區 (忠孝東路), to 0.8 px to the metre
+  const goto = (x, z, s) => {
+    m.zoom = s / m.k;
+    m.panX = innerWidth / 2 - m.wx(x) * m.zoom;
+    m.panY = innerHeight / 2 - m.wy(z) * m.zoom;
+    m.dirty = true;
+  };
+  m.revealRect(3400, -1100, 7400, 900); // (so that the screenshot shows the map, and not the fog over it)
+  goto(4400, -80, 0.8);
+  await wait(900);
+  const a = { ...m.nearStats };
+  await wait(900);
+  const same = m.nearStats.draws;
+  m.panX -= 60; // a small drag stays inside what was drawn
+  await wait(600);
+  const dragged = m.nearStats.draws;
+  m.panX -= innerWidth; // a long one does not
+  await wait(600);
+  const moved = m.nearStats.draws;
+  for (let i = 0; i < 40; i++) m.zoomAt(1.3, innerWidth / 2, innerHeight / 2);
+  await wait(600);
+  // the lines between areas: stretches of the bisectors of their anchors, none longer than an area is wide
+  const lines = m.secLines.map(q => Math.hypot(q[2] - q[0], q[3] - q[1]));
+  return {
+    far,
+    d0,
+    a,
+    same,
+    dragged,
+    moved,
+    closest: m.k * m.zoom,
+    k: m.k,
+    loaded: m.extraB.length,
+    lines: lines.length,
+    longest: Math.round(Math.max(...lines)),
+  };
+});
+console.log('   close up', JSON.stringify(near));
+await p.screenshot({ path: shot('v2437-map-near.png'), timeout: 120000 });
+check(
+  near.far.s < 0.3 && near.far.drawn === 0,
+  `the whole city in view is the paper alone (${near.far.s.toFixed(3)} px to the metre)`,
+);
+check(
+  near.a.draws === near.d0 + 1 && near.a.blds > 800 && near.a.streets > 100,
+  `zoomed in on 東區 the view is drawn again, sharp (${near.a.blds} footprints, ${near.a.streets} streets, ${near.a.ms} ms)`,
+);
+check(
+  near.same === near.a.draws && near.dragged === near.a.draws && near.moved === near.a.draws + 1,
+  'once for a view: not again each frame nor for a small drag, again when the view has left it',
+);
+check(near.closest > 1.5, `and the map goes in to ${near.closest.toFixed(2)} px to the metre however large it is`);
+check(
+  near.lines > 150 && near.longest < 9000,
+  `the areas are parted by lines (${near.lines}, the longest ${near.longest} m), not by darker cells of the tint`,
+);
+
+// ---- v24.37 the lines between areas end where the map does, and part the campaign's areas from the others where they
+// meet in 中正區; the main streets have their names between the whole city and close up; the close-up layer is drawn
+// again for a new pixel ratio, and is not drawn again while the zoom changes, only when it settles; the district index
+// is the one this build was made with
+const over = await p.evaluate(async () => {
+  const g = window.__game,
+    m = g.map,
+    ix = g.district.ix;
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const pip = (x, z, r) => {
+    let c = false;
+    for (let a = 0, b = r.length - 1; a < r.length; b = a++)
+      if (r[a][1] > z !== r[b][1] > z && x < ((r[b][0] - r[a][0]) * (z - r[a][1])) / (r[b][1] - r[a][1]) + r[a][0])
+        c = !c;
+    return c;
+  };
+  const inMap = (x, z) => ix.boundary.some(r => pip(x, z, r));
+  const L = m.secLines || [];
+  let outside = 0;
+  for (const [ax, az, bx, bz] of L) {
+    const l = Math.hypot(bx - ax, bz - az) || 1,
+      d = Math.min(2, l / 2);
+    const ux = (bx - ax) / l,
+      uz = (bz - az) / l;
+    if (
+      ![
+        [ax + ux * d, az + uz * d],
+        [bx - ux * d, bz - uz * d],
+        [(ax + bx) / 2, (az + bz) / 2],
+      ].every(q => inMap(q[0], q[1]))
+    )
+      outside++;
+  }
+  const core = L.filter(q => Math.abs(q[0] - 555) < 0.5 && Math.abs(q[2] - 555) < 0.5).reduce(
+    (s, q) => s + Math.abs(q[3] - q[1]),
+    0,
+  );
+  const goto = (x, z, s) => {
+    m.zoom = s / m.k;
+    m.panX = innerWidth / 2 - m.wx(x) * m.zoom;
+    m.panY = innerHeight / 2 - m.wy(z) * m.zoom;
+  };
+  m.toggle(true);
+  goto(3000, -500, 0.2);
+  await wait(600);
+  const mid = m.overStats.names;
+  goto(4400, -80, 0.8);
+  await wait(800);
+  const d0 = m.nearStats.draws;
+  m.cv.width = Math.round(innerWidth * 1.5);
+  m.cv.height = Math.round(innerHeight * 1.5);
+  await wait(500);
+  const dpr = { redrawn: m.nearStats.draws === d0 + 1, r: m.nearView.r };
+  m.resize();
+  await wait(500);
+  const d1 = m.nearStats.draws;
+  for (let i = 0; i < 6; i++) m.zoomAt(1.05, innerWidth / 2, innerHeight / 2);
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const during = m.nearStats.draws - d1;
+  await wait(600);
+  const after = m.nearStats.draws - d1;
+  return {
+    lines: L.length,
+    outside,
+    core: Math.round(core),
+    mid,
+    dpr,
+    during,
+    after,
+    stale: g.district.stale,
+    v: g.dataV(),
+  };
+});
+console.log('   over', JSON.stringify(over));
+await p.screenshot({ path: shot('v2437-map-lines.png'), timeout: 120000 });
+check(over.lines > 150 && over.outside === 0, `every line between areas lies in the map (${over.lines} lines)`);
+check(over.core > 600, `the campaign's areas are parted from the others along the core box in 中正區 (${over.core} m)`);
+check(over.mid > 5, `between the whole city and close up the main streets have their names (${over.mid} drawn)`);
+check(over.dpr.redrawn && Math.abs(over.dpr.r - 1.5) < 0.01, 'a new pixel ratio draws the close-up layer again for it');
+check(
+  over.during === 0 && over.after === 1,
+  `zooming, the close-up layer is drawn once, when the zoom settles (${over.during} while, ${over.after} after)`,
+);
+check(
+  over.stale === false && /^[0-9a-f]{12}$/.test(over.v),
+  `the district index is the one this build was made with (data ${over.v})`,
+);
 
 console.log('errors:', errs.length, JSON.stringify(errs.slice(0, 3)));
 check(errs.length === 0, 'no page errors');

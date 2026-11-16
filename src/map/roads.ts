@@ -6,6 +6,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { GLYPHS, GMAT, atlas } from './roadglyphs';
 import { PAVE, worldUV } from './paving';
 import { Forest } from './trees';
+import { dataUrl } from '../core/datav';
 import { clearRoadTiles, readRoadTiles, writeRoadTiles } from '../systems/save';
 type Seg = [number, number, number, number, number, string, number, string, number?, number?];
 type Node = [number, number, number, [number, number, number][], number?];
@@ -147,7 +148,7 @@ export class RoadTiles {
     this.state = readRoadTiles();
   }
   async init() {
-    const ix = await (await fetch(this.d.base + 'data/tiles/index.json')).json();
+    const ix = await (await fetch(dataUrl(this.d.base + 'data/tiles/index.json'))).json();
     this.size = ix.size;
     for (const k of ix.tiles) this.have.add(k);
   }
@@ -268,7 +269,7 @@ export class RoadTiles {
     try {
       let td = this.cache.get(k);
       if (!td) {
-        const response = await fetch(this.d.base + `data/tiles/${k}.json`);
+        const response = await fetch(dataUrl(this.d.base + `data/tiles/${k}.json`));
         if (!response.ok) throw new Error(`road tile request failed: ${response.status}`);
         td = await response.json();
       }
