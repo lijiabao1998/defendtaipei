@@ -1,6 +1,29 @@
 import { defineConfig, type Plugin } from 'vite';
 import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join, relative } from 'node:path';
+// v24.37 the version of the map data (src/core/datav.ts): a hash of every file under public/data (their paths and
+// bytes) for the URLs and the worker's cache, and one of the district index alone, which the game checks the index it
+// fetched against. Paths from this file, not from where the build was started.
+const DATA_DIR = fileURLToPath(new URL('./public/data/', import.meta.url));
+const hashOf = (files: string[]) => {
+  const h = createHash('sha1');
+  for (const f of files) h.update(relative(DATA_DIR, f).replace(/\\/g, '/') + '\0').update(readFileSync(f));
+  return h.digest('hex').slice(0, 12);
+};
+const walk = (d: string): string[] =>
+  readdirSync(d)
+    .sort()
+    .flatMap(n => (statSync(join(d, n)).isDirectory() ? walk(join(d, n)) : [join(d, n)]));
+const DATA_V = hashOf(walk(DATA_DIR));
+const DATA_INDEX = createHash('sha1')
+  .update(readFileSync(join(DATA_DIR, 'district/index.json')))
+  .digest('hex')
+  .slice(0, 12);
 // Writes dist/sw.js with a precache list + a cache version derived from the build output, so every deploy invalidates the old cache.
+// v24.37 data URLs (data/…) carry the data's version in their query and are matched with it: the district index and the
+// tiles on a district's edge keep their names when a release changes them, and were answered from the old cache.
 const sw = (): Plugin => ({
   name: 'dt-sw',
   apply: 'build',
@@ -10,7 +33,7 @@ const sw = (): Plugin => ({
       './',
       'index.html',
       'manifest.webmanifest',
-      'data/wanhua.json',
+      `data/wanhua.json?v=${DATA_V}`,
       'icons/icon-192.png',
       'icons/icon-512.png',
       ...files.filter(f => f !== 'index.html'),
@@ -19,12 +42,13 @@ const sw = (): Plugin => ({
     this.emitFile({
       type: 'asset',
       fileName: 'sw.js',
-      source: `const V='dt-${ver}',CORE=${JSON.stringify(core)};
+      source: `const V='dt-${ver}-${DATA_V}',CORE=${JSON.stringify(core)};
 self.addEventListener('install',e=>{e.waitUntil(caches.open(V).then(c=>c.addAll(CORE)).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k.startsWith('dt-')&&k!==V).map(k=>caches.delete(k)))).then(()=>self.clients.claim()))});
 self.addEventListener('fetch',e=>{const r=e.request;if(r.method!=='GET'||new URL(r.url).origin!==location.origin)return;
  if(r.mode==='navigate'){e.respondWith(fetch(r,{cache:'no-store'}).then(x=>{const y=x.clone();caches.open(V).then(c=>c.put('index.html',y));return x}).catch(()=>caches.match('index.html',{ignoreVary:true})));return}
- e.respondWith(caches.match(r,{ignoreVary:true,ignoreSearch:true}).then(h=>h||fetch(r).then(x=>{if(x.ok){const y=x.clone();caches.open(V).then(c=>c.put(r,y))}return x})))});
+ const d=new URL(r.url).pathname.includes('/data/');
+ e.respondWith(caches.match(r,{ignoreVary:true,ignoreSearch:!d}).then(h=>h||fetch(r).then(x=>{if(x.ok){const y=x.clone();caches.open(V).then(c=>c.put(r,y))}return x})))});
 `,
     });
   },
@@ -32,6 +56,7 @@ self.addEventListener('fetch',e=>{const r=e.request;if(r.method!=='GET'||new URL
 export default defineConfig({
   base: '/defendtaipei/',
   plugins: [sw()],
+  define: { __DT_DATA__: JSON.stringify(DATA_V), __DT_INDEX__: JSON.stringify(DATA_INDEX) },
   build: {
     chunkSizeWarningLimit: 1500,
     rollupOptions: { output: { manualChunks: id => (id.includes('node_modules/three/') ? 'three' : undefined) } },

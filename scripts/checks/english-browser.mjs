@@ -35,10 +35,11 @@ async function exercise(options, name) {
     if (message.type() === 'error') errors.push(`${name}: ${message.text()}`);
   });
   try {
-    // Hold the real map request so the loading layout is measured deterministically.
+    // Hold the real map request so the loading layout is measured deterministically. (v24.37 with its data version
+    // in the query: the pattern takes it)
     let releaseLoading;
     const loadingGate = new Promise(resolve => (releaseLoading = resolve));
-    await page.route('**/data/wanhua.json', async route => {
+    await page.route('**/data/wanhua.json*', async route => {
       await loadingGate;
       await route.continue();
     });

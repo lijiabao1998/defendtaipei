@@ -9,6 +9,7 @@ import { buildRedHouse, buildBopiliao, type WalkIn } from './landmarks';
 import * as THREE from 'three';
 import { chunkify } from '../core/chunk';
 import { compact, freeNow } from '../core/compact';
+import { DATA_INDEX, dataHash, dataUrl } from '../core/datav';
 /** v24.6 ?chunk=0 turns the tile chunking off (before / after comparisons) */
 const CHUNK = typeof location === 'undefined' || new URLSearchParams(location.search).get('chunk') !== '0';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -419,6 +420,10 @@ export class District {
   private egrid = new Map<string, DEnter[]>();
   private queue: string[] = [];
   private busy = false;
+  /** v24.37 the index is not the one this build was made with (an older service worker kept it) */
+  stale = false;
+  /** v24.37 tiles whose fetch failed, and when to ask for them again */
+  private retryAt = new Map<string, number>();
   constructor(private d: DistrictDeps) {
     this.ready = this.init();
     this.saved = readDistrictTiles();
@@ -429,7 +434,11 @@ export class District {
     writeDistrictTiles(this.saved);
   }
   private async init() {
-    this.ix = await (await fetch(this.d.base + 'data/district/index.json')).json();
+    // v24.37 with the data's version in the URL, and checked against the build's (core/datav.ts)
+    const buf = await (await fetch(dataUrl(this.d.base + 'data/district/index.json'))).arrayBuffer();
+    const h = await dataHash(buf);
+    this.stale = !!DATA_INDEX && !!h && h !== DATA_INDEX; // (no hash, as on a page not served over https: not stale)
+    this.ix = JSON.parse(new TextDecoder().decode(buf));
     const [x0, z0, x1, z1] = this.ix.bbox;
     // district ground (core ground sits on top, slightly higher)
     // v21.3 paved like the core (shared canvas, own repeat)
@@ -751,7 +760,7 @@ export class District {
       this.data.set(k, { b: this.extra?.(k) ?? [], r: [] });
       return this.data.get(k)!;
     }
-    const td: TileData = await (await fetch(this.d.base + `data/district/${k}.json`)).json();
+    const td: TileData = await (await fetch(dataUrl(this.d.base + `data/district/${k}.json`))).json();
     const ex = this.extra?.(k);
     if (ex?.length) td.b = td.b.concat(ex);
     this.data.set(k, td);
@@ -772,6 +781,7 @@ export class District {
     if (!this.ix) return;
     const T = this.ix.T;
     const want: [string, number][] = [];
+    const now = performance.now();
     const r = Math.ceil(LOAD_R / T);
     const tx = Math.floor(px / T),
       tz = Math.floor(pz / T);
@@ -780,7 +790,8 @@ export class District {
         const k = tx + i + '_' + (tz + j);
         if (!this.ix.tiles[k]) continue;
         const d = Math.hypot((tx + i + 0.5) * T - px, (tz + j + 0.5) * T - pz);
-        if (d < LOAD_R && !this.tiles.has(k) && !this.pending.has(k)) want.push([k, d]);
+        if (d < LOAD_R && !this.tiles.has(k) && !this.pending.has(k) && !((this.retryAt.get(k) ?? 0) > now))
+          want.push([k, d]);
       }
     want.sort((a, b) => a[1] - b[1]);
     this.queue = want.map(w => w[0]);
@@ -793,10 +804,17 @@ export class District {
       const k = this.queue.shift()!;
       this.busy = true;
       this.pending.add(k);
-      this.load(k).finally(() => {
-        this.pending.delete(k);
-        this.busy = false;
-      });
+      this.load(k)
+        .catch(e => {
+          // v24.37 a tile that could not be fetched (the network, a server under load) is asked for again in two
+          // seconds; it used to be an uncaught error, and asked for again on the very next frame
+          console.warn('district tile', k, e);
+          this.retryAt.set(k, performance.now() + 2000);
+        })
+        .finally(() => {
+          this.pending.delete(k);
+          this.busy = false;
+        });
     }
   }
   private async load(k: string) {

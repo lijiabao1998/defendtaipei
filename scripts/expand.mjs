@@ -28,7 +28,7 @@
 // Usage: node scripts/expand.mjs --city raw-city.json [--water raw-water.json] [--wood raw-wood.json] raw-中正區.json …
 // Same local projection as public/data/wanhua.json. Data © OpenStreetMap contributors, ODbL.
 import fs from 'fs';
-import { shutIn } from './shutin.mjs';
+import { shutIn, opensOnto } from './shutin.mjs';
 const T = 200;
 const args = process.argv.slice(2);
 const ci = args.indexOf('--city');
@@ -111,6 +111,8 @@ const ix = JSON.parse(fs.readFileSync(`${DD}/index.json`, 'utf8'));
 ix.districts ||= ['萬華區'];
 const paper = JSON.parse(fs.readFileSync(`${DD}/map.json`, 'utf8'));
 const tiles = new Map(); // key -> { b, r, nb0, nr0 } (existing ones are loaded, and only ever appended to)
+/** v24.37 the tiles of the map before this run (a tile with nothing but woods in it is one of them: it grows) */
+const had0 = new Set(Object.keys(ix.tiles));
 for (const k of Object.keys(ix.tiles)) {
   const t = JSON.parse(fs.readFileSync(`${DD}/${k}.json`, 'utf8'));
   tiles.set(k, { ...t, nb0: t.b.length, nr0: t.r.length });
@@ -241,28 +243,13 @@ if (waterFile)
         wetRings.push({ r, box: boxOf(r) });
       }
   }
-/** the rings that are the river on the city's boundary: the ones a good length of that boundary lies in (基隆河
- * is crossed by it for a few metres where it enters the city: that does not make it one). Those are drawn as strips
- * along the boundary (ix.river), by the districts they bound; the others are rivers that run through. */
+/** the rings that are the river on the city's boundary as the map already draws it: the ones the strips of the
+ * districts in the map (ix.river: 淡水河, 新店溪) lie in. A new district whose edge of the city runs in one of them
+ * goes on with strips. Every other water is a river that runs through, even where the city's boundary follows it
+ * for a while (基隆河 between 南港區 and 汐止, 新店溪 and 景美溪 along 文山區): it is drawn as it is mapped, with banks. */
 const edgeRiver = new Set();
 if (waterFile) {
   const edges = ix.river.map(([ax, az, bx, bz]) => [(ax + bx) / 2, (az + bz) / 2, Math.hypot(bx - ax, bz - az)]);
-  for (const file of args) {
-    const rel = JSON.parse(fs.readFileSync(file, 'utf8')).elements.find(
-      e => e.type === 'relation' && e.tags?.boundary === 'administrative',
-    );
-    if (ix.districts.includes(rel.tags.name)) continue;
-    for (const m of rel.members)
-      if (m.role === 'outer' && m.geometry && cityWays.has(m.ref)) {
-        const g = m.geometry.map(P);
-        for (let i = 0; i < g.length - 1; i++)
-          edges.push([
-            (g[i][0] + g[i + 1][0]) / 2,
-            (g[i][1] + g[i + 1][1]) / 2,
-            Math.hypot(g[i + 1][0] - g[i][0], g[i + 1][1] - g[i][1]),
-          ]);
-      }
-  }
   for (const w of wetRings) {
     let len = 0;
     for (const q of edges)
@@ -275,6 +262,8 @@ const inWet = (x, z) =>
   wetRings.some(
     w => edgeRiver.has(w.r) && x > w.box[0] && x < w.box[2] && z > w.box[1] && z < w.box[3] && pip([x, z], w.r),
   );
+const inAnyWet = (x, z) =>
+  wetRings.some(w => x > w.box[0] && x < w.box[2] && z > w.box[1] && z < w.box[3] && pip([x, z], w.r));
 if (waterFile && coming.length) {
   // the part of them that lies over the districts (a river goes on for kilometres either way). The box grows with
   // every run; what was cut to the smaller box of an earlier run is taken out and cut again.
@@ -681,7 +670,9 @@ for (const file of args) {
         if (!cityLines.some(l => l.some((q, j) => j && segDist(mx, mz, l[j - 1], q) < 8))) continue;
         // (with the water at hand: only where the boundary runs in it. The rest is a ridge, and stays land)
         if (waterFile && !inWet(mx, mz)) {
-          st.ridge = (st.ridge || 0) + Math.round(L);
+          // (v24.37 in the water of a river that runs through it is river, drawn as mapped with its banks: not ridge)
+          if (inAnyWet(mx, mz)) st.riverEdge = (st.riverEdge || 0) + Math.round(L);
+          else st.ridge = (st.ridge || 0) + Math.round(L);
           continue;
         }
         let nx = (c[1] - a[1]) / L,
@@ -859,17 +850,39 @@ if (woodFile) {
 // building's wall, and the wings are in the next tile, where the game does not look for a wall to go through. In the
 // game it would be a box nobody can enter. Only what this run added is looked at, and only that can go; taking one
 // away shuts nobody else in.
+// v24.37 all of them are found before any is taken out (what was reported depended on the order of the tiles), and one
+// stays when taking it out would leave a neighbour with its door onto the ground it stood on, a hole nobody can reach
+// (shutin.mjs opensOnto; it is listed, to be looked at).
 {
   const get = k => tiles.get(k);
-  const gone = [];
+  const out = new Map();
   for (const [k, t] of tiles) {
     if (t.b.length === t.nb0) continue;
-    const out = shutIn(get, k).filter(bi => bi >= t.nb0);
-    if (!out.length) continue;
-    for (const bi of out) gone.push(cen(t.b[bi].p).map(Math.round).join(','));
-    t.b = t.b.filter((_, bi) => !out.includes(bi));
+    const bis = shutIn(get, k).filter(bi => bi >= t.nb0);
+    if (bis.length) out.set(k, bis);
+  }
+  const gone = [],
+    kept = [];
+  for (const [k, bis] of out)
+    for (const bi of [...bis]) {
+      const R = tiles.get(k).b[bi].p;
+      const [tx, tz] = k.split('_').map(Number);
+      const opened = [];
+      for (let i = -1; i <= 1; i++)
+        for (let j = -1; j <= 1; j++) {
+          const n = tx + i + '_' + (tz + j);
+          if (tiles.has(n)) opened.push(...opensOnto(get, n, R).map(q => n + '#' + q));
+        }
+      const at = cen(R).map(Math.round).join(',');
+      if (opened.length) (kept.push(`${at} (${opened.join(' ')})`), bis.splice(bis.indexOf(bi), 1));
+      else gone.push(at);
+    }
+  for (const [k, bis] of out) {
+    const t = tiles.get(k);
+    t.b = t.b.filter((_, bi) => !bis.includes(bi));
   }
   console.log('shut in, left out:', gone.length, gone.join('  '));
+  if (kept.length) console.log('shut in, kept (a neighbour would open onto the hole):', kept.join('  '));
 }
 
 // ---------------------------------------------------------------- write the district tiles, the index, the paper map
@@ -877,7 +890,7 @@ let wrote = 0,
   grew = 0;
 for (const [k, t] of tiles) {
   if (t.b.length === t.nb0 && t.r.length === t.nr0 && !t.wNew) continue;
-  if (t.b.length !== t.nb0 || t.r.length !== t.nr0) t.nb0 || t.nr0 ? grew++ : wrote++;
+  if (t.b.length !== t.nb0 || t.r.length !== t.nr0) had0.has(k) ? grew++ : wrote++;
   fs.writeFileSync(`${DD}/${k}.json`, JSON.stringify(t.w ? { b: t.b, r: t.r, w: t.w } : { b: t.b, r: t.r }));
   ix.tiles[k] = [t.b.length, t.r.length];
 }
@@ -914,7 +927,9 @@ if (rivers.length) {
     );
   const under = (x, z) =>
     (BG2.get(Math.floor(x / G) + ',' + Math.floor(z / G)) || []).some(([a, b, w]) => segDist(x, z, a, b) < w + 2.5);
-  const inAny = (x, z) => ix.boundary.some(r => pip([x, z], r));
+  // v24.37 the whole shore, outside the districts too: where the city's boundary crosses a river or runs in it (景美溪
+  // at 景美, 新店溪 along 文山, 基隆河 at 汐止) the water reached the edge of the city with no wall, and one could walk out
+  // of the city and into the river, and along it back in on the water
   ix.banks ||= [];
   let nb = 0;
   for (const ring of rivers)
@@ -928,7 +943,7 @@ if (rivers.length) {
       for (let k = 0; k <= n; k++) {
         const x = a[0] + ((b[0] - a[0]) * k) / n,
           z = a[1] + ((b[1] - a[1]) * k) / n;
-        const wall = !under(x, z) && inAny(x, z);
+        const wall = !under(x, z);
         if (wall) ((run ||= [x, z, x, z]), ((run[2] = x), (run[3] = z)));
         if ((!wall || k === n) && run) {
           if (Math.hypot(run[2] - run[0], run[3] - run[1]) > 0.5)
@@ -937,6 +952,50 @@ if (rivers.length) {
         }
       }
     }
+  // v24.37 and the edge of the world where a river runs out of it (基隆河 at 汐止): its shore is outside the world, and
+  // the game keeps a body inside the world's box, so along the box's edge one walked from the land onto the water
+  const [wx0, wz0, wx1, wz1] = ix.bbox;
+  for (const ring of rivers) {
+    const rb = boxOf(ring);
+    for (const [ax, az, bx, bz] of [
+      [wx0, wz0, wx1, wz0],
+      [wx1, wz0, wx1, wz1],
+      [wx1, wz1, wx0, wz1],
+      [wx0, wz1, wx0, wz0],
+    ]) {
+      // (only the stretch of the edge in the box of the river)
+      const t0 = Math.max(
+        0,
+        Math.min(
+          az === bz ? (rb[0] - ax) / (bx - ax) : (rb[1] - az) / (bz - az),
+          az === bz ? (rb[2] - ax) / (bx - ax) : (rb[3] - az) / (bz - az),
+        ),
+      );
+      const t1 = Math.min(
+        1,
+        Math.max(
+          az === bz ? (rb[0] - ax) / (bx - ax) : (rb[1] - az) / (bz - az),
+          az === bz ? (rb[2] - ax) / (bx - ax) : (rb[3] - az) / (bz - az),
+        ),
+      );
+      if (t1 <= t0 || (az === bz ? az < rb[1] || az > rb[3] : ax < rb[0] || ax > rb[2])) continue;
+      const L = Math.hypot(bx - ax, bz - az) * (t1 - t0);
+      const n = Math.max(1, Math.ceil(L / 2));
+      let run = null;
+      for (let k = 0; k <= n; k++) {
+        const t = t0 + ((t1 - t0) * k) / n;
+        const x = ax + (bx - ax) * t,
+          z = az + (bz - az) * t;
+        const wall = pip([x, z], ring) && !under(x, z);
+        if (wall) ((run ||= [x, z, x, z]), ((run[2] = x), (run[3] = z)));
+        if ((!wall || k === n) && run) {
+          if (Math.hypot(run[2] - run[0], run[3] - run[1]) > 0.5)
+            (ix.banks.push(run.map(v => Math.round(v * 10) / 10)), nb++);
+          run = null;
+        }
+      }
+    }
+  }
   console.log('bank walls:', nb, 'bridge segments:', bridges.length);
 }
 fs.writeFileSync(`${DD}/index.json`, JSON.stringify(ix));

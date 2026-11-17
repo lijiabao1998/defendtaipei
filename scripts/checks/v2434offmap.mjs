@@ -51,7 +51,7 @@ check(
   down.pos[1] < down.B.minz - 2500 && down.shown === 1,
   `the station is far outside the map (z ${Math.round(down.pos[1])}, the map ends at ${down.B.minz})`,
 );
-check(down.ov === 1 && Math.abs(down.p[1] - down.pos[1]) < 0.01, 'the save says which layout it was made in');
+check(down.ov === 2 && Math.abs(down.p[1] - down.pos[1]) < 0.01, 'the save says which layout it was made in');
 
 const back = async label => {
   await p.evaluate(() => sessionStorage.setItem('dt.autoload', '1'));
@@ -96,13 +96,66 @@ await p.evaluate(dz => {
   delete sv.ov;
   sv.p[1] = -7000 + dz;
   localStorage.setItem('defendtaipei-save-v1', JSON.stringify(sv));
-}, down.pos[1] + 20000);
+}, down.pos[1] + 26000);
 const o = await back('an older save');
 check(
   Math.hypot(o.pos[0] - down.pos[0], o.pos[1] - down.pos[1]) < 1.5,
   'a save made when the stations were at z = -7000 comes back in the same station',
 );
 check(o.shown.length === 1 && o.shown[0] === down.i, 'with the station around it');
+
+// 3) v24.37 a save of v24.34 – v24.36: marked `ov: 1`, the stations were at z = -20000
+await p.goto(url + 'manifest.webmanifest');
+await p.evaluate(dz => {
+  const sv = JSON.parse(localStorage.getItem('defendtaipei-save-v1'));
+  sv.ov = 1;
+  sv.p[1] = -20000 + dz;
+  localStorage.setItem('defendtaipei-save-v1', JSON.stringify(sv));
+}, down.pos[1] + 26000);
+const o1 = await back('a save of v24.34');
+check(
+  Math.hypot(o1.pos[0] - down.pos[0], o1.pos[1] - down.pos[1]) < 1.5 && o1.shown.length === 1 && o1.shown[0] === down.i,
+  'a save made when the stations were at z = -20000 comes back in the same station too',
+);
+
+// 4) v24.37 a save of v24.37 that an older version opened and saved again: marked `ov: 1`, its point where v24.37 has
+// the stations. It stays there (it was moved 6 km on, into the dark)
+await p.goto(url + 'manifest.webmanifest');
+await p.evaluate(dz => {
+  const sv = JSON.parse(localStorage.getItem('defendtaipei-save-v1'));
+  sv.ov = 1;
+  sv.p[1] = -26000 + dz;
+  localStorage.setItem('defendtaipei-save-v1', JSON.stringify(sv));
+}, down.pos[1] + 26000);
+const o2 = await back('a v24.37 save saved again by v24.36');
+check(
+  Math.hypot(o2.pos[0] - down.pos[0], o2.pos[1] - down.pos[1]) < 1.5 && o2.shown.length === 1 && o2.shown[0] === down.i,
+  'a save of this version that an older one saved again stays in its station',
+);
+
+// 5) v24.37 what else an old save holds off the map moves with it: a rain bucket left on a roof (the floors were at
+// x = 20000), a crate left in a station, where the crowd of an area taken back down there stood
+await p.goto(url + 'manifest.webmanifest');
+await p.evaluate(dz => {
+  const sv = JSON.parse(localStorage.getItem('defendtaipei-save-v1'));
+  sv.ov = 1;
+  sv.p[1] = -20000 + dz;
+  sv.conts.push(['pb9001', { rainwater: 3 }, [20007, 3]], ['zz9002', { water: 2 }, [-1100, -20000 + 5]]);
+  sv.surv = { ...(sv.surv || {}), libAt: { 20: [-1100, -20000 + 5] } };
+  localStorage.setItem('defendtaipei-save-v1', JSON.stringify(sv));
+}, down.pos[1] + 26000);
+await back('a save of v24.36 with things off the map');
+const moved = await p.evaluate(() => {
+  const g = window.__game;
+  return { bucket: g.cont('pb9001'), crate: g.cont('zz9002'), lib: g.libAt() };
+});
+console.log('   moved', JSON.stringify(moved));
+check(
+  !!moved.bucket && Math.abs(moved.bucket.p[0] - 24007) < 0.01 && moved.bucket.items.rainwater === 3,
+  'a rain bucket left on a roof is on the roof where the floors are now',
+);
+check(!!moved.crate && Math.abs(moved.crate.p[1] - -25995) < 0.01, 'a crate left in a station is in that station');
+check(!!moved.lib && Math.abs(moved.lib[20][1] - -25995) < 0.01, "and so is where an area's crowd stood");
 
 // and back up to the street it went down from
 const up = await p.evaluate(async i => {
