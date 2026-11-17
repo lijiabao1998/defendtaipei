@@ -219,7 +219,8 @@ export class FPV {
   }
   launch(onEnd: (why: string) => void) {
     const P = this.d.player();
-    this.pos.set(P.x, 1.6, P.z);
+    // (v24.38 from where the player stands: on a roof, the roof's height)
+    this.pos.set(P.x, (P.y || 0) + 1.6, P.z);
     this.vel.set(0, 0, 0);
     this.w.set(0, 0, 0);
     this.q.setFromEuler(new THREE.Euler(0, Math.PI * 0.75, 0, 'YXZ'));
@@ -462,9 +463,24 @@ export class FPV {
     } else this.turtleT = 0;
     // signal: 5.8 GHz free-space path loss + building blockage + jammers + fast fading → RSSI dBm
     const P = this.d.player();
-    const dist = Math.max(1, Math.hypot(this.pos.x - P.x, this.pos.z - P.z, this.pos.y - 1.5));
+    // (v24.38 from up on a roof the pilot stands P.y up: what blocks the link is what rises above the line from them to
+    // the drone, sampled along it. Their own roof is under it, other buildings still count. In the street, the walls)
+    const oy = (P.y || 0) + 1.5;
+    const dist = Math.max(1, Math.hypot(this.pos.x - P.x, this.pos.z - P.z, this.pos.y - oy));
     let rssi = 28 - (20 * Math.log10(dist) + 20 * Math.log10(5800) - 27.55);
-    if (this.pos.y < 28 && !this.d.los([P.x, P.z], [this.pos.x, this.pos.z])) rssi -= 22;
+    let blocked = false;
+    if (this.pos.y < 28) {
+      if (!(P.y > 0)) blocked = !this.d.los([P.x, P.z], [this.pos.x, this.pos.z]);
+      else {
+        const n = Math.min(200, Math.ceil(Math.hypot(this.pos.x - P.x, this.pos.z - P.z) / 3));
+        for (let i = 1; i < n && !blocked; i++) {
+          const t = i / n;
+          const h = this.d.surf(P.x + (this.pos.x - P.x) * t, P.z + (this.pos.z - P.z) * t);
+          blocked = h > oy + (this.pos.y - oy) * t;
+        }
+      }
+    }
+    if (blocked) rssi -= 22;
     for (const j of this.d.jammers()) {
       const dj = Math.hypot(this.pos.x - j[0], this.pos.z - j[1]);
       rssi -= THREE.MathUtils.clamp(40 - dj * 0.45, 0, 40);

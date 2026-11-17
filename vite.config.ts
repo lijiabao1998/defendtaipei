@@ -16,15 +16,19 @@ const walk = (d: string): string[] =>
   readdirSync(d)
     .sort()
     .flatMap(n => (statSync(join(d, n)).isDirectory() ? walk(join(d, n)) : [join(d, n)]));
-const DATA_V = hashOf(walk(DATA_DIR));
-const DATA_INDEX = createHash('sha1')
-  .update(readFileSync(join(DATA_DIR, 'district/index.json')))
-  .digest('hex')
-  .slice(0, 12);
+// (v24.38 only when building: read on every start of `vite` and `vite preview` too, the 14,000 files made them slow to
+// come up. In development the game runs without them, as the unit checks do: no version in the URLs, nothing stale)
+const stamps = () => ({
+  v: hashOf(walk(DATA_DIR)),
+  i: createHash('sha1')
+    .update(readFileSync(join(DATA_DIR, 'district/index.json')))
+    .digest('hex')
+    .slice(0, 12),
+});
 // Writes dist/sw.js with a precache list + a cache version derived from the build output, so every deploy invalidates the old cache.
 // v24.37 data URLs (data/…) carry the data's version in their query and are matched with it: the district index and the
 // tiles on a district's edge keep their names when a release changes them, and were answered from the old cache.
-const sw = (): Plugin => ({
+const sw = (DATA_V: string): Plugin => ({
   name: 'dt-sw',
   apply: 'build',
   generateBundle(_o, bundle) {
@@ -53,12 +57,15 @@ self.addEventListener('fetch',e=>{const r=e.request;if(r.method!=='GET'||new URL
     });
   },
 });
-export default defineConfig({
-  base: '/defendtaipei/',
-  plugins: [sw()],
-  define: { __DT_DATA__: JSON.stringify(DATA_V), __DT_INDEX__: JSON.stringify(DATA_INDEX) },
-  build: {
-    chunkSizeWarningLimit: 1500,
-    rollupOptions: { output: { manualChunks: id => (id.includes('node_modules/three/') ? 'three' : undefined) } },
-  },
+export default defineConfig(({ command }) => {
+  const S = command === 'build' ? stamps() : { v: '', i: '' };
+  return {
+    base: '/defendtaipei/',
+    plugins: [sw(S.v)],
+    define: { __DT_DATA__: JSON.stringify(S.v), __DT_INDEX__: JSON.stringify(S.i) },
+    build: {
+      chunkSizeWarningLimit: 1500,
+      rollupOptions: { output: { manualChunks: id => (id.includes('node_modules/three/') ? 'three' : undefined) } },
+    },
+  };
 });

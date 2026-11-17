@@ -14,6 +14,8 @@ export class Recon {
       /** v22.11 seconds of exposure before a spot, and re-spot cooldown (night: faster) */
       spotTime?: () => number;
       spotCd?: () => number;
+      /** v24.38 not heard (the player is down in a station) */
+      muted?: () => boolean;
     },
     centres: V2[],
   ) {
@@ -95,7 +97,8 @@ export class Recon {
         o.start();
         this.audio = { ctx, g, o };
       }
-      this.audio.g.gain.setTargetAtTime(near < 70 ? (1 - near / 70) * 0.05 : 0, this.audio.ctx.currentTime, 0.2);
+      const hear = near < 70 && !this.deps.muted?.();
+      this.audio.g.gain.setTargetAtTime(hear ? (1 - near / 70) * 0.05 : 0, this.audio.ctx.currentTime, 0.2);
       this.audio.o.frequency.value = 220 + Math.sin(t * 3) * 12;
     } catch {
       /* audio blocked */

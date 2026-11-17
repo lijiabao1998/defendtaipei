@@ -133,26 +133,34 @@ check(
   'a save of this version that an older one saved again stays in its station',
 );
 
-// 5) v24.37 what else an old save holds off the map moves with it: a rain bucket left on a roof (the floors were at
-// x = 20000), a crate left in a station, where the crowd of an area taken back down there stood
+// 5) v24.37 what else an old save holds off the map moves with it: a crate left in a station, where the crowd of an
+// area taken back down there stood. A rain bucket left on a roof (the floors were at x = 20000) moved with the floors;
+// v24.38 puts it back in the pack with what it caught (every building's roof is built in that one place)
 await p.goto(url + 'manifest.webmanifest');
-await p.evaluate(dz => {
+const inv0 = await p.evaluate(dz => {
   const sv = JSON.parse(localStorage.getItem('defendtaipei-save-v1'));
+  const inv0 = { bucket: sv.inv.bucket || 0, rainwater: sv.inv.rainwater || 0 };
   sv.ov = 1;
   sv.p[1] = -20000 + dz;
   sv.conts.push(['pb9001', { rainwater: 3 }, [20007, 3]], ['zz9002', { water: 2 }, [-1100, -20000 + 5]]);
   sv.surv = { ...(sv.surv || {}), libAt: { 20: [-1100, -20000 + 5] } };
   localStorage.setItem('defendtaipei-save-v1', JSON.stringify(sv));
+  return inv0;
 }, down.pos[1] + 26000);
 await back('a save of v24.36 with things off the map');
 const moved = await p.evaluate(() => {
   const g = window.__game;
-  return { bucket: g.cont('pb9001'), crate: g.cont('zz9002'), lib: g.libAt() };
+  return {
+    bucket: g.cont('pb9001'),
+    crate: g.cont('zz9002'),
+    lib: g.libAt(),
+    inv: { bucket: g.player.inv.bucket || 0, rainwater: g.player.inv.rainwater || 0 },
+  };
 });
-console.log('   moved', JSON.stringify(moved));
+console.log('   moved', JSON.stringify({ ...moved, inv0 }));
 check(
-  !!moved.bucket && Math.abs(moved.bucket.p[0] - 24007) < 0.01 && moved.bucket.items.rainwater === 3,
-  'a rain bucket left on a roof is on the roof where the floors are now',
+  !moved.bucket && moved.inv.bucket === inv0.bucket + 1 && moved.inv.rainwater === inv0.rainwater + 3,
+  'a rain bucket left on a roof is back in the pack, with its rainwater',
 );
 check(!!moved.crate && Math.abs(moved.crate.p[1] - -25995) < 0.01, 'a crate left in a station is in that station');
 check(!!moved.lib && Math.abs(moved.lib[20][1] - -25995) < 0.01, "and so is where an area's crowd stood");
