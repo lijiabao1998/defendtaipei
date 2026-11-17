@@ -780,6 +780,19 @@ const realX = () => (up && REAL_UP ? player.pos.x - up.off[0] : player.pos.x);
 const realZ = () => (up && REAL_UP ? player.pos.z - up.off[1] : player.pos.z);
 const realY = () => (roofB ? roofB.h : up && REAL_UP ? up.fy : 0);
 const realPos = new THREE.Vector3();
+/**
+ * v24.38 where the player is for what flies over the city (drones, helicopters, the FPV, the JSDF): the real place
+ * upstairs (the floor lives off-map), and down in a station the street exit above it. These were given player.pos,
+ * which upstairs and underground is far off the map: the drones drifted out of the city, a helicopter hunting the
+ * player gave up when they went up to a roof.
+ */
+function skyPos(v: THREE.Vector3) {
+  if (inMetro(player.pos.z) && metro.length) {
+    const [x, z] = streetPos();
+    return v.set(x, 0, z);
+  }
+  return v.set(realX(), realY(), realZ());
+}
 /** v24.32 seconds since the player last fired down at the street: the muzzle flash gives the window away */
 let upFireT = 0;
 /** the last round fired down at the street (checks) */
@@ -920,6 +933,11 @@ const floorZh = (f: number) =>
     : (['', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '十一', '十二', '十三', '十四'][f] || f) + '樓';
 /** where the player is on the map (the stairwell while upstairs) */
 const mapPos = (): V2 => (up ? up.anchor : [player.pos.x, player.pos.z]);
+/**
+ * v24.38 where the player is for what lands or goes off near them: upstairs the place they really stand on that floor
+ * or roof (with ?fakeup=1 the stairwell, as mapPos); in the street and in a station, where they are
+ */
+const nearPos = (): V2 => (up && REAL_UP ? [realX(), realZ()] : mapPos());
 // v23.9 20 m bucket grid over the core footprints (rebuilt when blds grows), bldAt is called a lot at boot
 const BG = 20;
 let bgN = -1;
@@ -1256,12 +1274,15 @@ const blastFx = new BlastFX(scene, SET.quality, {
   wind: () => (raining() ? [2.2, 0.9] : [0.9, 0.35]),
 });
 setBoomFx((p, big) => {
-  // upstairs you are on another part of the map: hear it from the foot of the stairs
-  const q = mapPos();
+  // upstairs you are on another part of the map: hear it from where you really stand (v24.38, it was the foot of the
+  // stairs). Down in a station a blast in the street is heard from the exit, through the ground
+  // (a blast in the space where the floors are built, the player's own grenade up there, from where they are in it)
+  const above = inMetro(player.pos.z) && !inMetro(p.z);
+  const q: V2 = above ? streetPos() : UP.isUp(p.x) ? [player.pos.x, player.pos.z] : nearPos();
   const d = Math.hypot(q[0] - p.x, q[1] - p.z);
   blastFx.explode(p, big);
   blastFx.kick(d, big);
-  AU.shellBoom(d, upIn() || indoorAt(player.pos.x, player.pos.z), big);
+  AU.shellBoom(d, upIn() || indoorAt(player.pos.x, player.pos.z) || above, big);
 });
 /** shell damage factor at distance d: full lethal core, then quadratic falloff to the wounding radius */
 function shellDmg(d: number) {
@@ -1276,12 +1297,16 @@ function blast(p: THREE.Vector3, fromAbove: boolean) {
   noise(p.x, p.z, 45);
   for (const s of sols) if (s.state !== 'dead' && Math.hypot(s.pos.x - p.x, s.pos.z - p.z) < 6) damageSol(s, 220, true);
   if (armor) armor.hit(p.x, p.z, fromAbove ? 160 : 55, true);
-  const dp = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
+  // (v24.38 upstairs from where the player really stands, and how far above or below it: an FPV flown from a roof
+  // that crashes on it next to them; a bomb in the street under the roof does not reach them)
+  const dy = up && REAL_UP ? realY() + 1 - p.y : 0;
+  const dp = Math.hypot(realX() - p.x, realZ() - p.z, dy);
   if (dp < 6) {
     player.hp -= 45 * (1 - dp / 6);
     player.rig.hurtT = 0.35;
   }
 }
+const fpvP = new THREE.Vector3();
 async function launchFPV() {
   const { FPV } = await import('../systems/fpv');
   fpv =
@@ -1289,7 +1314,7 @@ async function launchFPV() {
     new FPV({
       scene,
       renderer,
-      player: () => player.pos,
+      player: () => skyPos(fpvP),
       mobile: MOBILE,
       surf: (x, z) => bldAt(x, z)?.h ?? 0,
       wind: () => (raining() ? 2.2 : 0.8),
@@ -1313,14 +1338,16 @@ async function launchFPV() {
 function setupRecon(c: V2) {
   const cs: V2[] = checkpoints.slice(0, 2).map(q => [q[0], q[1]] as V2);
   while (cs.length < 2) cs.push([c[0] + 60 * (cs.length ? 1 : -1), c[1] + 40]);
+  const reconP = new THREE.Vector3();
   recon = new Recon(
     scene,
     {
-      player: () => player.pos,
+      player: () => skyPos(reconP),
       log,
       hidden: () => {
         const P = player.pos;
         return (
+          inMetro(P.z) || // (v24.38 down in a station nothing in the sky sees you)
           indoorAt(P.x, P.z) ||
           [
             [1.6, 0],
@@ -1330,6 +1357,7 @@ function setupRecon(c: V2) {
           ].some(([dx, dz]) => bldAt(P.x + dx, P.z + dz))
         );
       },
+      muted: () => inMetro(player.pos.z), // (v24.38 it circles over the station's exit then)
       spotTime: () => (isNight() ? 1.5 : 2.5),
       spotCd: () => (isNight() ? 40 : 70),
       spotted: p => {
@@ -1368,7 +1396,8 @@ function updateShells(dt: number) {
     s.t -= dt;
     if (!s.wh && s.t < 1.6) {
       s.wh = true;
-      AU.whistle(Math.hypot(player.pos.x - s.p[0], player.pos.z - s.p[1]), Math.max(0.3, s.t));
+      const np = nearPos();
+      AU.whistle(Math.hypot(np[0] - s.p[0], np[1] - s.p[1]), Math.max(0.3, s.t));
     }
     if (s.t > 0) continue;
     shells.splice(i, 1);
@@ -1386,8 +1415,11 @@ function updateShells(dt: number) {
       const d = Math.hypot(o.pos.x - p.x, o.pos.z - p.z);
       if (d < wound) damageSol(o, d < core ? 300 : dmgAt(d) * 1.5, true);
     }
-    // on an upper floor you are in the building that stands at the foot of the stairs
-    const mp = mapPos();
+    // v24.38 down in a station the shells fall in the street above: nothing reaches you
+    if (inMetro(player.pos.z)) continue;
+    // on an upper floor or a roof, from where you really stand in that building (v24.38: the drones and helicopters
+    // aim there now; it was the foot of the stairs, 20 m off on a big roof)
+    const mp = nearPos();
     const dp = Math.hypot(mp[0] - p.x, mp[1] - p.z);
     if (W) blastFx.kick(dp, W.big);
     let dmg = dmgAt(dp);
@@ -1417,9 +1449,10 @@ function setupHeli() {
   const len = (r: { p: V2[] }) =>
     r.p.reduce((a, q, i) => (i ? a + Math.hypot(q[0] - r.p[i - 1][0], q[1] - r.p[i - 1][1]) : 0), 0);
   const routes = roads.filter(r => /^(primary|secondary|trunk)/.test(r.t) && len(r) > 90).map(r => r.p);
+  const heliP = new THREE.Vector3();
   heli = new HeliPatrols({
     scene,
-    player: () => player.pos,
+    player: () => skyPos(heliP),
     hidden: () => !flyingNow() && (upIn() || heliCover()),
     night: () => isNight(),
     routes: () => routes,
@@ -1437,8 +1470,11 @@ function setupHeli() {
         log(tr('被機槍打中，流血了！', 'A round from above hits you. You are bleeding!'), '#f66');
       }
     },
-    gun: dist => AU.gunshot('mg', dist, upIn() || indoorAt(player.pos.x, player.pos.z)),
-    rotor: dist => AU.rotor(dist, 1.2),
+    gun: dist => AU.gunshot('mg', dist, upIn() || indoorAt(player.pos.x, player.pos.z) || inMetro(player.pos.z)),
+    // (v24.38 they fly over the station's exit now: not heard down in it)
+    rotor: dist => {
+      if (!inMetro(player.pos.z)) AU.rotor(dist, 1.2);
+    },
     salvo: (x, z) => warBarrage(2, [x, z]),
     smoke: (x, y, z, fire) => {
       blastFx.smoke.spawn({ k: 2, x, y, z, vy: 1, life: 2.6, s0: 1.2, s1: 3.6, a0: 0.5 });
@@ -1451,6 +1487,7 @@ function setupHeli() {
 function heliCover() {
   const P = player.pos;
   return (
+    inMetro(P.z) || // (v24.38 down in a station)
     indoorAt(P.x, P.z) ||
     [
       [1.6, 0],
@@ -1472,7 +1509,8 @@ function heliCrash(x: number, z: number, kind: HeliKind) {
     const d = Math.hypot(s.pos.x - x, s.pos.z - z);
     if (d < 14) damageSol(s, 240 * (1 - d / 18), true);
   }
-  const dp = Math.hypot(mapPos()[0] - x, mapPos()[1] - z);
+  const mp = nearPos();
+  const dp = Math.hypot(mp[0] - x, mp[1] - z);
   if (dp < 14) {
     player.hp -= 60 * (1 - dp / 14);
     player.rig.hurtT = 0.4;
@@ -1771,7 +1809,8 @@ const warLevel = () => clamp((gameMin / 1440 - 0.25) / 6 + liberated.size * 0.01
 const warFires: { x: number; z: number; r: number; t: number }[] = [];
 /** where to bring it down: a ring around the player */
 function warSpot(minD: number, maxD: number): V2 {
-  const P = mapPos();
+  // (v24.38 down in a station: around its street exit; the interior is off the map, and the shells fell in it)
+  const P = streetPos();
   const a = Math.random() * Math.PI * 2,
     d = minD + Math.random() * (maxD - minD);
   return [P[0] + Math.cos(a) * d, P[1] + Math.sin(a) * d];
@@ -1839,7 +1878,9 @@ function warImpact(W: WarWeapon, p: V2) {
   }
   warFires.push({ x: p[0], z: p[1], r: W.core * 0.35, t: 45 });
   if (warFires.length > 5) warFires.shift();
-  const d = Math.hypot(mapPos()[0] - p[0], mapPos()[1] - p[1]);
+  // (v24.38 down in a station, from its exit: the war falls in the street above)
+  const sp = inMetro(player.pos.z) && !inMetro(p[1]) ? streetPos() : nearPos();
+  const d = Math.hypot(sp[0] - p[0], sp[1] - p[1]);
   log(
     getLanguage() === 'en'
       ? `💥 ${W.name} hit about ${Math.round(d)} m from you. The ground shakes and windows blow in.`
@@ -1856,7 +1897,7 @@ function warTick(dt: number) {
     const dist = 140 + Math.random() * 380;
     const kind = Math.random() < 0.3 ? 'mg' : 'rifle';
     const n = 3 + Math.floor(Math.random() * (5 + 10 * L));
-    const indoors = upIn() || indoorAt(player.pos.x, player.pos.z);
+    const indoors = upIn() || indoorAt(player.pos.x, player.pos.z) || inMetro(player.pos.z);
     for (let i = 0; i < n; i++)
       setTimeout(() => AU.gunshot(kind as any, dist, indoors), i * (kind === 'mg' ? 90 : 170 + Math.random() * 240));
   }
@@ -2006,12 +2047,18 @@ function fireAT(k: string, d: (typeof ITEMS)[string], dir: THREE.Vector3) {
   const P = player.pos;
   let end = P.clone().addScaledVector(dir, d.range!),
     hitA: any = null;
-  // v24.24 at a helicopter under the cursor (on a phone, the nearest one)
-  const hc = heli && (heli.pick(ray.ray) ?? (MOBILE ? heli.nearestTo(P.x, P.z, d.range!) : null));
-  if (hc && Math.hypot(hc.g.position.x - P.x, hc.g.position.z - P.z) < d.range!) {
-    tracer(P, hc.g.position);
+  // v24.24 at a helicopter under the cursor (on a phone, the nearest one). (v24.38 on an open roof, from where the
+  // player really stands and through the camera that draws the city there: the helicopters can see them up there now)
+  const onRoof = !!up && REAL_UP && !upIn();
+  const Ph = onRoof ? new THREE.Vector3(realX(), realY() + 1.5, realZ()) : P;
+  if (onRoof && !MOBILE) ray.setFromCamera(mouse, upCam);
+  const hc = heli && (heli.pick(ray.ray) ?? (MOBILE ? heli.nearestTo(Ph.x, Ph.z, d.range!) : null));
+  if (hc && Math.hypot(hc.g.position.x - Ph.x, hc.g.position.z - Ph.z) < d.range!) {
+    if (onRoof) tracer3(Ph, hc.g.position);
+    else tracer(P, hc.g.position);
     boom(scene, hc.g.position.clone(), 1.2);
-    noise(P.x, P.z, 50);
+    const [nx, nz] = onRoof ? mapPos() : [P.x, P.z];
+    noise(nx, nz, 50);
     heli!.hit(hc, 100);
     if (k === 'at4') {
       delete player.inv.at4;
@@ -2140,7 +2187,9 @@ function callSupport() {
     return;
   }
   ROC.cd = 240;
-  const P = player.pos;
+  // (v24.38 the street the player is in: upstairs the foot of the stairs, underground the station's exit)
+  const sp = streetPos();
+  const P = { x: sp[0], z: sp[1] };
   noise(P.x, P.z, 70);
   sols
     .filter(s => s.state !== 'dead' && !s.post)
@@ -2194,8 +2243,10 @@ function rocCheck(silent: boolean) {
       const ct = makeCont('roc' + i, p, 'crate', undefined, ROC_PRESETS[i % ROC_PRESETS.length]);
       ct.label = '國軍補給箱';
     });
-    let lp: V2 = [player.pos.x + 14, player.pos.z + 10];
-    for (let k = 0; k < 40 && bldAt(lp[0], lp[1]); k++) lp = [player.pos.x + 14 + k * 1.5, player.pos.z + 10 - k];
+    // (v24.38 near the street the player is in: it was dropped off the map when they were upstairs or underground)
+    const sp = streetPos();
+    let lp: V2 = [sp[0] + 14, sp[1] + 10];
+    for (let k = 0; k < 40 && bldAt(lp[0], lp[1]); k++) lp = [sp[0] + 14 + k * 1.5, sp[1] + 10 - k];
     const li = makeCont('liaison', lp, 'crate', undefined, { rocradio_b: 1, t75p: 1, a9: 15, bandage: 1 });
     li.label = '受傷聯絡官的背包';
     (ROC as any).liaison = lp;
@@ -3779,15 +3830,56 @@ function startRainAudio() {
 const raining = () => gameMin < WX.rainUntil;
 const bucketMat = new THREE.MeshStandardMaterial({ color: 0x2a6ab8, roughness: 0.5 });
 const waterTopMat = new THREE.MeshStandardMaterial({ color: 0x6a8aa0, roughness: 0.1, metalness: 0.3 });
+// ---------- v24.38 rain buckets on rooftops stay with their building ----------
+// Every upper floor and roof is built at the same place off the map (UP_O): a bucket left on one roof stood in that
+// space, and showed up in the next building's room or on its roof. A bucket put on a roof now belongs to that roof: it
+// is made when the player goes up to it, put away when they come down, and catches the rain in between all the same.
+type Pail = { id: string; key: string; at: V2; items: Record<string, number>; rain: number };
+/** the buckets on rooftops, where they stand on the map (saved with the survival state) */
+let pails: Pail[] = [];
+/** the bucket containers of the roof the player is on */
+let pailConts: Cont[] = [];
+/** a building, for what stays on its roof */
+const roofKey = (b: Bld | DEnter) => (isDEnter(b) ? `d${b.key}#${b.bi}` : `c${b.id}`);
+/** put this roof's buckets out (off is where the roof is built: UP_O − the building's middle) */
+function pailsOut(b: Bld | DEnter, off: V2) {
+  const k = roofKey(b);
+  pailConts = pails
+    .filter(q => q.key === k)
+    .map(q => {
+      const c = makeBucket(q.id, [q.at[0] + off[0], q.at[1] + off[1]], q.items);
+      (c as any).rain = q.rain;
+      (c as any).pail = q;
+      return c;
+    });
+}
+/** and away again, with what they caught */
+function pailsIn() {
+  for (const c of pailConts) {
+    const q = (c as any).pail as Pail;
+    q.items = c.items;
+    q.rain = (c as any).rain || 0;
+    c.mesh.parent?.remove(c.mesh);
+    const i = conts.indexOf(c);
+    if (i >= 0) conts.splice(i, 1);
+  }
+  pailConts = [];
+}
+// (v24.38 one set of shapes for every bucket: the ones on a roof are made again each time the player goes up)
+const bucketGeo = {
+  body: new THREE.CylinderGeometry(0.3, 0.24, 0.48, 14, 1, true),
+  bot: new THREE.CircleGeometry(0.24, 14).rotateX(-Math.PI / 2),
+  top: new THREE.CircleGeometry(0.28, 14).rotateX(-Math.PI / 2),
+};
 function makeBucket(id: string, p: V2, items: Record<string, number> = {}) {
   const c = makeCont(id, p, 'crate', undefined, items);
   (c.mesh.parent || scene).remove(c.mesh);
   const m = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.24, 0.48, 14, 1, true), bucketMat);
+  const body = new THREE.Mesh(bucketGeo.body, bucketMat);
   body.position.y = 0.24;
-  const bot = new THREE.Mesh(new THREE.CircleGeometry(0.24, 14).rotateX(-Math.PI / 2), bucketMat);
+  const bot = new THREE.Mesh(bucketGeo.bot, bucketMat);
   bot.position.y = 0.01;
-  const top = new THREE.Mesh(new THREE.CircleGeometry(0.28, 14).rotateX(-Math.PI / 2), waterTopMat);
+  const top = new THREE.Mesh(bucketGeo.top, waterTopMat);
   top.name = 'w';
   m.add(body, bot, top);
   bucketMat.side = THREE.DoubleSide;
@@ -3797,6 +3889,9 @@ function makeBucket(id: string, p: V2, items: Record<string, number> = {}) {
   c.mesh = m as any;
   c.label = '雨水桶';
   (c as any).rain = 0;
+  // (v24.38 nothing to find in a bucket in the dark: a roof's bucket is made again on every trip up, and gave the
+  // night search's extra find each time)
+  (c as any).seen = 1;
   return c;
 }
 function updateWeather(dt: number, gm: number) {
@@ -3823,9 +3918,20 @@ function updateWeather(dt: number, gm: number) {
   const r = raining();
   WX.amt += ((r ? WX.int : 0) - WX.amt) * Math.min(1, dt * 0.5);
   WX.wet = clamp(WX.wet + (r ? gm * 1.5 * (0.4 + 0.6 * WX.int) : -gm * 0.25), 0, 1);
+  if (r) {
+    // (v24.38 the buckets on rooftops that are not out right now catch the rain too)
+    for (const q of pails) {
+      if (pailConts.some(c => (c as any).pail === q)) continue;
+      q.rain += gm;
+      if (q.rain >= 0.75) {
+        q.rain = 0;
+        if ((q.items.rainwater || 0) < 6) q.items.rainwater = (q.items.rainwater || 0) + 1;
+      }
+    }
+  }
   if (r)
     for (const c of conts)
-      if (c.label === '雨水桶') {
+      if (c.label === '雨水桶' && !inMetro(c.p[1])) {
         (c as any).rain += gm;
         if ((c as any).rain >= 0.75) {
           (c as any).rain = 0;
@@ -4477,9 +4583,10 @@ function liaisonSpot(c: V2): V2 | null {
 }
 function setupJapan(c: V2) {
   if (jp) return;
+  const jpP = new THREE.Vector3();
   jp = new JapanSupport({
     scene,
-    player: () => player.pos,
+    player: () => skyPos(jpP),
     foes: () => sols,
     hit: (f, dmg) => damageSol(f as Sol, dmg, false),
     blast: p => blast(p, true),
@@ -4487,10 +4594,15 @@ function setupJapan(c: V2) {
     landed: p => jpLanded(p),
     log,
     noise,
-    gunSound: d => AU.gunshot('mg', d, indoorAt(player.pos.x, player.pos.z)),
-    boomSound: d => AU.shellBoom(d, indoorAt(player.pos.x, player.pos.z), 1.4),
-    jetSound: d => AU.jetPass(d),
-    rotorSound: d => AU.rotor(d, 1.2),
+    // (v24.38 they work over the station's exit when the player is down in it: muffled, the engines not heard)
+    gunSound: d => AU.gunshot('mg', d, indoorAt(player.pos.x, player.pos.z) || inMetro(player.pos.z)),
+    boomSound: d => AU.shellBoom(d, indoorAt(player.pos.x, player.pos.z) || inMetro(player.pos.z), 1.4),
+    jetSound: d => {
+      if (!inMetro(player.pos.z)) AU.jetPass(d);
+    },
+    rotorSound: d => {
+      if (!inMetro(player.pos.z)) AU.rotor(d, 1.2);
+    },
   });
   const p = liaisonSpot(c);
   if (!p) return;
@@ -4912,10 +5024,13 @@ function updateInformant(dt: number) {
 }
 function airdrop(at?: V2) {
   let p: V2 | null = at || null;
+  // (v24.38 around the street the player is in: up in a building or down in a station it landed off the map, where it
+  // could never be reached. In the street this is player.pos, as it was)
+  const c = streetPos();
   for (let k = 0; !p && k < 200; k++) {
     const a = rnd() * Math.PI * 2,
       d = 45 + rnd() * 30;
-    const q: V2 = [player.pos.x + Math.cos(a) * d, player.pos.z + Math.sin(a) * d];
+    const q: V2 = [c[0] + Math.cos(a) * d, c[1] + Math.sin(a) * d];
     if (!bldAt(q[0], q[1]) && !bldAt(q[0] + 1.5, q[1]) && !bldAt(q[0], q[1] + 1.5)) p = q;
   }
   if (!p) return;
@@ -5673,6 +5788,7 @@ function goRoof(b: Bld | DEnter, P: CL.Plan, pts: V2[], off: V2) {
     np,
     ro: obs?.length ?? 0,
   };
+  pailsOut(b, off);
   player.pos.set(room.land[0], 0, room.land[1]);
   player.vel.set(0, 0, 0);
   player.cover = null;
@@ -5694,6 +5810,7 @@ function roofShed() {
 /** v24.1 leave the current upper floor: keep what was taken, drop its meshes, collision and containers */
 function leaveFloor() {
   const u = up!;
+  pailsIn();
   rescueLeave();
   UP.disposeUpstairs(u.room);
   CL.dispose(u.furn);
@@ -6490,7 +6607,7 @@ function useItem(k: string) {
     callSupport();
     closePanel();
   } else if (k === 'fpv') {
-    if (indoorAt(player.pos.x, player.pos.z)) {
+    if (indoorAt(player.pos.x, player.pos.z) || inMetro(player.pos.z)) {
       log(tr('在室內無法起飛，先到戶外', 'Cannot launch indoors. Go outside first.'), '#f99');
       return;
     }
@@ -6562,7 +6679,24 @@ function useItem(k: string) {
       );
       return;
     }
-    makeBucket('pb' + Date.now(), [player.pos.x + 0.6, player.pos.z]);
+    // (v24.38 not underground; on a rooftop, it belongs to that roof)
+    if (inMetro(player.pos.z)) {
+      log(tr('地底下接不到雨水，要放在戶外', 'No rain reaches down here. Place it outdoors.'), '#f99');
+      return;
+    }
+    if (up?.roof) {
+      const q: Pail = {
+        id: 'pr' + Date.now(),
+        key: roofKey(up.b),
+        at: [player.pos.x + 0.6 - up.off[0], player.pos.z - up.off[1]],
+        items: {},
+        rain: 0,
+      };
+      pails.push(q);
+      const c = makeBucket(q.id, [player.pos.x + 0.6, player.pos.z], q.items);
+      (c as any).pail = q;
+      pailConts.push(c);
+    } else makeBucket('pb' + Date.now(), [player.pos.x + 0.6, player.pos.z]);
     if (--player.inv[k] <= 0) delete player.inv[k];
     log(tr('放下了水桶，下雨時會慢慢裝滿雨水', 'Bucket placed. It will slowly fill when it rains.'), '#9fd0ff');
   } else
@@ -8225,6 +8359,12 @@ function updateStory(gm: number) {
 function save() {
   if (!started || dead || NOSAVE) return;
   gmap?.save();
+  for (const c of pailConts) {
+    const q = (c as any).pail as Pail;
+    q.items = c.items;
+    q.rain = (c as any).rain || 0;
+  }
+  (surv as any).pails = pails;
   writeSave({
     r: ROLE.id,
     surv,
@@ -8246,7 +8386,7 @@ function save() {
     inf: INF,
     ut: UT,
     conts: [
-      ...conts.map(c => [c.id, c.items, c.p]),
+      ...conts.filter(c => !c.id.startsWith('pr')).map(c => [c.id, c.items, c.p]),
       // v23.4 furniture containers restored from the save but not built again yet: keep them (were dropped)
       ...[...savedF].filter(([id]) => !conts.some(c => c.id === id)).map(([id, items]) => [id, items, [0, 0]]),
     ],
@@ -9195,7 +9335,8 @@ function drawHud(inside: Bld | null) {
   if (exitMark) {
     exitMark.m.position.y = 3.1 + Math.sin(performance.now() / 250) * 0.25;
     exitMark.m.rotation.y += 0.05;
-    if (!bldAt(player.pos.x, player.pos.z) && exitMark.b && !pip([player.pos.x, player.pos.z], exitMark.b.pts)) {
+    // (v24.38 not upstairs: up there player.pos is off the map, and going up the stairs at home said you went out)
+    if (!up && !bldAt(player.pos.x, player.pos.z) && exitMark.b && !pip([player.pos.x, player.pos.z], exitMark.b.pts)) {
       const hd = exitMark.b.door;
       if (!hd || Math.hypot(hd.p[0] - player.pos.x, hd.p[1] - player.pos.z) > 4)
         (scene.remove(exitMark.m), (exitMark = null), log(tr('你走出了家門。', 'You step out of your home.'), '#9cf'));
@@ -10292,6 +10433,8 @@ async function boot() {
     if (!skip && dest) startPrologue(from, dest.door!.p as V2, r.destLabel);
   };
   const prepareGame = (load: boolean, gender = 'm', roleId = 'courier', skipIntro = false) => {
+    pails = [];
+    pailConts = [];
     setMultiplayerSession(!!MP);
     storySaved = load && sv ? sv.story : undefined;
     storyRunner = createStoryRunner(storySaved);
@@ -10348,6 +10491,9 @@ async function boot() {
       if (sv.inf) INF = sv.inf;
       if (sv.ut) Object.assign(UT, sv.ut);
       if (sv.surv) surv = sv.surv;
+      pails = Array.isArray((surv as any).pails) ? (surv as any).pails : [];
+      let backToPack = 0,
+        dropMoved = 0;
       const map = new Map<string, any>(sv.conts.map((c: any) => [c[0], c]));
       for (const c of conts) {
         const s = map.get(c.id);
@@ -10360,9 +10506,69 @@ async function boot() {
         if (/^[fu]\d+_/.test(id)) savedF.set(c[0], c[1]);
         // v23.4 district containers are restored per tile from district.saved (making crates here duplicated them)
         else if (/^t-?\d+_-?\d+:/.test(id)) return;
-        else if (id.startsWith('pb')) makeBucket(c[0], c[2], c[1]);
-        else makeCont(c[0], c[2], 'crate', undefined, c[1]);
+        else if (id.startsWith('pr'))
+          return; // (v24.38 on a rooftop: with the survival state)
+        else if (id.startsWith('pb')) {
+          // v24.38 a bucket an older version let you leave on a roof (in the space all the floors share) or in a
+          // station: back in the pack, with what it caught
+          if (UP.isUp(c[2][0]) || inMetro(c[2][1])) {
+            player.inv.bucket = (player.inv.bucket || 0) + 1;
+            for (const [k, n] of Object.entries((c[1] || {}) as Record<string, number>))
+              player.inv[k] = (player.inv[k] || 0) + n;
+            backToPack++;
+          } else makeBucket(c[0], c[2], c[1]);
+        } else if (
+          (id === 'airdrop' || /^jpdrop\d+$/.test(id)) &&
+          Array.isArray(c[2]) &&
+          (UP.isUp(c[2][0]) || inMetro(c[2][1]))
+        ) {
+          // v24.38 a supply crate (the day-4 drop, or the JSDF's) an older version dropped off the map (the player was
+          // upstairs or in a station when it came): it comes down again near the street the player is in, unless it was
+          // emptied already. (Math.random: the map's rnd() stream is left as it is)
+          if (!Object.keys(c[1] || {}).length) return;
+          const s = streetPos();
+          let q: V2 | null = null;
+          for (let k = 0; !q && k < 200; k++) {
+            const a = Math.random() * Math.PI * 2,
+              r = 45 + Math.random() * 30;
+            const t: V2 = [s[0] + Math.cos(a) * r, s[1] + Math.sin(a) * r];
+            if (!bldAt(t[0], t[1]) && !bldAt(t[0] + 1.5, t[1]) && !bldAt(t[0], t[1] + 1.5)) q = t;
+          }
+          if (q) {
+            const k = makeCont(c[0], q, 'crate', undefined, c[1]);
+            if (id === 'airdrop') {
+              dropCont = k;
+              k.label = '空投物資箱';
+            } else k.label = '日本空投物資箱';
+            dropMoved = 1;
+          } else {
+            for (const [k, n] of Object.entries((c[1] || {}) as Record<string, number>))
+              player.inv[k] = (player.inv[k] || 0) + n;
+            dropMoved = 2;
+          }
+        } else makeCont(c[0], c[2], 'crate', undefined, c[1]);
       });
+      if (dropMoved)
+        log(
+          dropMoved === 1
+            ? tr(
+                '舊版本把空投物資箱丟到了地圖外，現在它落在你附近的街上。',
+                'An older version dropped the supply crate off the map. It is now in the street near you.',
+              )
+            : tr(
+                '舊版本把空投物資箱丟到了地圖外，裡面的東西收進背包了。',
+                'An older version dropped the supply crate off the map. What was in it is now in your pack.',
+              ),
+          '#9fd0ff',
+        );
+      if (backToPack)
+        log(
+          tr(
+            `放在屋頂或站裡的水桶（${backToPack} 個）收回背包了，現在放在屋頂的會留在那棟樓上。`,
+            `The bucket(s) left on a roof or in a station (${backToPack}) are back in your pack. One put on a roof now stays on that building.`,
+          ),
+          '#9fd0ff',
+        );
       if (Array.isArray(sv.radio)) radioLog = sv.radio.slice(-200);
       (sv.bar || []).forEach((i: number) => doors[i] && setBarricade(doors[i]));
       checkSectors(true);
@@ -11349,6 +11555,16 @@ async function boot() {
       return c ? { p: c.p, items: c.items } : null;
     },
     libAt: () => (surv as any).libAt ?? null,
+    /** v24.38 where the war aims, what the sky sees of the player, whether a helicopter would, the day-1 arrow */
+    warSpot: (a: number, b: number) => warSpot(a, b),
+    skyAt: () => {
+      const v = skyPos(new THREE.Vector3());
+      return [v.x, v.y, v.z];
+    },
+    heliCover: () => heliCover(),
+    exitMark: () => !!exitMark,
+    /** v24.38 the buckets on rooftops, and those out on the roof the player is on */
+    pails: () => ({ all: pails.map(q => ({ ...q, items: { ...q.items } })), out: pailConts.map(c => [c.id, c.p]) }),
     /** v24.34 push a body in a straight line against the walls (test hook): where it ends up */
     pushLine: (ax: number, az: number, bx: number, bz: number) => {
       const v = new THREE.Vector3(ax, 0, az);
@@ -11459,6 +11675,17 @@ async function boot() {
       const dir = a.g.position.clone().sub(player.pos).setY(0).normalize();
       fireAT(k, ITEMS[k], dir);
       return a.hp;
+    },
+    /**
+     * v24.38 the cursor over a helicopter (where it is drawn: through upCam upstairs), and k fired at it. The ray is made
+     * as the frame loop makes it, from the main camera: fireAT has to aim through upCam itself on a roof
+     */
+    testATHeli: (k: string, c: { g: THREE.Object3D; hp: number }) => {
+      const v = c.g.position.clone().project(up && REAL_UP ? upCam : camera);
+      mouse.set(v.x, v.y);
+      ray.setFromCamera(mouse, camera);
+      fireAT(k, ITEMS[k], new THREE.Vector3(1, 0, 0));
+      return c.hp;
     },
     callSupport,
     rocCheck,

@@ -20,12 +20,17 @@ export function shot(name) {
 
 // Chromium with software WebGL, so it also works headless and in CI. PW_GPU=1 uses the machine's real graphics card
 // instead (still headless): on a desktop that is twice as fast, and it leaves the other cores free.
+// (v24.38 and no sound card: the game's audio runs into a fake output. Every test browser opened the real one, and in a
+// long run on a laptop its audio driver crashed the machine, twice)
 export const launch = () =>
   chromium.launch({
     executablePath: process.env.PW_CHROMIUM || undefined,
-    args: process.env.PW_GPU
-      ? ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist']
-      : ['--use-gl=swiftshader', '--enable-unsafe-swiftshader'],
+    args: [
+      '--disable-audio-output',
+      ...(process.env.PW_GPU
+        ? ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist']
+        : ['--use-gl=swiftshader', '--enable-unsafe-swiftshader']),
+    ],
   });
 
 // Serve dist/ with `vite preview` on the given port and wait until it answers. Returns { url, stop }.
