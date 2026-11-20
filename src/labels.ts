@@ -44,6 +44,8 @@ const EN_LABELS: Readonly<Record<string, string>> = {
   金飾攤: 'Gold jewellery stall',
   // v24.3
   國軍殘部遺留裝備: 'Gear left by the ROC remnant',
+  // v24.40
+  隊友的遺物: 'A fallen companion’s pack',
   // v24.4
   日本空投物資箱: 'Japanese airdrop crate',
   受傷聯絡官的背包: 'Wounded liaison’s backpack',

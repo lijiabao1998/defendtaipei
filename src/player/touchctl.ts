@@ -1,6 +1,8 @@
 import { tr } from '../i18n';
 /** v22.7 portrait touch controls: short label for the context action button, derived from the HUD prompt */
 const MAP: [RegExp, string][] = [
+  // v24.40 a teammate who is down (before 搜/拿: “[E] 救阿財（剩 45 秒）”)
+  [/^救|^save /i, tr('救人', 'Save')],
   [/搜刮|翻找|搜|search|loot|rummage/i, tr('搜', 'Search')],
   [/關門|close door/i, tr('關門', 'Close')],
   [/開門|撬|open door|pry/i, tr('開門', 'Open')],

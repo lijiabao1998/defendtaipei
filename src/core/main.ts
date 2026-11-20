@@ -20,7 +20,7 @@ import { ArmorSystem, type ArmorKind } from '../systems/armor';
 import { Recon, boom, setBoomFx } from '../systems/drone';
 import { BlastFX } from '../systems/blastfx';
 import { SPEC, DriveSystem, type DKind } from '../systems/drive';
-import { ROLES, roleById, type Role } from '../player/roles';
+import { ROLES, roleById, type Role, type Skills } from '../player/roles';
 import type { FPV } from '../systems/fpv';
 import type { GameMap } from '../map/map';
 import { RocSystem, ROC_NAME, flagPole, rocFlagTex, type RocKind } from '../npc/roc';
@@ -83,6 +83,19 @@ import { Nav, smooth } from '../systems/nav';
 import { RoadTiles } from '../map/roads';
 import { Traffic } from '../systems/traffic';
 import { rolePortrait } from '../ui/portrait';
+import {
+  type MatePick,
+  type MateSave,
+  type FireRule,
+  mateMax,
+  mateName,
+  mateLine,
+  relation,
+  Trail,
+  pickWeapon,
+  pickConsumable,
+  ruleName,
+} from '../npc/mates';
 import { frontageInfill } from '../map/infill';
 import { blockInfill } from '../map/blocks';
 import { type V2, type Seg, type Door, type Bld, type Cont, ROADW } from './world';
@@ -152,7 +165,7 @@ import {
 import { VERSION } from './version';
 import { emit, on } from './bus';
 import { createStoryRunner } from '../story';
-import { MPQ, MP_ON } from '../debug/flags';
+import { MPQ, MP_ON, MATES_ON } from '../debug/flags';
 import { PRO_NEWS } from '../story/broadcasts/prologue';
 
 initTitleLanguage();
@@ -3379,7 +3392,9 @@ const drive = new DriveSystem({
   log: (m, c) => log(m, c || '#ddd'),
   power: () => UT.power,
   armor: () => (armor ? armor.list.map((a: any) => a.g.position) : []),
-  skills: () => ROLE.skills,
+  // v24.40 a teammate beside the player hot-wires and repairs for them (never `ride`: that is the driver's own)
+  skills: () =>
+    mates.length ? { ...ROLE.skills, lockpick: teamSkill('lockpick'), repair: teamSkill('repair') } : ROLE.skills,
   inv: () => player.inv,
   hurt: n => {
     player.hp -= n;
@@ -5143,7 +5158,7 @@ let survDay = -1; // v21.5.1 menu pause (local only)
 function spoilCarried() {
   if (gameMin < POWER_OFF + 1440) return;
   let n = 0;
-  for (const bag of [player.inv, surv.stash])
+  for (const bag of [player.inv, surv.stash, ...mates.filter(m => m.st !== 2).map(m => m.inv)])
     for (const k of Object.keys(bag)) {
       if (!ITEMS[k]?.perish || !bag[k]) continue;
       const rot = Math.ceil(bag[k] / 2);
@@ -5335,6 +5350,1175 @@ function plaWatch(s: Sol, marks: PlaMark[], dist0: number, night: boolean, upRea
     if (m.id === s.foe) was = L;
   }
   return best || was || P;
+}
+// ---------- v24.40 computer teammates: the people who start the game with you (src/npc/mates.ts) ----------
+/** where a body is: 0 the map, 1 the upstairs space (every floor and roof), 2 the metro */
+const spaceOf = (x: number, z: number) => (inMetro(z) ? 2 : UP.isUp(x) ? 1 : 0);
+type Mate = {
+  id: string;
+  pick: MatePick;
+  rig: Rig;
+  pos: THREE.Vector3;
+  vel: THREE.Vector3;
+  yaw: number;
+  hp: number;
+  hunger: number;
+  thirst: number;
+  fatigue: number;
+  bleed: boolean;
+  inv: Record<string, number>;
+  equip: string;
+  kills: number;
+  /** 0 follow the player, 1 wait here */
+  mode: 0 | 1;
+  rule: FireRule;
+  /** 0 on their feet, 1 down (downT seconds left to save them), 2 dead */
+  st: 0 | 1 | 2;
+  downT: number;
+  /** what killed or downed them (the ending) */
+  why: string;
+  /** the day they died (1-based) */
+  diedDay: number;
+  /** riding in the player's vehicle */
+  car: boolean;
+  /** left behind (no seat in the vehicle, not close enough on the stairs or at the station gate): waits where they are
+   *  until the player comes back near, or tells them to follow */
+  left: boolean;
+  /** dead, and their body lies here (not after loading: their pack does) */
+  body: boolean;
+  /** the next point of the player's trail to walk to (-1: not on it) */
+  ti: number;
+  /** a path back to the player (shaped like a soldier for the shared path queue, navPump) */
+  nv: { state: string; pos: THREE.Vector3; pgoal?: V2; path?: V2[]; pi?: number; navQ?: boolean; navG?: V2; t: number };
+  stuckT: number;
+  vault: { a: THREE.Vector3; b: THREE.Vector3; t: number; to: number } | null;
+  /** a door they opened on their way, closed again behind them */
+  door: LiveDoor | null;
+  sneak: boolean;
+  cover: boolean;
+  sleeping: boolean;
+  moving: number;
+  stepA: number;
+  noiseA: number;
+  /** when they last said something (real seconds, counts down) */
+  sayT: number;
+  useT: number;
+  mark: PlaMark;
+};
+/** v24.40 the teammates (empty unless chosen at the start, behind ?mates=1 until they are finished) */
+const mates: Mate[] = [];
+const mateTrail = new Trail();
+/** what the teammates did (checks) and what they knew last frame */
+const MS = {
+  lastX: 0,
+  lastZ: 0,
+  lastStreet: [0, 0] as V2,
+  lastSpace: 0,
+  /** the floor the player was on (a building, a storey, the roof): changing it is a jump however short the step */
+  lastUp: null as null | { b: unknown; f: number; roof: boolean },
+  car: false,
+  jumps: 0,
+  along: 0,
+  left: 0,
+  outOf: 0,
+  boarded: 0,
+  teleports: 0,
+  paths: 0,
+  doors: 0,
+  closed: 0,
+  vaults: 0,
+  used: 0,
+  saved: 0,
+  died: 0,
+};
+const mateName2 = (m: Mate) => mateName(m.pick);
+/** 他 or 她 */
+const ta = (m: Mate) => (m.pick.g === 'f' ? '她' : '他');
+const mateRole = (m: Mate) => roleById(m.pick.r);
+function mateSay(m: Mate, zh: string, en: string, col = '#cfe8ff', every = 0) {
+  if (every && m.sayT > 0) return;
+  m.sayT = every;
+  log(getLanguage() === 'en' ? `${mateName2(m)}: “${en}”` : `${mateName2(m)}：「${zh}」`, col);
+}
+function mateRig(p: MatePick) {
+  const R = roleById(p.r);
+  // (on a phone, one plain mesh per joint: about half the draw calls of a full figure)
+  return spawnRig({ gender: p.g, ...R.look[p.g], outfit: p.r, lite: MOBILE }) as Rig;
+}
+/** a spot for a teammate near c: free floor, in sight of c, in the same building or street, not on anyone */
+function mateSpot(c: V2, k: number, avoid: V2[]): V2 {
+  const pc = placeAt(c[0], c[1]);
+  for (const r of [0.9, 1.3, 1.7, 2.2, 2.8, 3.5])
+    for (let a = 0; a < 12; a++) {
+      const t = ((a + k * 5) / 12) * Math.PI * 2 + 0.4;
+      const x = c[0] + Math.cos(t) * r,
+        z = c[1] + Math.sin(t) * r;
+      if (avoid.some(q => Math.hypot(q[0] - x, q[1] - z) < 0.75)) continue;
+      if (!bodyFits(x, z) || !los(c, [x, z]) || placeAt(x, z) !== pc) continue;
+      if (spaceOf(x, z) === 0 && (roadT.barrierAt(x, z, 1.1) || roadT.wreckNear(x, z, 1.4))) continue;
+      return [x, z];
+    }
+  return [c[0], c[1]];
+}
+function makeMate(p: MatePick, i: number): Mate {
+  const R = roleById(p.r);
+  const m: Mate = {
+    id: 'mate' + i,
+    pick: { r: p.r, g: p.g },
+    rig: mateRig(p),
+    pos: new THREE.Vector3(),
+    vel: new THREE.Vector3(),
+    yaw: 0,
+    hp: 100,
+    hunger: 85,
+    thirst: 85,
+    fatigue: 10,
+    bleed: false,
+    inv: { ...R.inv },
+    equip: '',
+    kills: 0,
+    mode: 0,
+    rule: 1,
+    st: 0,
+    downT: 0,
+    why: '',
+    diedDay: 0,
+    car: false,
+    left: false,
+    body: false,
+    ti: -1,
+    nv: { state: 'patrol', pos: null as any, t: 0 },
+    stuckT: 0,
+    vault: null,
+    door: null,
+    sneak: false,
+    cover: false,
+    sleeping: false,
+    moving: 0,
+    stepA: 0,
+    noiseA: 0,
+    sayT: 0,
+    useT: 2 + i,
+    mark: null as any,
+  };
+  m.nv.pos = m.pos;
+  m.equip = pickWeapon(m.inv, ITEMS);
+  m.mark = mateMark(m);
+  return m;
+}
+/** v24.40 how the soldiers see a teammate (v24.41: on the list, plaOthers) */
+function mateMark(m: Mate): PlaMark {
+  return {
+    id: m.id,
+    me: false,
+    p: [m.pos.x, m.pos.z],
+    get sneak() {
+      return m.sneak;
+    },
+    get cover() {
+      return m.cover;
+    },
+    light: false,
+    inside: false,
+    aimH: () => (m.st ? 0.3 : m.sneak ? 0.9 : 1.25),
+    alive: () => m.st === 0 && !m.car && spaceOf(m.pos.x, m.pos.z) === 0,
+    hurt: (dmg, s, melee) => mateHurt(m, dmg, s, melee),
+    spotted: s => mateSpotted(m, s),
+  };
+}
+/** a new game: the chosen people, around the player (who has just woken up, or stands by the scooter) */
+function spawnMates(picks: MatePick[]) {
+  clearMates();
+  const P: V2 = [player.pos.x, player.pos.z];
+  const avoid: V2[] = [P];
+  for (const v of drive.list) avoid.push([v.pos.x, v.pos.z]);
+  picks.forEach((p, i) => {
+    const m = makeMate(p, i);
+    const q = mateSpot(P, i, avoid);
+    avoid.push(q);
+    m.pos.set(q[0], 0, q[1]);
+    m.yaw = Math.atan2(P[0] - q[0], P[1] - q[1]);
+    mates.push(m);
+  });
+  matesSettle();
+}
+function clearMates() {
+  for (const m of mates) {
+    scene.remove(m.rig.root);
+    const i = plaOthers.indexOf(m.mark);
+    if (i >= 0) plaOthers.splice(i, 1);
+  }
+  mates.length = 0;
+}
+/** after placing them: the trail starts here, and what the player knows from them (the courier's streets, the liaison) */
+function matesSettle() {
+  mateTrail.reset(player.pos.x, player.pos.z);
+  MS.lastX = player.pos.x;
+  MS.lastZ = player.pos.z;
+  MS.lastStreet = streetPos();
+  MS.lastSpace = spaceOf(player.pos.x, player.pos.z);
+  MS.lastUp = up ? { b: up.b, f: up.f, roof: !!up.roof } : null;
+  MS.car = !!drive.cur;
+  for (const m of mates) {
+    m.rig.root.position.set(m.pos.x, walkH(m.pos.x, m.pos.z), m.pos.z);
+    m.rig.root.rotation.y = m.yaw;
+    setWeapon(m.rig, m.equip);
+    if (m.st) {
+      m.rig.deathV = mates.indexOf(m) % 3;
+      m.rig.deadT = 1;
+      animate(m.rig, 'death', 0, 0.016);
+    } else animate(m.rig, 'idle', 0, 0.016);
+  }
+}
+/** v24.40 the save: only written when there are teammates (a save without them is byte for byte as before) */
+function matesSave(): MateSave[] | undefined {
+  if (!mates.length) return undefined;
+  const P = mapPos();
+  const pSp = spaceOf(player.pos.x, player.pos.z);
+  return mates.map(m => {
+    const sp = spaceOf(m.pos.x, m.pos.z);
+    // with the player (riding, upstairs or underground with them, or following close by): beside them again on loading
+    const w =
+      m.car ||
+      (sp === pSp &&
+        (sp !== 0 || (m.st === 0 && m.mode === 0 && Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z) < 25)));
+    const s: MateSave = {
+      r: m.pick.r,
+      g: m.pick.g,
+      p: w || sp !== 0 ? [P[0], P[1]] : [m.pos.x, m.pos.z],
+      hp: m.hp,
+      hu: m.hunger,
+      th: m.thirst,
+      fa: m.fatigue,
+      bl: m.bleed,
+      inv: m.inv,
+      eq: m.equip,
+      k: m.kills,
+      m: m.mode,
+      f: m.rule,
+      s: m.st,
+    };
+    if (m.st === 1) s.dt = m.downT;
+    if (m.st === 2) s.dd = m.diedDay;
+    if (m.st) s.wy = m.why;
+    if (w) s.w = 1;
+    return s;
+  });
+}
+/** v24.40 a saved game: the teammates as they were (those who were with the player, beside them again) */
+function matesLoad(list: MateSave[] | undefined) {
+  clearMates();
+  if (!Array.isArray(list)) return;
+  const P: V2 = [player.pos.x, player.pos.z];
+  const avoid: V2[] = [P];
+  list.forEach((s, i) => {
+    if (!s || !s.r) return;
+    const m = makeMate({ r: s.r, g: s.g === 'f' ? 'f' : 'm' }, i);
+    Object.assign(m, {
+      hp: s.hp ?? 100,
+      hunger: s.hu ?? 85,
+      thirst: s.th ?? 85,
+      fatigue: s.fa ?? 10,
+      bleed: !!s.bl,
+      inv: s.inv || {},
+      equip: s.eq || '',
+      kills: s.k || 0,
+      mode: s.m === 1 ? 1 : 0,
+      rule: s.f === 0 || s.f === 2 ? s.f : 1,
+      st: s.s === 1 || s.s === 2 ? s.s : 0,
+      downT: s.dt ?? 60,
+      diedDay: s.dd ?? 0,
+      why: s.wy ?? '',
+    });
+    let q: V2 = Array.isArray(s.p) ? [s.p[0], s.p[1]] : P;
+    if (s.w || spaceOf(q[0], q[1]) !== 0) q = mateSpot(P, i, avoid);
+    else m.left = m.st === 0 && m.mode === 0; // (not beside the player when saved: they wait for them there)
+    avoid.push(q);
+    m.pos.set(q[0], 0, q[1]);
+    mates.push(m);
+  });
+  matesSettle();
+}
+/** seats beside the driver: a motorbike takes one behind, a bicycle none, anything with doors three (more in a van, armour, the helicopter) */
+function seatsOf(v: { s: { two: boolean; pedal?: boolean; armored?: boolean; air?: boolean; cargo: number } }) {
+  if (v.s.two) return v.s.pedal ? 0 : 1;
+  if (v.s.air || v.s.armored) return 6;
+  return v.s.cargo >= 40 ? 5 : 3;
+}
+/** the player got into a vehicle: whoever is following and close gets in too, as far as the seats go */
+function matesBoard() {
+  const v = drive.cur!;
+  let seats = seatsOf(v);
+  const P = MS;
+  const on: string[] = [],
+    off: string[] = [];
+  for (const m of mates) {
+    if (m.st !== 0 || m.mode !== 0 || spaceOf(m.pos.x, m.pos.z) !== 0) continue;
+    if (Math.hypot(m.pos.x - P.lastX, m.pos.z - P.lastZ) > 7) {
+      m.left = true; // (too far off to get in: they wait where they are)
+      continue;
+    }
+    if (seats > 0) {
+      seats--;
+      m.car = true;
+      m.rig.root.visible = false;
+      m.vault = null;
+      on.push(mateName2(m));
+      MS.boarded++;
+    } else {
+      off.push(mateName2(m));
+      m.left = true;
+    }
+  }
+  if (on.length)
+    log(getLanguage() === 'en' ? `${on.join(' and ')} got in with you.` : `${on.join('、')}跟著上車了。`, '#cfe8ff');
+  if (off.length)
+    log(
+      getLanguage() === 'en'
+        ? `No room for ${off.join(' and ')}: they wait here for you.`
+        : `${off.join('、')}沒位子，在原地等你。`,
+      '#cfe8ff',
+    );
+}
+/** out of the vehicle: the passengers get out beside the player */
+function matesAlight() {
+  const P: V2 = [player.pos.x, player.pos.z];
+  const avoid: V2[] = [P];
+  for (const v of drive.list) avoid.push([v.pos.x, v.pos.z]);
+  mates.forEach((m, i) => {
+    if (!m.car) return;
+    m.car = false;
+    m.left = false;
+    const q = mateSpot(P, i + 2, avoid);
+    avoid.push(q);
+    m.pos.set(q[0], 0, q[1]);
+    m.vel.set(0, 0, 0);
+    m.ti = -1;
+    m.rig.root.visible = true;
+  });
+}
+/**
+ * v24.40 the player's position jumped (stairs, a roof, a station gate, the train). Whoever was following within 6 m comes
+ * along; anyone else left in an off-map space (a floor that is gone, a station the player has left) goes up to the street
+ * there: nobody is ever left where no walls are drawn.
+ */
+function matesJump(from: V2, fromSpace: number) {
+  MS.jumps++;
+  const P: V2 = [player.pos.x, player.pos.z];
+  const avoid: V2[] = [P];
+  let k = 0;
+  for (const m of mates) {
+    if (m.car) continue;
+    const sp = spaceOf(m.pos.x, m.pos.z);
+    const along =
+      m.st === 0 && m.mode === 0 && !roofB && sp === fromSpace && Math.hypot(m.pos.x - from[0], m.pos.z - from[1]) <= 6;
+    if (along) {
+      const q = mateSpot(P, k++, avoid);
+      avoid.push(q);
+      m.pos.set(q[0], 0, q[1]);
+      MS.along++;
+    } else if (sp !== 0) {
+      // (a floor that is gone, or a station the player has left: out to the street there)
+      if (!avoid.some(a => a === MS.lastStreet)) avoid.push(MS.lastStreet);
+      const q = mateSpot(MS.lastStreet, k++, avoid);
+      avoid.push(q);
+      m.pos.set(q[0], 0, q[1]);
+      m.left = m.st === 0;
+      MS.outOf++;
+    } else {
+      m.left = m.st === 0;
+      MS.left++;
+      continue;
+    }
+    m.vel.set(0, 0, 0);
+    m.vault = null;
+    m.ti = -1;
+    m.nv.path = undefined;
+    m.door = null;
+  }
+}
+/** v24.40 a skill of the player's, or of a teammate on their feet within 6 m of them (lockpick, repair, medic, rest) */
+function teamSkill<K extends keyof Skills>(k: K): Skills[K] | undefined {
+  let v = ROLE.skills[k];
+  for (const m of mates) {
+    if (m.st !== 0 || m.car || spaceOf(m.pos.x, m.pos.z) !== spaceOf(player.pos.x, player.pos.z)) continue;
+    if (Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z) > 6) continue;
+    const w = mateRole(m).skills[k];
+    if (w !== undefined && (v === undefined || (typeof w === 'number' ? w > (v as number) : !!w))) v = w;
+  }
+  return v;
+}
+/** the teammate whose skill it is (the line that says who did it), or null when it is the player's own */
+function skillBy<K extends keyof Skills>(k: K): Mate | null {
+  const own = ROLE.skills[k];
+  for (const m of mates) {
+    if (m.st !== 0 || m.car || spaceOf(m.pos.x, m.pos.z) !== spaceOf(player.pos.x, player.pos.z)) continue;
+    if (Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z) > 6) continue;
+    const w = mateRole(m).skills[k];
+    if (w !== undefined && (own === undefined || (typeof w === 'number' ? w > (own as number) : false))) return m;
+  }
+  return null;
+}
+/** v24.40 hunger, thirst, tiredness, bleeding: the same rates as the player's; they eat and drink from their own pack */
+function mateVitals(m: Mate, dt: number, gm: number) {
+  if (m.st === 2) return;
+  m.sayT -= dt;
+  m.hunger = clamp(m.hunger - gm * 2.2, 0, 100);
+  m.thirst = clamp(m.thirst - gm * 3.2, 0, 100);
+  m.fatigue = clamp(m.fatigue + (m.sleeping ? -gm * 14 * (mateRole(m).skills.rest ?? 1) : gm * 2.6), 0, 100);
+  // (soaked in the same rain as the player, out in it with them)
+  if (WX.soak >= 0.6 && !m.car && spaceOf(m.pos.x, m.pos.z) === 0 && !indoorAt(m.pos.x, m.pos.z))
+    m.fatigue = Math.min(100, m.fatigue + gm * 2);
+  if (m.st === 1) return;
+  if (m.hunger <= 0 || m.thirst <= 0) m.hp -= gm * 8;
+  if (m.bleed) m.hp -= dt * 0.6;
+  if (!m.bleed && m.hunger > 50 && m.thirst > 50)
+    m.hp = Math.min(100, m.hp + gm * (m.hunger >= 80 && m.thirst >= 80 ? 18 : 6));
+  m.useT -= dt;
+  if (m.useT <= 0) {
+    m.useT = 3;
+    const k = pickConsumable(m.inv, ITEMS, m);
+    if (k) mateUse(m, k);
+    else if (m.bleed && !m.inv.bandage && !m.inv.medkit)
+      mateSay(m, '我在流血……你有繃帶嗎？', 'I’m bleeding… do you have a bandage?', '#f99', 40);
+    else if (m.hunger < 15)
+      mateSay(m, '我好餓……你有吃的嗎？', 'I’m starving… do you have anything to eat?', '#fd9', 90);
+    else if (m.thirst < 15) mateSay(m, '我好渴……有水嗎？', 'I’m so thirsty… any water?', '#fd9', 90);
+  }
+  if (m.hp <= 0) mateDown(m, m.hunger <= 0 || m.thirst <= 0 ? 'starve' : 'bleed');
+}
+/** a teammate eats, drinks or treats itself (a nurse treats twice as well, as the player does) */
+function mateUse(m: Mate, k: string) {
+  const d = ITEMS[k];
+  m.hunger = clamp(m.hunger + (d.hunger || 0), 0, 100);
+  m.thirst = clamp(m.thirst + (d.thirst || 0), 0, 100);
+  m.fatigue = clamp(m.fatigue + (d.fatigue || 0), 0, 100);
+  m.hp = clamp(m.hp + (d.hp || 0) * (d.kind === 'med' ? (mateRole(m).skills.medic ?? 1) : 1), 0, 100);
+  if (d.stopBleed && m.bleed) {
+    m.bleed = false;
+    log(
+      getLanguage() === 'en'
+        ? `${mateName2(m)} stops the bleeding with a ${d.name}.`
+        : `${mateName2(m)}用${d.name}止住了血。`,
+      '#9f9',
+    );
+  }
+  if (d.risk && Math.random() < d.risk) {
+    m.hp = clamp(m.hp - 8, 0, 100);
+    m.thirst = clamp(m.thirst - 12, 0, 100);
+  }
+  if (--m.inv[k] <= 0) delete m.inv[k];
+  MS.used++;
+}
+/** v24.40 down: sixty seconds in which a bandage or a medical kit brings them back; then they are gone */
+function mateDown(m: Mate, why: string) {
+  if (m.st) return;
+  m.st = 1;
+  m.hp = 0;
+  m.downT = 60;
+  m.why = why;
+  m.bleed = false;
+  m.vault = null;
+  m.car = false;
+  m.rig.root.visible = true;
+  log(
+    getLanguage() === 'en'
+      ? `${mateName2(m)} is down! You have 60 seconds: a bandage or a medical kit can still save them (${MOBILE ? 'tap Save beside them' : `${keyLabel('interact')} beside them`}).`
+      : `${mateName2(m)}倒下了！60 秒內用繃帶或急救包還救得回來（${MOBILE ? '在旁邊點「救人」' : `在旁邊按 ${keyLabel('interact')}`}）。`,
+    '#f66',
+  );
+  if (mateOf(curCont) === m) renderPanel();
+  slowDown(tr('隊友倒下了', 'A teammate is down'));
+}
+function mateDie(m: Mate) {
+  if (m.st === 2) return;
+  m.st = 2;
+  m.body = spaceOf(m.pos.x, m.pos.z) === 0;
+  m.diedDay = Math.floor(gameMin / 1440) + 1;
+  MS.died++;
+  // what they carried stays where they fell (in an off-map space: at the street there)
+  const onMap = spaceOf(m.pos.x, m.pos.z) === 0;
+  const p: V2 = onMap ? [m.pos.x, m.pos.z] : freeNear(MS.lastStreet, 1.5);
+  const id = 'mategear' + m.id.slice(4);
+  if (Object.keys(m.inv).length && !conts.some(c => c.id === id)) {
+    const c = makeCont(id, p, 'crate', undefined, { ...m.inv });
+    c.label = '隊友的遺物';
+  }
+  m.inv = {};
+  const i = plaOthers.indexOf(m.mark);
+  if (i >= 0) plaOthers.splice(i, 1);
+  if (mateOf(curCont) === m) closePanel();
+  log(
+    getLanguage() === 'en'
+      ? `${mateName2(m)} (${mateRole(m).name}) is gone. Their pack lies where they fell.`
+      : `${mateName2(m)}（${mateRole(m).name}）走了。${ta(m)}的背包留在倒下的地方。`,
+    '#d9b',
+  );
+}
+/** a teammate who is down and within reach of the player, for [E] */
+function mateDownNear(r = 1.8) {
+  return (
+    mates.find(
+      m =>
+        m.st === 1 &&
+        spaceOf(m.pos.x, m.pos.z) === spaceOf(player.pos.x, player.pos.z) &&
+        Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z) < r,
+    ) || null
+  );
+}
+function mateRescuePrompt() {
+  const m = !drive.cur && (player.inv.medkit || player.inv.bandage) ? mateDownNear() : null;
+  if (!m) return '';
+  return getLanguage() === 'en'
+    ? `[E] Save ${mateName2(m)} (${Math.ceil(m.downT)} s)`
+    : `[E] 救${mateName2(m)}（剩 ${Math.ceil(m.downT)} 秒）`;
+}
+/** [E] beside a teammate who is down: a medical kit, else a bandage, from the player's pack */
+function mateRescue() {
+  // (with nothing to treat them with, E does what it would do anyway: a cabinet near may hold the bandage)
+  const kit = player.inv.medkit ? 'medkit' : player.inv.bandage ? 'bandage' : '';
+  const m = !drive.cur && kit ? mateDownNear() : null;
+  if (!m) return false;
+  if (--player.inv[kit] <= 0) delete player.inv[kit];
+  // (who treats them: the player, or a nurse beside the player; not the one lying there)
+  const mult = teamSkill('medic') ?? 1;
+  m.st = 0;
+  m.hp = (kit === 'medkit' ? 45 : 25) * mult;
+  m.bleed = false;
+  m.downT = 0;
+  m.ti = -1;
+  m.rig.deadT = 0;
+  MS.saved++;
+  log(
+    getLanguage() === 'en'
+      ? `You patch ${mateName2(m)} up with a ${ITEMS[kit].name}. They are back on their feet.`
+      : `你用${ITEMS[kit].name}幫${mateName2(m)}止血包紮，${ta(m)}撐著站了起來。`,
+    '#9f9',
+  );
+  mateSay(m, '……謝了。我還走得動。', '…Thanks. I can still walk.');
+  return true;
+}
+/** v24.41 hurt by a soldier (filled in with the fighting) */
+function mateHurt(m: Mate, dmg: number, s: Sol, melee: boolean) {
+  void m;
+  void dmg;
+  void s;
+  void melee;
+}
+function mateSpotted(m: Mate, s: Sol) {
+  void m;
+  void s;
+}
+/** is the ground under them loaded (walls only exist on loaded district tiles) */
+function mateGround(x: number, z: number) {
+  if (spaceOf(x, z) !== 0 || inCore(x, z) || !district.ix) return true;
+  const T = district.ix.T,
+    k = Math.floor(x / T) + '_' + Math.floor(z / T);
+  return !district.ix.tiles[k] || district.tiles.has(k);
+}
+/**
+ * v24.40 every frame, once the player has moved: the teammates follow the player's steps (the trail), take the same
+ * doors and low walls, keep their pace (sneak when the player sneaks, run to catch up), come along up the stairs and
+ * down into the metro, ride along, and stand watching the way you came when you stop.
+ */
+function updateMates(dt: number, gm: number) {
+  if (!mates.length) return;
+  const P = player.pos;
+  const inCar = !!drive.cur;
+  const pSpace = spaceOf(P.x, P.z);
+  if (inCar !== MS.car) {
+    if (inCar) matesBoard();
+    else matesAlight();
+    MS.car = inCar;
+    mateTrail.reset(P.x, P.z);
+  } else if (
+    !inCar &&
+    (Math.hypot(P.x - MS.lastX, P.z - MS.lastZ) > 3 ||
+      (up?.b ?? null) !== (MS.lastUp?.b ?? null) ||
+      (up?.f ?? 0) !== (MS.lastUp?.f ?? 0) ||
+      !!up?.roof !== !!MS.lastUp?.roof)
+  ) {
+    matesJump([MS.lastX, MS.lastZ], MS.lastSpace);
+    mateTrail.reset(P.x, P.z);
+  }
+  if (!inCar && !roofB) mateTrail.push(P.x, P.z, player.vaultT > 0);
+  const night = isNight();
+  mates.forEach((m, i) => {
+    mateVitals(m, dt, gm);
+    updateMate(m, i, dt, pSpace, night);
+  });
+  MS.lastX = P.x;
+  MS.lastZ = P.z;
+  MS.lastSpace = pSpace;
+  MS.lastStreet = streetPos();
+  MS.lastUp = up ? { b: up.b, f: up.f, roof: !!up.roof } : null;
+}
+function updateMate(m: Mate, i: number, dt: number, pSpace: number, night: boolean) {
+  const P = player.pos;
+  if (m.car) {
+    m.pos.set(P.x, 0, P.z);
+    m.rig.root.visible = false;
+    m.mark.p[0] = m.pos.x;
+    m.mark.p[1] = m.pos.z;
+    return;
+  }
+  const sp = spaceOf(m.pos.x, m.pos.z);
+  const same = sp === pSpace;
+  const dP = Math.hypot(P.x - m.pos.x, P.z - m.pos.z);
+  const far = !same || dP > 150;
+  m.rig.root.visible = !far && (m.st !== 2 || m.body);
+  if (m.st === 2) {
+    if (!far && m.body && m.rig.deadT < 1) animate(m.rig, 'death', 0, dt);
+    return;
+  }
+  if (m.st === 1) {
+    m.downT -= dt;
+    mateMarkAt(m, sp);
+    if (!far) animate(m.rig, 'death', 0, dt);
+    if (m.downT <= 0) mateDie(m);
+    return;
+  }
+  // asleep while the player sleeps (in the same place)
+  m.sleeping = player.sleeping && same && dP < 12;
+  let goal: V2 | null = null,
+    speed = 0;
+  // left behind: they wait until the player is back near them
+  if (m.left && same && dP < 15 && !drive.cur) m.left = false;
+  const follow =
+    m.mode === 0 &&
+    !m.left &&
+    same &&
+    !drive.cur &&
+    !player.sleeping &&
+    !roofB &&
+    !m.sleeping &&
+    mateGround(m.pos.x, m.pos.z);
+  const sneak = player.sneak || !!player.cover;
+  m.sneak = (follow || (same && dP < 20)) && sneak;
+  m.cover = same && dP < 3 && !!player.cover;
+  if (follow && dP > 60) {
+    // far behind (the player ran off, or the streets around them are gone): back where the player walked
+    const T = mateTrail.behind(1.6 + i * 1.1),
+      q = mateTrail.at(T);
+    if (q && mateTrail.len >= 1.6 + i * 1.1 && bodyFits(q.x, q.z)) {
+      m.pos.set(q.x, 0, q.z);
+      m.ti = T;
+    } else {
+      const taken: V2[] = [[P.x, P.z], ...mates.filter(o => o !== m).map(o => [o.pos.x, o.pos.z] as V2)];
+      const s = mateSpot([P.x, P.z], i, taken);
+      m.pos.set(s[0], 0, s[1]);
+      m.ti = -1;
+    }
+    m.vel.set(0, 0, 0);
+    m.stuckT = 0;
+    MS.teleports++;
+  } else if (follow && mateTrail.len < 1.6 + i * 1.1 && dP < 4.5 + i * 1.1) {
+    // the player has not walked far since the trail began (just woken, just come up the stairs): stay put, unless right
+    // on top of them (never closer than an arm's length)
+    if (dP < 0.9) {
+      goal = [m.pos.x + (m.pos.x - P.x) / (dP || 1), m.pos.z + (m.pos.z - P.z) / (dP || 1)];
+      speed = 1.2;
+    }
+  } else if (follow) {
+    const gap = 1.6 + i * 1.1;
+    const T = mateTrail.behind(gap);
+    if (m.ti >= 0 && !mateTrail.has(m.ti)) m.ti = -1;
+    const me: V2 = [m.pos.x, m.pos.z];
+    if (m.ti < 0 && dP < 12 && mateTrail.len >= gap) {
+      const j = mateTrail.nearest(m.pos.x, m.pos.z, q => los(me, q), 5);
+      if (j >= 0) m.ti = Math.min(j, T);
+    }
+    if (m.ti >= 0) {
+      m.nv.path = undefined;
+      // on along the trail while the point after next can be walked to straight (no zig-zags)
+      while (m.ti < T) {
+        const q = mateTrail.at(m.ti),
+          n = mateTrail.at(m.ti + 1);
+        if (n.v && !q.v) {
+          if (Math.hypot(q.x - m.pos.x, q.z - m.pos.z) < 0.45) {
+            // the player vaulted a low wall here: so do they
+            let k = m.ti + 1;
+            while (k < mateTrail.head && mateTrail.at(k).v) k++;
+            const b = mateTrail.at(k);
+            m.vault = { a: m.pos.clone(), b: new THREE.Vector3(b.x, 0, b.z), t: 0, to: k };
+            m.rig.vaultT = 0.55;
+            MS.vaults++;
+          }
+          break;
+        }
+        const dq = Math.hypot(q.x - m.pos.x, q.z - m.pos.z);
+        if (dq < 0.35 || (dq < 2.4 && Math.hypot(n.x - m.pos.x, n.z - m.pos.z) < 3 && los(me, [n.x, n.z]))) m.ti++;
+        else break;
+      }
+      const q = mateTrail.at(Math.min(m.ti, T));
+      const tq = mateTrail.at(T);
+      const lag = m.ti <= T ? tq.d - q.d + Math.hypot(q.x - m.pos.x, q.z - m.pos.z) : 0;
+      if (lag > 0.4 && dP > 1.1) {
+        goal = [q.x, q.z];
+        speed = sneak ? (lag > 2.4 ? 2.4 : 1.6) : lag > 5 ? 6 : lag > 2.4 ? 4.4 : 3.4;
+      }
+    } else {
+      // off the trail (just come along, loaded, called back from waiting): a path back to the player
+      const N = nav;
+      if (N && sp === 0 && pSpace === 0 && !offMap(P.x, P.z)) {
+        const nv = m.nv;
+        if (!nv.navQ && (!nv.pgoal || Math.hypot(nv.pgoal[0] - P.x, nv.pgoal[1] - P.z) > 3 || nv.t <= 0)) {
+          nv.pgoal = [P.x, P.z];
+          nv.t = 2;
+          if (N.clear(me, N.snap(nv.pgoal))) {
+            nv.path = [nv.pgoal];
+            nv.pi = 0;
+          } else {
+            nv.navQ = true;
+            navQ.push(nv as any as Sol);
+            MS.paths++;
+          }
+        }
+        nv.t -= dt;
+        if (nv.path && nv.pi !== undefined) {
+          while (nv.pi < nv.path.length - 1) {
+            const w = nv.path[nv.pi];
+            const d = Math.hypot(w[0] - m.pos.x, w[1] - m.pos.z);
+            if (d < 0.35 || (d < 1.2 && N.clear(me, nv.path[nv.pi + 1]))) nv.pi++;
+            else break;
+          }
+          goal = nv.path[nv.pi];
+        }
+      } else goal = [P.x, P.z];
+      if (dP < 1.6 + i * 1.1) goal = null;
+      speed = sneak ? 2.4 : dP > 6 ? 6 : 3.4;
+    }
+  }
+  if (m.fatigue >= 95) speed = Math.min(speed, 3.4);
+  if (m.fatigue > 80) speed *= 0.7;
+  // moving
+  const ox = m.pos.x,
+    oz = m.pos.z;
+  if (m.vault) {
+    m.vault.t += dt / 0.55;
+    const t = Math.min(1, m.vault.t);
+    m.pos.lerpVectors(m.vault.a, m.vault.b, t * t * (3 - 2 * t));
+    if (t >= 1) {
+      m.ti = m.vault.to;
+      m.vault = null;
+    }
+  } else if (goal && speed > 0) {
+    const gx = goal[0] - m.pos.x,
+      gz = goal[1] - m.pos.z,
+      gl = Math.hypot(gx, gz);
+    if (gl > 0.05) {
+      mateDoor(m, goal);
+      const want = new THREE.Vector3((gx / gl) * speed, 0, (gz / gl) * speed);
+      m.vel.lerp(want, Math.min(1, dt * (want.lengthSq() > m.vel.lengthSq() ? 9 : 7)));
+      m.pos.addScaledVector(m.vel, dt);
+      if (gl < m.vel.length() * dt) m.pos.set(goal[0], 0, goal[1]);
+    }
+  } else m.vel.multiplyScalar(Math.max(0, 1 - dt * 8));
+  if (!m.vault) {
+    if (!goal && m.vel.lengthSq() > 0.0004) m.pos.addScaledVector(m.vel, dt);
+    collide(m.pos, 0.35);
+    collideDoors(m.pos);
+    if (sp === 0) {
+      const b = roadT.barrierAt(m.pos.x, m.pos.z, 1.1);
+      if (b) {
+        const dx = m.pos.x - b.x,
+          dz = m.pos.z - b.z,
+          L = Math.hypot(dx, dz) || 1;
+        m.pos.x = b.x + (dx / L) * 1.1;
+        m.pos.z = b.z + (dz / L) * 1.1;
+      }
+      const w = roadT.wreckNear(m.pos.x, m.pos.z, 1.4);
+      if (w) {
+        const dx = m.pos.x - w.x,
+          dz = m.pos.z - w.z,
+          L = Math.hypot(dx, dz) || 1;
+        m.pos.x = w.x + (dx / L) * 1.4;
+        m.pos.z = w.z + (dz / L) * 1.4;
+      }
+    }
+  }
+  m.moving = Math.hypot(m.pos.x - ox, m.pos.z - oz) / Math.max(dt, 1e-4);
+  if (m.moving > 3.6) m.fatigue = Math.min(100, m.fatigue + dt * 0.25); // (as the player tires running)
+  // stuck: back to a path, then (out of the way, or far) where the player walked
+  if (goal && speed > 0 && !m.vault && m.moving < speed * 0.2) m.stuckT += dt;
+  else m.stuckT = Math.max(0, m.stuckT - dt * 2);
+  if (m.stuckT > 2.5 && m.ti >= 0) {
+    m.ti = -1;
+    m.stuckT = 1;
+  } else if (m.stuckT > 6 && dP > 8) {
+    const T = mateTrail.behind(1.6 + i * 1.1),
+      q = mateTrail.at(T);
+    if (q && bodyFits(q.x, q.z)) {
+      m.pos.set(q.x, 0, q.z);
+      m.ti = T;
+      MS.teleports++;
+    }
+    m.stuckT = 0;
+  }
+  mateDoorBehind(m);
+  // footsteps (heard by the soldiers as the player's are: walking 3.5 m, running 11 m; nothing when sneaking)
+  if (m.moving > 0.2 && !m.sneak && sp === 0) {
+    m.noiseA += dt;
+    const run = m.moving > 3.6;
+    if (m.noiseA > (run ? 0.5 : 1)) {
+      m.noiseA = 0;
+      noise(m.pos.x, m.pos.z, run ? 11 : 3.5, true);
+    }
+    m.stepA += m.moving * dt;
+    if (m.stepA > (run ? 1.1 : 0.8)) {
+      m.stepA = 0;
+      const dd = Math.hypot(m.pos.x - P.x, m.pos.z - P.z);
+      if (dd < 22) AU.footstep(surfaceAt(m.pos.x, m.pos.z), dd, false, run);
+    }
+  }
+  // facing: where they are going; standing, the way the player came (each a little to one side)
+  let want = m.yaw;
+  if (m.moving > 0.3) want = Math.atan2(m.vel.x, m.vel.z);
+  else if (follow && dP < 6) want = player.mesh.rotation.y + Math.PI + (i ? -0.7 : 0.7);
+  m.yaw += Math.atan2(Math.sin(want - m.yaw), Math.cos(want - m.yaw)) * Math.min(1, dt * 7);
+  mateMarkAt(m, sp);
+  if (far) return;
+  m.rig.root.rotation.y = m.yaw;
+  setWeapon(m.rig, m.equip);
+  animate(
+    m.rig,
+    m.sleeping ? 'sleep' : m.sneak || m.cover ? 'sneak' : m.moving > 3.6 ? 'run' : m.moving > 0.15 ? 'walk' : 'idle',
+    m.moving,
+    dt,
+  );
+  m.rig.root.position.set(m.pos.x, walkH(m.pos.x, m.pos.z), m.pos.z);
+  void night;
+}
+/** where on the map a teammate is (upstairs: where that floor really is; underground: the street exit above) */
+function mateMarkAt(m: Mate, sp: number) {
+  const k = m.mark;
+  if (sp === 1 && up) ((k.p[0] = m.pos.x - up.off[0]), (k.p[1] = m.pos.z - up.off[1]));
+  else if (sp === 2) {
+    const q = streetPos();
+    k.p[0] = q[0];
+    k.p[1] = q[1];
+  } else ((k.p[0] = m.pos.x), (k.p[1] = m.pos.z));
+  k.inside = sp === 0 && !!bldAt(m.pos.x, m.pos.z);
+}
+/** a closed door between a teammate and where it is going: it opens it (and closes it again once through) */
+function mateDoor(m: Mate, goal: V2) {
+  if (m.door) return;
+  const me: V2 = [m.pos.x, m.pos.z];
+  for (const d of doors as LiveDoor[]) {
+    if (d.open || d.barricaded || Math.abs(d.p[0] - m.pos.x) > 2.5 || Math.abs(d.p[1] - m.pos.z) > 2.5) continue;
+    if (Math.hypot(d.p[0] - m.pos.x, d.p[1] - m.pos.z) > 1.4) continue;
+    const ux = goal[0] - me[0],
+      uz = goal[1] - me[1],
+      ul = Math.hypot(ux, uz) || 1;
+    const far: V2 = [me[0] + (ux / ul) * Math.max(ul, 1.5), me[1] + (uz / ul) * Math.max(ul, 1.5)];
+    if (!segX(me, far, d.a, d.c)) continue;
+    d.open = true;
+    m.door = d;
+    MS.doors++;
+    const dd = Math.hypot(d.p[0] - player.pos.x, d.p[1] - player.pos.z);
+    if (dd < 14) doorSound(true);
+    noise(d.p[0], d.p[1], 4, true);
+    return;
+  }
+}
+function mateDoorBehind(m: Mate) {
+  const d = m.door;
+  if (!d) return;
+  const dm = Math.hypot(d.p[0] - m.pos.x, d.p[1] - m.pos.z);
+  // (someone else shut it again, or they went another way: nothing more to do with it)
+  if (!d.open || dm > 8) return void (m.door = null);
+  if (dm < 1.5) return;
+  // closed again behind them, once nobody else is in the doorway or about to come through
+  if (Math.hypot(d.p[0] - player.pos.x, d.p[1] - player.pos.z) < 2.5) return;
+  if (mates.some(o => o !== m && o.st === 0 && !o.car && Math.hypot(d.p[0] - o.pos.x, d.p[1] - o.pos.z) < 3)) return;
+  m.door = null;
+  d.open = false;
+  MS.closed++;
+  if (Math.hypot(d.p[0] - player.pos.x, d.p[1] - player.pos.z) < 14) doorSound(false);
+}
+/** a teammate on their feet within r of the player, in the same place (not riding) */
+function mateNear(r: number) {
+  let best: Mate | null = null,
+    bd = r;
+  for (const m of mates) {
+    if (m.st !== 0 || m.car || spaceOf(m.pos.x, m.pos.z) !== spaceOf(player.pos.x, player.pos.z)) continue;
+    const d = Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z);
+    if (d < bd) ((bd = d), (best = m));
+  }
+  return best;
+}
+/** the start of a game with teammates: who they are (the opening card, or a line), the phone's 隊 button */
+function matesStart(load: boolean) {
+  document.body.classList.toggle('has-mates', mates.length > 0);
+  if (!mates.length) return;
+  if (MOBILE && !document.getElementById('teambtn')) initTeamButton();
+  if (load) return;
+  const me: MatePick = { r: ROLE.id, g: player.gender === 'f' ? 'f' : 'm' };
+  const party = [me, ...mates.map(m => m.pick)];
+  const who = mates.map(m => mateLine(me, m.pick, party)).join(getLanguage() === 'en' ? ', ' : '、');
+  // the courier knows the streets by heart: the whole map, as for a courier player
+  if (mates.some(m => mateRole(m).skills.streets) && gmap)
+    gmap.revealRect(bounds.minx, bounds.minz, bounds.maxx, bounds.maxz);
+  const ov = document.getElementById('wake');
+  if (ov) {
+    const sm = document.createElement('small');
+    sm.className = 'wake-mates';
+    sm.textContent = getLanguage() === 'en' ? `With you: ${who}` : `一起出門：${who}`;
+    ov.appendChild(sm);
+  } else
+    log(
+      getLanguage() === 'en'
+        ? `With you: ${who}. They follow you; ${MOBILE ? 'hold the Team button' : keyLabel('mates')} tells them to wait or follow.`
+        : `和你在一起的：${who}。他們會跟著你；${MOBILE ? '長按「隊」' : `按 ${keyLabel('mates')}`}叫他們待命或跟上。`,
+      '#cfe8ff',
+    );
+}
+/** v24.40 T (or the phone's 隊, held): everyone waits here, or everyone follows again */
+function matesFollowToggle() {
+  const live = mates.filter(m => m.st === 0);
+  if (!live.length) return;
+  const wait = live.some(m => m.mode === 0);
+  for (const m of live) {
+    m.mode = wait ? 1 : 0;
+    m.left = false;
+    m.ti = -1;
+  }
+  const names = live.map(mateName2).join(getLanguage() === 'en' ? ' and ' : '、');
+  log(
+    wait
+      ? getLanguage() === 'en'
+        ? `${names}: “We’ll wait here.”`
+        : `${names}：「我們在這裡等你。」`
+      : getLanguage() === 'en'
+        ? `${names}: “Right behind you.”`
+        : `${names}：「跟上了。」`,
+    '#cfe8ff',
+  );
+}
+/** v24.40 T held: the fire rule, for everyone (hold fire → use judgement → fire at will) */
+function matesRule() {
+  const live = mates.filter(m => m.st !== 2);
+  if (!live.length) return;
+  const r = ((live[0].rule + 1) % 3) as FireRule;
+  for (const m of live) m.rule = r;
+  log(
+    getLanguage() === 'en' ? `Fire rule for your companions: ${ruleName(r)}` : `隊友的開火規則：${ruleName(r)}`,
+    '#cfe8ff',
+  );
+}
+let matesHoldT: number | null = null,
+  matesHeld = false,
+  matesDownAt = 0;
+function matesKeyDown(e: KeyboardEvent) {
+  if (!mates.length || MP) return;
+  matesHeld = false;
+  matesDownAt = e.timeStamp;
+  if (matesHoldT !== null) clearTimeout(matesHoldT);
+  matesHoldT = window.setTimeout(() => {
+    matesHoldT = null;
+    matesHeld = true;
+    matesRule();
+  }, 450);
+}
+function matesKeyUp(e: KeyboardEvent) {
+  if (matesHoldT === null) return;
+  clearTimeout(matesHoldT);
+  matesHoldT = null;
+  if (matesHeld) return;
+  // (how long it was held, from the events themselves: a busy frame can hold the timer back past the key coming up)
+  if (e.timeStamp - matesDownAt >= 450) matesRule();
+  else matesFollowToggle();
+}
+/** v24.40 the phone: 隊 opens the nearest teammate (their pack and the orders); held, everyone waits or follows */
+function initTeamButton() {
+  const b = document.createElement('button');
+  b.id = 'teambtn';
+  b.className = 'pbtn';
+  b.textContent = tr('隊', 'Team');
+  b.title = tr('隊友（長按：待命／跟上）', 'Companions (hold: wait / follow)');
+  b.addEventListener('contextmenu', e => e.preventDefault());
+  let t = 0,
+    long = false;
+  b.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    b.setPointerCapture(e.pointerId);
+    b.classList.add('on');
+    long = false;
+    clearTimeout(t);
+    t = window.setTimeout(() => {
+      long = true;
+      matesFollowToggle();
+      vibrate(30);
+    }, 450);
+  });
+  const end = (ok: boolean) => {
+    b.classList.remove('on');
+    clearTimeout(t);
+    if (!ok || long || !started || dead) return;
+    const m = mateNear(40) || mates.find(q => q.st !== 2);
+    if (m) openMatePanel(m);
+  };
+  b.addEventListener('pointerup', () => end(true));
+  b.addEventListener('pointercancel', () => end(false));
+  document.body.appendChild(b);
+}
+/** a teammate's pack, shown in the loot column of the inventory panel (never one of the world's containers) */
+type MateCont = Cont & { mate: Mate };
+function openMatePanel(m: Mate) {
+  if (!started || dead) return;
+  const c = {
+    id: m.id,
+    p: [m.pos.x, m.pos.z],
+    items: m.inv,
+    label: mateName2(m),
+    mesh: null,
+    mate: m,
+  } as any as MateCont;
+  curCont = c;
+  panelOpen = true;
+  document.body.classList.add('inventory-open');
+  joy.x = joy.y = 0;
+  joy.id = -1;
+  $('joyk').style.transform = '';
+  MB.fire = false;
+  $('panel').classList.remove('hidden');
+  renderPanel();
+}
+const mateOf = (c: Cont | null) => ((c as MateCont | null)?.mate ?? null) as Mate | null;
+/** close enough to hand things over (3 m, the same place, on their feet) */
+function mateReach(m: Mate) {
+  return (
+    m.st === 0 &&
+    !m.car &&
+    spaceOf(m.pos.x, m.pos.z) === spaceOf(player.pos.x, player.pos.z) &&
+    Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z) < 3
+  );
+}
+const mateWeight = (m: Mate) => Object.entries(m.inv).reduce((s, [k, n]) => s + (ITEMS[k]?.w || 0) * n, 0);
+const mateCap = (m: Mate) => 15 * (mateRole(m).skills.carry ?? 1);
+/** the player hands something over (one at a time; rounds, the whole stack) */
+function mateGive(m: Mate, k: string) {
+  if (!player.inv[k] || !mateReach(m)) return;
+  const n = ITEMS[k].kind === 'ammo' ? player.inv[k] : 1;
+  if (mateWeight(m) + ITEMS[k].w * n > mateCap(m)) {
+    log(getLanguage() === 'en' ? `${mateName2(m)} cannot carry any more.` : `${mateName2(m)}背不動了。`, '#f99');
+    return;
+  }
+  player.inv[k] -= n;
+  if (player.inv[k] <= 0) {
+    delete player.inv[k];
+    if (player.equip === k) {
+      player.equip = '';
+      syncHeldWeapon();
+    }
+  }
+  m.inv[k] = (m.inv[k] || 0) + n;
+  m.equip = pickWeapon(m.inv, ITEMS);
+  m.useT = Math.min(m.useT, 0.5); // (hungry and handed food: they eat it now)
+  renderPanel();
+}
+/** taken out of a teammate's pack: what they hold may change */
+function mateTook(m: Mate) {
+  m.equip = pickWeapon(m.inv, ITEMS);
+}
+/** the teammate's state and orders, under their pack in the panel */
+function matePanelFoot(m: Mate, footer: HTMLElement) {
+  const btn = (id: string, text: string, run: () => void) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.id = id;
+    b.dataset.item = id;
+    b.textContent = text;
+    b.onclick = () => {
+      run();
+      renderPanel();
+    };
+    footer.appendChild(b);
+  };
+  if (m.st === 0)
+    btn('mate-mode', m.mode === 0 && !m.left ? tr('在這裡等', 'Wait here') : tr('跟著我', 'Follow me'), () => {
+      m.mode = m.mode === 0 && !m.left ? 1 : 0;
+      m.left = false;
+      m.ti = -1;
+    });
+  if (m.st !== 2)
+    btn('mate-rule', tr('開火：', 'Fire: ') + ruleName(m.rule), () => (m.rule = ((m.rule + 1) % 3) as FireRule));
+  const others = mates.filter(q => q !== m && q.st !== 2);
+  if (others.length)
+    btn('mate-next', getLanguage() === 'en' ? `→ ${mateName2(others[0])}` : `→ ${mateName2(others[0])}`, () =>
+      openMatePanel(others[0]),
+    );
+}
+function mateStatus(m: Mate) {
+  const st =
+    m.st === 2
+      ? tr('已陣亡', 'Dead')
+      : m.st === 1
+        ? getLanguage() === 'en'
+          ? `Down (${Math.ceil(m.downT)} s)`
+          : `倒地（剩 ${Math.ceil(m.downT)} 秒）`
+        : m.car
+          ? tr('在車上', 'Riding')
+          : m.sleeping
+            ? tr('睡著了', 'Asleep')
+            : m.mode === 1
+              ? tr('待命', 'Waiting')
+              : m.left
+                ? tr('等你回來', 'Waiting for you')
+                : tr('跟隨', 'Following');
+  const extra: string[] = [];
+  if (m.st === 0) {
+    if (m.bleed) extra.push(tr('流血', 'Bleeding'));
+    if (m.hunger < 25) extra.push(tr('飢餓', 'Hungry'));
+    if (m.thirst < 25) extra.push(tr('口渴', 'Thirsty'));
+    if (m.fatigue > 75) extra.push(tr('疲憊', 'Exhausted'));
+  }
+  return [st, ...extra].join(tr('・', ' · '));
+}
+/** the teammates under the player's bars (fixed height: one line each) */
+function matesHud() {
+  if (!mates.length) return '';
+  return (
+    '<div class="mates-hud">' +
+    mates
+      .map(
+        m =>
+          `<div class="mate-row${m.st === 1 ? ' down' : m.st === 2 ? ' dead' : ''}"><b>${mateName2(m)}</b><i style="width:${clamp(
+            m.st ? 0 : m.hp,
+            0,
+            100,
+          )}%"></i><span>${mateStatus(m)}</span></div>`,
+      )
+      .join('') +
+    '</div>'
+  );
+}
+/** the ending: what became of the people who started with you */
+function matesEnding() {
+  if (!mates.length) return '';
+  const en = getLanguage() === 'en';
+  return (
+    '<p class="mates-end">' +
+    mates
+      .map(m => {
+        const who = en ? `${mateName2(m)} (${mateRole(m).name})` : `${mateName2(m)}（${mateRole(m).name}）`;
+        const k = m.kills ? (en ? `, having downed ${m.kills} occupation troops` : `，擊倒 ${m.kills} 名`) : '';
+        return m.st === 2
+          ? en
+            ? `${who} fell on day ${m.diedDay}${k}.`
+            : `${who}在第 ${m.diedDay} 天倒下${k}。`
+          : m.st === 1
+            ? en
+              ? `${who} lay wounded beside you${k}.`
+              : `${who}負傷倒在你身邊${k}。`
+            : en
+              ? `${who} was still with you${k}.`
+              : `${who}還跟你在一起${k}。`;
+      })
+      .join('<br>') +
+    '</p>'
+  );
 }
 // ---------- v22.11 grenades: flush a player who camps out of sight ----------
 type Gren = { s: V2; p: V2; t: number; fuse: number; mesh: THREE.Mesh; w?: { g: THREE.Group; on: boolean } };
@@ -6108,6 +7292,7 @@ addEventListener('keydown', e => {
   if (is('shove')) shove();
   if (is('cover')) toggleCover();
   if (is('shelter')) survOpen ? closeSurv() : openSurv('home');
+  if (is('mates') && !e.repeat) matesKeyDown(e); // v24.40 tap: wait / follow; hold: the fire rule
 });
 /** close the top-most overlay; returns false when nothing was open */
 function closeTop(): boolean {
@@ -6222,7 +7407,10 @@ function togglePause(on = !pauseOpen(), fromBack = false) {
   paused = on && !MP;
   if (on) for (const k in keys) keys[k] = false;
 }
-addEventListener('keyup', e => (keys[e.code] = false));
+addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (isKey(e.code, 'mates')) matesKeyUp(e); // v24.40
+});
 addEventListener('mousemove', e => {
   mouse.set((e.clientX / innerWidth) * 2 - 1, (-e.clientY / innerHeight) * 2 + 1);
 });
@@ -6656,7 +7844,7 @@ function useItem(k: string) {
         : tr('收起武器', 'Weapon holstered'),
     );
   } else if (k === 'rocradio_b') {
-    const ok = player.inv.lipo && (player.inv.vtx || player.inv.lipo >= 2 || ROLE.skills.repair);
+    const ok = player.inv.lipo && (player.inv.vtx || player.inv.lipo >= 2 || teamSkill('repair'));
     if (!ok) {
       log(
         tr(
@@ -6667,7 +7855,10 @@ function useItem(k: string) {
       );
       return;
     }
-    const use = ROLE.skills.repair ? ['lipo'] : player.inv.vtx ? ['lipo', 'vtx'] : ['lipo', 'lipo'];
+    const use = teamSkill('repair') ? ['lipo'] : player.inv.vtx ? ['lipo', 'vtx'] : ['lipo', 'lipo'];
+    const fixer = teamSkill('repair') ? skillBy('repair') : null;
+    if (fixer)
+      log(getLanguage() === 'en' ? `${mateName2(fixer)} does the repair.` : `${mateName2(fixer)}動手修理。`, '#cfe8ff');
     for (const q of use) {
       if (--player.inv[q] <= 0) delete player.inv[q];
     }
@@ -6756,7 +7947,15 @@ function useItem(k: string) {
     player.hunger = clamp(player.hunger + (d.hunger || 0), 0, 100);
     player.thirst = clamp(player.thirst + (d.thirst || 0), 0, 100);
     player.fatigue = clamp(player.fatigue + (d.fatigue || 0), 0, 100);
-    player.hp = clamp(player.hp + (d.hp || 0) * (d.kind === 'med' ? (ROLE.skills.medic ?? 1) : 1), 0, 100);
+    player.hp = clamp(player.hp + (d.hp || 0) * (d.kind === 'med' ? (teamSkill('medic') ?? 1) : 1), 0, 100);
+    const medic = d.kind === 'med' ? skillBy('medic') : null; // v24.40 a nurse beside you does it, twice as well
+    if (medic)
+      log(
+        getLanguage() === 'en'
+          ? `${mateName2(medic)} treats you (${d.name}).`
+          : `${mateName2(medic)}幫你處理傷口（${d.name}）。`,
+        '#cfe8ff',
+      );
     if (d.stopBleed && player.bleed) {
       player.bleed = false;
       log(tr('止血了', 'Bleeding stopped'), '#9f9');
@@ -6900,7 +8099,13 @@ function renderPanel() {
     getLanguage() === 'en' ? `Inventory (${weight().toFixed(1)} / 15 kg)` : `背包（${weight().toFixed(1)} / 15 kg）`,
     'inventory-items',
   );
+  // v24.40 a teammate's pack: the player's things are handed over instead of used
+  const mt = mateOf(curCont);
   for (const [k, n] of Object.entries(player.inv)) {
+    if (mt) {
+      item(inv, k, n, mateReach(mt) ? tr('給', 'Give') : '', () => mateGive(mt, k), player.equip === k);
+      continue;
+    }
     const actions =
       getLanguage() === 'en'
         ? { food: 'Eat', drink: 'Drink', med: 'Heal', melee: 'Equip', gun: 'Equip', ammo: 'Ammo', tool: 'Tool' }
@@ -6911,7 +8116,29 @@ function renderPanel() {
   if (!Object.keys(player.inv).length) empty(inv, tr('空的', 'Empty'));
   const footer = document.createElement('div');
   footer.className = 'inventory-actions';
-  if (curCont) {
+  if (curCont && mt) {
+    // v24.40 the teammate: their pack (what they hold ★), their state, and the orders
+    const list = col(
+      getLanguage() === 'en'
+        ? `${mateName2(mt)} · ${mateRole(mt).name} (${mateWeight(mt).toFixed(1)} / ${mateCap(mt).toFixed(0)} kg) · ${mateStatus(mt)}`
+        : `${mateName2(mt)}・${mateRole(mt).name}（${mateWeight(mt).toFixed(1)} / ${mateCap(mt).toFixed(0)} kg）・${mateStatus(mt)}`,
+      'loot-items',
+    );
+    const near = mateReach(mt);
+    const cc = curCont;
+    for (const [k, n] of Object.entries(mt.inv))
+      item(list, k, n, near ? tr('拿取', 'Take') : '', () => mateReach(mt) && mt.inv[k] && take(cc, k), mt.equip === k);
+    if (!Object.keys(mt.inv).length)
+      empty(list, getLanguage() === 'en' ? 'They carry nothing' : `${ta(mt)}身上沒東西了`);
+    if (mt.st === 1)
+      empty(
+        list,
+        getLanguage() === 'en' ? 'Down: a bandage or a medical kit can save them' : `倒下了：用繃帶或急救包救${ta(mt)}`,
+      );
+    else if (!near && mt.st !== 2)
+      empty(list, tr('離你太遠，靠近一點才能交換東西', 'Too far away: come closer to hand things over'));
+    matePanelFoot(mt, footer);
+  } else if (curCont) {
     const cc = curCont;
     const list = col(translateLabel(cc.label), 'loot-items');
     for (const [k, n] of Object.entries(cc.items)) item(list, k, n, tr('拿取', 'Take'), () => take(cc, k));
@@ -6951,6 +8178,8 @@ function take(c: Cont, k: string, all = false) {
   addItem(k, n);
   c.items[k] -= n;
   if (c.items[k] <= 0) delete c.items[k];
+  const tm = mateOf(c);
+  if (tm) mateTook(tm); // v24.40 out of a teammate's pack
   if (c.id[0] === 't' && c.id.includes(':')) {
     const [key, i] = c.id.slice(1).split(':');
     district.save(key, 'c', { ...(district.saved[key]?.c || {}), [i]: c.items });
@@ -7473,6 +8702,7 @@ function interact() {
     else soonToast(tr('靠近綠色補給箱或敵人掉落物再互動', 'Move near a green supply crate or enemy drop to collect'));
     return;
   }
+  if (mateRescue()) return; // v24.40 a teammate who is down, first
   if (npcInteract()) return;
   if (upToggle()) return; // v23.4 stairs between the ground floor and 2F
   if (roofB || roofDoor()) {
@@ -7592,6 +8822,11 @@ function interact() {
       c.items[k] = (c.items[k] || 0) + 1;
       log(tr('🌙 夜裡摸黑翻找，多找到一些東西。', '🌙 Searching in the dark, you find a few extra supplies.'), '#adf');
     }
+  }
+  if (!c) {
+    // v24.40 nothing else here: talk to the teammate beside you (their pack, wait or follow, the fire rule)
+    const m = mateNear(1.6);
+    if (m) return openMatePanel(m);
   }
   if (c) {
     curCont = c;
@@ -8500,6 +9735,7 @@ function save() {
     bar: doors.map((d, i) => (d.barricaded ? i : -1)).filter(i => i >= 0),
     radio: radioLog,
     story: STORY_DEBUG ? storyRunner.snapshot() : storySaved,
+    m: matesSave(), // v24.40 (absent without teammates)
   });
 }
 
@@ -8831,6 +10067,7 @@ function update(dt: number) {
     player.mesh.position.copy(player.pos);
     player.mesh.position.y += roofB ? roofB.h : walkH(player.pos.x, player.pos.z); // v21.4 stand on the raised walk (v22.5 or a roof)
   }
+  updateMates(dt, gm); // v24.40 the teammates move once the player has (before the soldiers look round)
   // v21.2 shader cutaway around the camera→player line (see occlusion.ts); camera itself unchanged
   OCC.r.value = upIn() || indoorAt(player.pos.x, player.pos.z) ? 3 : 6; // v24.16 outdoors: see the street behind the block
   const aloft = flyingNow(); // v24.24 the city from above: nothing is cut away, nothing counts as being inside
@@ -9419,7 +10656,8 @@ function drawHud(inside: Bld | null) {
     bar(tr('飽足', 'Fullness'), player.hunger, '#c9842a') +
     bar(tr('水分', 'Hydration'), player.thirst, '#3a8ad6') +
     bar(tr('精神', 'Energy'), 100 - player.fatigue, '#8a6ad6') +
-    `<div class="moodles">${m.map(x => `<span>${x}</span>`).join('')}</div>`;
+    `<div class="moodles">${m.map(x => `<span>${x}</span>`).join('')}</div>` +
+    matesHud();
   const day = Math.floor(gameMin / 1440) + 1,
     h = Math.floor(gameMin / 60) % 24,
     mi = Math.floor(gameMin) % 60;
@@ -9460,7 +10698,11 @@ function drawHud(inside: Bld | null) {
     }
   }
   const rd = roofB ? null : roofDoor();
-  if (up && upFlightFoot() && !panelOpen) {
+  const mr = panelOpen ? '' : mateRescuePrompt();
+  if (mr) {
+    pr.style.display = 'block';
+    pr.textContent = mr;
+  } else if (up && upFlightFoot() && !panelOpen) {
     pr.style.display = 'block';
     pr.textContent =
       up.f + 1 > up.top
@@ -9547,6 +10789,17 @@ function drawHud(inside: Bld | null) {
   } else if (!panelOpen && vehicles.nearest(player.pos, 2.2)) {
     pr.style.display = 'block';
     pr.textContent = tr('[E] 查看載具', '[E] Inspect vehicle');
+  } else if (
+    !panelOpen &&
+    !MOBILE &&
+    mateNear(1.6) &&
+    !(roadT.wreckNear(player.pos.x, player.pos.z, 2.8) && !roadT.wreckNear(player.pos.x, player.pos.z, 2.8)!.looted)
+  ) {
+    pr.style.display = 'block';
+    pr.textContent =
+      getLanguage() === 'en'
+        ? `[E] Talk to ${mateName2(mateNear(1.6)!)} (their pack, wait or follow, fire rule)`
+        : `[E] 和${mateName2(mateNear(1.6)!)}交談（背包、待命或跟隨、開火規則）`;
   } else if (d && !panelOpen) {
     pr.style.display = 'block';
     pr.textContent = d.barricaded
@@ -9592,8 +10845,8 @@ function die() {
   const day = Math.floor(gameMin / 1440) + 1;
   t.innerHTML =
     getLanguage() === 'en'
-      ? `<h1 style="color:#c33">You died</h1><h2>This is how your story ends.</h2><p>You survived occupied Taipei for ${day} days, defeated ${player.kills} occupation troops and reclaimed ${liberated.size} districts.</p><button onclick="location.reload()">Start again (new survivor)</button>`
-      : `<h1 style="color:#c33">你陣亡了</h1><h2>這就是你的結局。</h2><p>你在淪陷的台北撐過了 ${day} 天，擊倒 ${player.kills} 名佔領軍，奪回了 ${liberated.size} 個街區。</p><button onclick="location.reload()">重新開始（新的倖存者）</button>`;
+      ? `<h1 style="color:#c33">You died</h1><h2>This is how your story ends.</h2><p>You survived occupied Taipei for ${day} days, defeated ${player.kills} occupation troops and reclaimed ${liberated.size} districts.</p>${matesEnding()}<button onclick="location.reload()">Start again (new survivor)</button>`
+      : `<h1 style="color:#c33">你陣亡了</h1><h2>這就是你的結局。</h2><p>你在淪陷的台北撐過了 ${day} 天，擊倒 ${player.kills} 名佔領軍，奪回了 ${liberated.size} 個街區。</p>${matesEnding()}<button onclick="location.reload()">重新開始（新的倖存者）</button>`;
 }
 /**
  * v24.30 an upper floor lives off-map (its own collision, its own furniture), but it is drawn where it really is. Two
@@ -10549,7 +11802,7 @@ async function boot() {
     if (r.skills.streets && gmap) gmap.revealRect(bounds.minx, bounds.minz, bounds.maxx, bounds.maxz);
     if (!skip && dest) startPrologue(from, dest.door!.p as V2, r.destLabel);
   };
-  const prepareGame = (load: boolean, gender = 'm', roleId = 'courier', skipIntro = false) => {
+  const prepareGame = (load: boolean, gender = 'm', roleId = 'courier', skipIntro = false, picks: MatePick[] = []) => {
     pails = [];
     pailConts = [];
     setMultiplayerSession(!!MP);
@@ -10667,6 +11920,7 @@ async function boot() {
           const k = makeCont(c[0], c[2], 'crate', undefined, c[1]);
           // v24.39 a fallen remnant squad's gear keeps its name
           if (id.startsWith('remgear')) k.label = '國軍殘部遺留裝備';
+          else if (id.startsWith('mategear')) k.label = '隊友的遺物'; // v24.40
         }
       });
       if (dropMoved)
@@ -10701,12 +11955,19 @@ async function boot() {
       player.inv = { ...ROLE.inv };
       spawnRole(ROLE, skipIntro);
     }
+    // v24.40 the people who started with you: a saved game brings back whoever it has (whatever the URL says, so that
+    // opening it without ?mates=1 never drops them); multiplayer has nobody
+    if (MP) clearMates();
+    else if (load && sv) matesLoad(sv.m);
+    else spawnMates(picks);
+    matesStart(load);
     $('title').style.display = 'none';
     started = true;
     if (!surv.home) surv.home = [player.pos.x, player.pos.z];
     setupSnipers();
     // v24.4 the Japanese expat knows where the JSDF liaison hides; a saved game keeps the pin once it was learned
-    if (ROLE.id === 'jp' || (surv as any).jpKnown) revealLiaison(false);
+    if (ROLE.id === 'jp' || (surv as any).jpKnown || mates.some(m => m.pick.r === 'jp' && m.st !== 2))
+      revealLiaison(false);
     {
       // v22.4.1 day 1: mark the home's street door (map pin + a bobbing arrow until you have stepped outside)
       const hb = bldAt(player.pos.x, player.pos.z);
@@ -10772,7 +12033,7 @@ async function boot() {
   // Let the loading surface paint before building the selected survivor, then warm shaders.
   let entering = false;
   const paint = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-  const go = async (load: boolean, gender = 'm', roleId = 'courier', skipIntro = false) => {
+  const go = async (load: boolean, gender = 'm', roleId = 'courier', skipIntro = false, picks: MatePick[] = []) => {
     if (entering || started) return;
     entering = true;
     const cover = document.createElement('div');
@@ -10786,7 +12047,7 @@ async function boot() {
     document.body.classList.add('entering-game');
     try {
       await paint();
-      prepareGame(load, gender, roleId, skipIntro);
+      prepareGame(load, gender, roleId, skipIntro, picks);
       started = false; // No simulation or autosave while shaders are warming.
       status.textContent = tr('準備畫面與光影…', 'Preparing the first frame…');
       camera.position.copy(player.pos).add(CAM_OFF);
@@ -10913,6 +12174,7 @@ async function boot() {
       const code = await new Net(base).create();
       (mpw.querySelector('#mpcode') as HTMLInputElement).value = code;
       MP = { base, code };
+      drawMates?.();
       mpMsg(
         getLanguage() === 'en'
           ? `Room ${code} created. Choose a character to start; share the code with friends.`
@@ -10927,16 +12189,21 @@ async function boot() {
     const code = (mpw.querySelector('#mpcode') as HTMLInputElement).value.trim().toUpperCase();
     if (!/^[A-Z2-9]{5}$/.test(code)) return mpMsg(tr('代碼是 5 碼', 'The code must be 5 characters.'));
     MP = { base, code };
+    drawMates?.();
     mpMsg(getLanguage() === 'en' ? `Joining ${code}. Choose a character to start.` : `將加入 ${code}，選角色開始`);
   };
   if (MPQ.get('room')) MP = { base: defB, code: MPQ.get('room')!.toUpperCase() };
   let selR = ROLES[0].id;
+  /** v24.40 the people who start with you (step 2), redrawn when the player's own role or sex changes */
+  let mateSel: MatePick[] = [];
+  let drawMates: (() => void) | null = null;
   const markSel = () => {
     sel.querySelectorAll('.ch').forEach(x => {
       const selected = (x as HTMLElement).dataset.r === selR;
       x.classList.toggle('on', selected);
       x.setAttribute('aria-pressed', String(selected));
     });
+    drawMates?.();
     const r = roleById(selR);
     roleDetail.innerHTML = `<span class="selection-eyebrow">${tr('角色檔案', 'SURVIVOR PROFILE')}</span><h3>${r.names[selG === 'm' ? 0 : 1]}・${r.name}</h3><p>${r.blurb}</p><div class="selection-perks">${r.perks.join('・')}</div>`;
     const sb = document.getElementById('startbar');
@@ -11020,7 +12287,7 @@ async function boot() {
     );
     (sb.querySelector('#startgo') as HTMLElement).onclick = () => {
       if (selectionStep < 2) setSelectionStep(selectionStep + 1);
-      else void go(false, selG, selR, skipI);
+      else void go(false, selG, selR, skipI, MATES_ON && !MP ? mateSel.slice() : []);
     };
     document.body.appendChild(sb);
     markSel();
@@ -11047,6 +12314,119 @@ async function boot() {
   settings.id = 'selection-settings';
   settings.append(dl, skipLabel, mpw);
   btns.appendChild(settings);
+  if (MATES_ON) {
+    // v24.40 who comes with you: any other role (your own role only as the other sex), one card per role
+    const matew = document.createElement('div');
+    matew.id = 'matesel';
+    settings.insertBefore(matew, mpw);
+    const cardG: Record<string, 'm' | 'f'> = {};
+    let full = 0;
+    const flip = (g: 'm' | 'f') => (g === 'm' ? 'f' : 'm');
+    drawMates = () => {
+      if (MP) {
+        matew.innerHTML = `<div class="mates-head"><b>${tr('同行的人', 'Who comes with you')}</b><small>${tr(
+          '多人連線時不帶電腦隊友',
+          'No computer companions in multiplayer',
+        )}</small></div>`;
+        return;
+      }
+      const me: MatePick = { r: selR, g: selG };
+      mateSel = mateSel.filter(p => !(p.r === me.r && p.g === me.g));
+      const max = mateMax(MOBILE);
+      matew.innerHTML =
+        `<div class="mates-head"><b>${tr('同行的人', 'Who comes with you')}</b><small>${
+          full > 0
+            ? tr(`最多 ${max} 位，先取消一位`, `Up to ${max}. Deselect someone first.`)
+            : tr(
+                `最多 ${max} 位・不選就獨自出發・他們跟你住在一起，帶著自己的背包`,
+                `Up to ${max} · choose nobody to go alone · they live with you and bring their own pack`,
+              )
+        }</small></div>` + '<div class="mates-list"></div>';
+      const list = matew.querySelector('.mates-list')!;
+      const party = () => [me, ...mateSel];
+      for (const R of ROLES) {
+        const on = mateSel.find(p => p.r === R.id);
+        let g = on ? on.g : (cardG[R.id] ??= flip(selG));
+        if (R.id === me.r) g = flip(me.g);
+        const p: MatePick = { r: R.id, g };
+        const card = document.createElement('div');
+        card.className = 'mc' + (on ? ' on' : '');
+        card.dataset.r = R.id;
+        card.setAttribute('role', 'button');
+        card.tabIndex = 0;
+        card.setAttribute('aria-pressed', String(!!on));
+        const age = R.age[g === 'm' ? 0 : 1];
+        card.innerHTML =
+          `<img class="pv" alt="" src="${rolePortrait(R.id, g)}"><span class="mt"><b>${mateName(p)}・${R.name}</b><small>${
+            getLanguage() === 'en'
+              ? `${age} · your ${relation(me, p, on ? party() : [...party(), p])}`
+              : `${age} 歲・你的${relation(me, p, on ? party() : [...party(), p])}`
+          }</small><small class="mp">${R.perks.join('・')}</small></span>` +
+          `<span class="mg">${(['m', 'f'] as const)
+            .map(
+              x =>
+                `<button type="button" data-g="${x}" class="${x === g ? 'on' : ''}"${R.id === me.r && x === me.g ? ' disabled' : ''}>${
+                  x === 'm' ? tr('男', 'M') : tr('女', 'F')
+                }</button>`,
+            )
+            .join('')}</span>`;
+        const toggle = () => {
+          const i = mateSel.findIndex(q => q.r === R.id);
+          if (i >= 0) mateSel.splice(i, 1);
+          else if (mateSel.length >= max) {
+            full = 1;
+            drawMates!();
+            full = 0;
+            (matew.querySelector(`.mc[data-r="${R.id}"]`) as HTMLElement | null)?.focus();
+            return;
+          } else mateSel.push({ r: R.id, g });
+          drawMates!();
+          (matew.querySelector(`.mc[data-r="${R.id}"]`) as HTMLElement | null)?.focus();
+        };
+        card.onclick = toggle;
+        card.onkeydown = e => {
+          if (e.target !== card) return; // (the 男 / 女 buttons inside work as buttons)
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggle();
+          }
+        };
+        card.querySelectorAll<HTMLButtonElement>('.mg button').forEach(
+          b =>
+            (b.onclick = e => {
+              e.stopPropagation();
+              const x = b.dataset.g as 'm' | 'f';
+              if (R.id === me.r && x === me.g) return;
+              cardG[R.id] = x;
+              const q = mateSel.find(q => q.r === R.id);
+              if (q) q.g = x;
+              drawMates!();
+              (matew.querySelector(`.mc[data-r="${R.id}"] .mg button[data-g="${x}"]`) as HTMLElement | null)?.focus();
+            }),
+        );
+        list.appendChild(card);
+      }
+    };
+    drawMates();
+  }
+  /** v24.40 step 3: who comes with you */
+  const mateSummary = () => {
+    if (!MATES_ON) return '';
+    if (MP)
+      return `<div class="selection-mates"><span>${tr('同行', 'With you')}</span><b>${tr('多人連線：不帶電腦隊友', 'Multiplayer: no computer companions')}</b></div>`;
+    const me: MatePick = { r: selR, g: selG };
+    const party = [me, ...mateSel];
+    return `<div class="selection-mates"><span>${tr('同行', 'With you')}</span>${
+      mateSel.length
+        ? mateSel
+            .map(
+              p =>
+                `<span class="sm"><img alt="" src="${rolePortrait(p.r, p.g)}"><b>${mateLine(me, p, party)}</b></span>`,
+            )
+            .join('')
+        : `<b>${tr('獨自出發', 'Going alone')}</b>`
+    }</div>`;
+  };
   function setSelectionStep(step: number) {
     selectionStep = Math.max(0, Math.min(2, step));
     btns.dataset.step = String(selectionStep);
@@ -11063,7 +12443,7 @@ async function boot() {
     summary.hidden = selectionStep !== 2;
     previous.hidden = selectionStep === 0;
     const r = roleById(selR);
-    summary.innerHTML = `<div class="selection-identity"><span class="selection-eyebrow">${tr('你的倖存者', 'YOUR SURVIVOR')}</span><img alt="" src="${rolePortrait(r.id, selG)}"><h3>${r.names[selG === 'm' ? 0 : 1]}・${r.name}</h3><p>${r.perks.join('・')}</p></div><div class="selection-departure"><span class="selection-eyebrow">${tr('出發資訊', 'DEPARTURE BRIEF')}</span><h3>${tr('萬華・西門町', 'Wanhua · Ximending')}</h3><div class="selection-fact"><span>${tr('一天長度', 'Day length')}</span><b>${DAYH} ${tr('小時', 'hours')}</b></div><div class="selection-fact"><span>${tr('開場', 'Opening')}</span><b>${skipI ? tr('跳過開場', 'Skip intro') : tr('體驗開場', 'Play intro')}</b></div><small>${tr('出發後才會建立新遊戲；返回不會覆蓋存檔。', 'Your new game begins only when you depart. Going back keeps your save.')}</small></div>`;
+    summary.innerHTML = `<div class="selection-identity"><span class="selection-eyebrow">${tr('你的倖存者', 'YOUR SURVIVOR')}</span><img alt="" src="${rolePortrait(r.id, selG)}"><h3>${r.names[selG === 'm' ? 0 : 1]}・${r.name}</h3><p>${r.perks.join('・')}</p>${mateSummary()}</div><div class="selection-departure"><span class="selection-eyebrow">${tr('出發資訊', 'DEPARTURE BRIEF')}</span><h3>${tr('萬華・西門町', 'Wanhua · Ximending')}</h3><div class="selection-fact"><span>${tr('一天長度', 'Day length')}</span><b>${DAYH} ${tr('小時', 'hours')}</b></div><div class="selection-fact"><span>${tr('開場', 'Opening')}</span><b>${skipI ? tr('跳過開場', 'Skip intro') : tr('體驗開場', 'Play intro')}</b></div><small>${tr('出發後才會建立新遊戲；返回不會覆蓋存檔。', 'Your new game begins only when you depart. Going back keeps your save.')}</small></div>`;
     $('startgo').textContent = selectionStep === 2 ? tr('出發 ▶', 'Depart ▶') : tr('下一步 →', 'Next →');
     $('title').scrollTop = 0;
   }
@@ -11507,6 +12887,106 @@ async function boot() {
     // which soldiers are after whom
     solFoes: () =>
       sols.filter(s => s.state !== 'dead').map(s => ({ id: s.id, state: s.state, foe: s.foe, lastSeen: s.lastSeen })),
+    // v24.40 computer teammates: their state (where on the map, in which space), and handles for the checks
+    mates: () =>
+      mates.map(m => ({
+        id: m.id,
+        r: m.pick.r,
+        g: m.pick.g,
+        name: mateName2(m),
+        p: [m.pos.x, m.pos.z],
+        at: m.mark.p.slice(),
+        space: m.car ? 'car' : ['street', 'up', 'metro'][spaceOf(m.pos.x, m.pos.z)],
+        st: m.st,
+        mode: m.mode,
+        rule: m.rule,
+        hp: m.hp,
+        hunger: m.hunger,
+        thirst: m.thirst,
+        fatigue: m.fatigue,
+        bleed: m.bleed,
+        down: m.st === 1 ? m.downT : 0,
+        inv: { ...m.inv },
+        equip: m.equip,
+        kills: m.kills,
+        ti: m.ti,
+        sneak: m.sneak,
+        sleeping: m.sleeping,
+        visible: m.rig.root.visible,
+        y: m.rig.root.position.y,
+        anim: m.rig.state,
+      })),
+    mateStats: () => ({ ...MS, trail: mateTrail.pts.length, head: mateTrail.head, len: mateTrail.len }),
+    doorsNear: (x: number, z: number, r = 6) =>
+      (doors as LiveDoor[])
+        .filter(d => Math.hypot(d.p[0] - x, d.p[1] - z) < r)
+        .map(d => ({ p: d.p, open: !!d.open, barricaded: !!d.barricaded })),
+    doorSet: (x: number, z: number, open: boolean) => {
+      const d = (doors as LiveDoor[]).find(d => Math.hypot(d.p[0] - x, d.p[1] - z) < 0.5);
+      if (d && !d.barricaded) d.open = open;
+      return !!d;
+    },
+    mateTp: (i: number, x: number, z: number) => {
+      const m = mates[i];
+      if (!m) return false;
+      m.pos.set(x, 0, z);
+      m.vel.set(0, 0, 0);
+      m.ti = -1;
+      return true;
+    },
+    mateSet: (
+      i: number,
+      o: Partial<Pick<Mate, 'hp' | 'hunger' | 'thirst' | 'fatigue' | 'bleed' | 'mode' | 'rule' | 'downT' | 'inv'>>,
+    ) => !!mates[i] && (Object.assign(mates[i], o), true),
+    mateGiveTo: (i: number, k: string, n = 1) => {
+      const m = mates[i];
+      if (!m) return false;
+      m.inv[k] = (m.inv[k] || 0) + n;
+      m.equip = pickWeapon(m.inv, ITEMS);
+      return true;
+    },
+    mateDown: (i: number) => !!mates[i] && (mateDown(mates[i], 'test'), true),
+    mateSkill: (k: keyof Skills) => teamSkill(k),
+    // draw calls of the teammates' figures: the same view drawn with them and without
+    mateDraw: () => {
+      renderer.render(scene, camera);
+      const on = renderer.info.render.calls;
+      const vis = mates.map(m => m.rig.root.visible);
+      for (const m of mates) m.rig.root.visible = false;
+      renderer.render(scene, camera);
+      const off = renderer.info.render.calls;
+      mates.forEach((m, i) => (m.rig.root.visible = vis[i]));
+      return { on, off };
+    },
+    fogLit: () => (gmap ? (gmap as any).fogA.reduce((n: number, v: number) => n + (v > 0 ? 1 : 0), 0) : -1),
+    mateSpotWhy: (x: number, z: number) => {
+      const c: V2 = [x, z];
+      const pc = placeAt(x, z);
+      const why: Record<string, number> = {};
+      for (const r of [0.9, 1.3, 1.7])
+        for (let a = 0; a < 12; a++) {
+          const t = (a / 12) * Math.PI * 2 + 0.4;
+          const q: V2 = [x + Math.cos(t) * r, z + Math.sin(t) * r];
+          const k = !bodyFits(q[0], q[1])
+            ? 'fit'
+            : !los(c, q)
+              ? 'los'
+              : placeAt(q[0], q[1]) !== pc
+                ? 'place'
+                : spaceOf(q[0], q[1]) === 0 && roadT.barrierAt(q[0], q[1], 1.1)
+                  ? 'barrier'
+                  : spaceOf(q[0], q[1]) === 0 && roadT.wreckNear(q[0], q[1], 1.4)
+                    ? 'wreck'
+                    : 'ok';
+          why[k] = (why[k] || 0) + 1;
+        }
+      return { why, spot: mateSpot(c, 0, [c]) };
+    },
+    matePanel: (i: number) => !!mates[i] && (openMatePanel(mates[i]), true),
+    mateKey: (long = false) => {
+      if (long) matesRule();
+      else matesFollowToggle();
+    },
     // v24.4 日本支援 test hooks
     jp: () => jp && { stats: jp.stats, cd: jp.cd, crafts: jp.crafts.length, liaison: liaison?.p ?? null },
     jpCall: (k: JpKind) => jpCall(k),

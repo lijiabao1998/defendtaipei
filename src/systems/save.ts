@@ -24,7 +24,8 @@ export const MAP_SAVE_KEY = 'defendtaipei-map-v2';
  * Progress blob. Field names are stable:
  * r role, surv shelter, g gender, p [x,z], hp/hu/th/fa/bl vitals, inv/eq pack,
  * k kills, t minutes, dl day length, wx weather, ex evac flag, inf informant,
- * ut utilities timeline, conts [id, items, pos], dead soldier ids, bar barricade indexes, radio log.
+ * ut utilities timeline, conts [id, items, pos], dead soldier ids, bar barricade indexes, radio log,
+ * m the computer teammates (v24.40; absent without any).
  * Older blobs may omit fields added later (radio, surv, ut, inf, wx, dl, ex); callers already tolerate that.
  */
 export interface GameSave {
@@ -54,6 +55,8 @@ export interface GameSave {
   radio: any[];
   /** Optional experimental story progress, retained even when its debug flag is disabled. */
   story?: unknown;
+  /** v24.40 the computer teammates (npc/mates.ts MateSave); written only when there are any */
+  m?: any[];
 }
 
 export function readSave(): GameSave | null {
