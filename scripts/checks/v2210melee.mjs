@@ -1,6 +1,6 @@
 // v22.10 in-game melee: knife swing next to a soldier → delayed contact hit, hit-stop, knockback, trail.
 // argv: url outDir
-import { launch } from '../lib.mjs';
+import { launch, pickRole } from '../lib.mjs';
 import fs from 'node:fs';
 const [url = 'http://localhost:4173/defendtaipei/', out = 'shots/v2210'] = process.argv.slice(2);
 fs.mkdirSync(out, { recursive: true });
@@ -10,15 +10,9 @@ const p = await ctx.newPage();
 const errs = [];
 p.on('pageerror', e => errs.push(String(e)));
 await p.goto(url);
-await p.waitForFunction(() => window.__newGame, null, { timeout: 180000 });
-await p.evaluate(() => window.__newGame());
-await p.waitForSelector('.ch', { state: 'visible', timeout: 180000 });
-await p.evaluate(() => {
-  const s = document.getElementById('skipintro');
-  if (s) s.checked = true;
-});
-await p.click('.ch[data-r="nurse"]');
-await p.evaluate(() => document.getElementById('startgo')?.click());
+// (v24.39 through lib's pickRole: since the role select asks for its staged confirmation, one click on 開始 no longer
+// started the game and this check timed out before it began)
+await pickRole(p, { g: 'f', role: 'nurse', skipIntro: true, entryTimeout: 240000 });
 await p.waitForFunction(() => window.__game?.started?.() && !document.getElementById('wake'), null, {
   timeout: 180000,
 });
