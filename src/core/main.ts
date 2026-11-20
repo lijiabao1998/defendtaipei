@@ -938,6 +938,12 @@ const mapPos = (): V2 => (up ? up.anchor : [player.pos.x, player.pos.z]);
  * or roof (with ?fakeup=1 the stairwell, as mapPos); in the street and in a station, where they are
  */
 const nearPos = (): V2 => (up && REAL_UP ? [realX(), realZ()] : mapPos());
+/**
+ * v24.39 where a soldier who is hit or shoved looks for the player: upstairs where the floor really is (with ?fakeup=1
+ * the stairwell), in a station the street exit above it. It was player.pos, which upstairs is in the space all the floors
+ * share 24 km east of the city: a soldier wounded from a window ran off the map after the one who shot him.
+ */
+const hitFrom = (): V2 => (inMetro(player.pos.z) ? streetPos() : nearPos());
 // v23.9 20 m bucket grid over the core footprints (rebuilt when blds grows), bldAt is called a lot at boot
 const BG = 20;
 let bgN = -1;
@@ -3025,6 +3031,8 @@ type Sol = {
   cone: THREE.Mesh;
   night: boolean;
   lastSeen?: V2;
+  /** v24.39 the mark (plaMarks) this soldier last saw, when there is anyone besides the player */
+  foe?: string;
   /** v21: streamed district soldier (tile key + index within tile) */
   tile?: string;
   tid?: number;
@@ -4781,8 +4789,6 @@ function remnantSites(c: V2) {
 }
 function setupRemnants(c: V2) {
   if (rem) return;
-  const st = surv as any;
-  st.rem ||= {};
   rem = new RemnantSystem({
     scene,
     rig: (weapon, i) => {
@@ -4833,7 +4839,8 @@ function setupRemnants(c: V2) {
       k.label = '國軍殘部遺留裝備';
     },
     day: () => surv.day,
-    store: () => st.rem as Record<string, RemSave>,
+    // v24.39 the survival state in play (Continue replaces it after this is set up)
+    store: () => ((surv as any).rem ||= {}) as Record<string, RemSave>,
   });
   rem.init(remnantSites(c));
 }
@@ -4994,7 +5001,9 @@ function updateInformant(dt: number) {
         .slice(0, 4)
         .forEach(s => {
           s.state = 'investigate';
-          s.target = [P.x, P.z];
+          // v24.39 where the player is on the map (it was player.pos: away up a stairwell or down into a station, they
+          // were sent to the space off the map)
+          s.target = hitFrom();
           s.timer = 600;
         });
       INF.hid = freeNear([infPos[0] + 40 * (Math.random() - 0.5), infPos[1] + 40 * (Math.random() - 0.5)]);
@@ -5231,6 +5240,101 @@ function callout(s: Sol, msg: string) {
   if (d > 35) return;
   AU.radio(d);
   log(getLanguage() === 'en' ? `(Radio) “${msg}”` : `（無線電）「${msg}」`, '#f9a');
+}
+// ---------- v24.39 whom the occupation troops deal with ----------
+/**
+ * Someone a PLA soldier can see, go after and fire on. Until v24.39 the soldier loop knew only the player; it now takes
+ * whom it deals with from plaMarks(): the player first, then whoever else is on plaOthers (teammates, from v24.40, behind
+ * ?mates=1). With the player alone the loop runs exactly as before: the same checks, the same rnd() calls in the same order.
+ */
+type PlaMark = {
+  id: string;
+  /** the player: what only they have stays in the loop (a window upstairs, sleep, the rifle butt, being hit) */
+  me: boolean;
+  /** where on the map (upstairs: where the floor really is) */
+  p: V2;
+  /** seen at a little over half the range, hit less often */
+  sneak: boolean;
+  /** behind cover: hit half as often */
+  cover: boolean;
+  /** a torch on at night: seen twice as far */
+  light: boolean;
+  /** inside a building at street level: seen at 0.6 the range */
+  inside: boolean;
+  /** how high what a soldier aims at stands */
+  aimH: () => number;
+  alive: () => boolean;
+  /** a soldier's round (or rifle butt) has hit them */
+  hurt: (dmg: number, s: Sol, melee: boolean) => void;
+  /** a soldier has just spotted them (the player's line is in the loop) */
+  spotted?: (s: Sol) => void;
+};
+/** v24.39 anyone besides the player the soldiers deal with (empty unless ?mates=1, or a check puts a stand-in here) */
+const plaOthers: PlaMark[] = [];
+/** v24.39 what happened to the checks' stand-ins (__game.standIn) */
+const standInStats = new Map<string, { hp: number; hits: number; melee: number; spotted: number; by: number[] }>();
+function plaMarks(pp: V2, inside: boolean): PlaMark[] {
+  const me: PlaMark = {
+    id: 'player',
+    me: true,
+    p: pp,
+    get sneak() {
+      return !!player.sneak;
+    },
+    get cover() {
+      return !!player.cover;
+    },
+    get light() {
+      return !!player.light;
+    },
+    inside,
+    aimH: playerAimH,
+    alive: () => !dead,
+    hurt: () => {},
+  };
+  return plaOthers.length ? [me, ...plaOthers] : [me];
+}
+type PlaLook = { m: PlaMark; dist: number; range: number; sees: boolean };
+/** what soldier s makes of mark m at distance dist (v24.32: upReal is the player up at a window or on a roof) */
+function plaLook(s: Sol, m: PlaMark, dist: number, night: boolean, upReal: UpState | null): PlaLook {
+  let range = (night ? 11 : 20) * (m.sneak ? 0.55 : 1) * (m.light && night ? 2 : 1);
+  if (m.inside && !upReal)
+    range *= 0.6; // (upstairs `inside` is the building the player is up in, not a room they are seen in)
+  else range *= 1 - WX.amt * 0.3; // v24.11 a downpour hides you
+  const dx = m.p[0] - s.pos.x,
+    dz = m.p[1] - s.pos.z;
+  const facing =
+    Math.abs(Math.atan2(Math.sin(Math.atan2(dz, dx) - s.dir), Math.cos(Math.atan2(dz, dx) - s.dir))) < Math.PI / 5;
+  const sleeping = m.me && player.sleeping;
+  const sees = upReal
+    ? // a head at a window is seen from further off, and one that has just fired from it from further still
+      dist < range * (upFireT > 0 ? 3 : 1.4) && (facing || upFireT > 0) && !sleeping && upLos(s.pos.x, s.pos.z)
+    : (dist < range &&
+        (facing || dist < 1.6) &&
+        !sleeping &&
+        shotRay([s.pos.x, s.pos.z], m.p, 1.6, m.aimH() + 0.1, 0.6) >= 1) ||
+      (sleeping && dist < 2.5);
+  return { m, dist, range, sees };
+}
+/**
+ * v24.39 whom soldier s deals with this frame: the nearest mark it sees; none in sight, the one it was after; else the
+ * player. With the player alone this is plaLook on the player, as the loop always did.
+ */
+function plaWatch(s: Sol, marks: PlaMark[], dist0: number, night: boolean, upReal: UpState | null): PlaLook {
+  const P = plaLook(s, marks[0], dist0, night, upReal);
+  if (marks.length < 2) return P;
+  let best = P.sees ? P : null,
+    was: PlaLook | null = null;
+  for (let i = 1; i < marks.length; i++) {
+    const m = marks[i];
+    if (!m.alive()) continue;
+    const d = Math.hypot(m.p[0] - s.pos.x, m.p[1] - s.pos.z);
+    // (nobody in the street is seen beyond 22 m: 20 by day, 11 at night or 22 with a torch)
+    const L = d < 30 ? plaLook(s, m, d, night, null) : { m, dist: d, range: 0, sees: false };
+    if (L.sees && (!best || L.dist < best.dist)) best = L;
+    if (m.id === s.foe) was = L;
+  }
+  return best || was || P;
 }
 // ---------- v22.11 grenades: flush a player who camps out of sight ----------
 type Gren = { s: V2; p: V2; t: number; fuse: number; mesh: THREE.Mesh; w?: { g: THREE.Group; on: boolean } };
@@ -7614,7 +7718,8 @@ function shove() {
     collide(s.pos, 0.35);
     s.state = 'combat';
     s.alert = 1;
-    s.lastSeen = [player.pos.x, player.pos.z];
+    s.lastSeen = hitFrom();
+    if (s.foe) s.foe = 'player'; // (v24.39 the one he goes after, falls back from and radios about)
     log(tr('推開！敵人踉蹌', 'Shoved! The enemy staggers.'), '#ff9');
     break;
   }
@@ -7953,7 +8058,8 @@ function damageSol(s: Sol, dmg: number, stealth: boolean) {
     s.stun = Math.max(s.stun || 0, 0.4);
     s.state = 'combat';
     s.alert = 1;
-    s.lastSeen = [player.pos.x, player.pos.z];
+    s.lastSeen = hitFrom();
+    if (s.foe) s.foe = 'player'; // (v24.39 the one he goes after, falls back from and radios about)
   }
 }
 const liberated = new Set<number>();
@@ -8768,7 +8874,9 @@ function update(dt: number) {
   // soldiers
   const night = isNight();
   // v24.32 upstairs the soldiers deal with where the player really is: over their heads, at a window or a parapet
-  const pp: V2 = upReal ? [bx, bz] : [player.pos.x, player.pos.z];
+  const pp0: V2 = upReal ? [bx, bz] : [player.pos.x, player.pos.z];
+  // v24.39 and with whom: the player first, then anyone else on the list
+  const marks = plaMarks(pp0, !!inside);
   upFireT = Math.max(0, upFireT - dt);
   assignSquads(night);
   updateGrenades(dt, night);
@@ -8783,26 +8891,22 @@ function update(dt: number) {
     s.mesh.visible = active;
     s.cone.visible = active;
     if (!active) continue;
+    const dist0 = upReal
+      ? Math.hypot(pp0[0] - s.pos.x, pp0[1] - s.pos.z, upReal.fy)
+      : Math.hypot(pp0[0] - s.pos.x, pp0[1] - s.pos.z);
+    // dormant far away from the player (v24.30 upstairs: far from the building, so the street below keeps moving)
+    if ((upReal ? Math.hypot(up!.anchor[0] - s.pos.x, up!.anchor[1] - s.pos.z) : dist0) > 120) continue;
+    // vision: whom it sees (plaWatch), how far, how well
+    const V = plaWatch(s, marks, dist0, night, upReal);
+    const m = V.m,
+      pp = m.p,
+      mUp = m.me ? upReal : null,
+      dist = V.dist,
+      range = V.range,
+      sees = V.sees;
     const dx = pp[0] - s.pos.x,
       dz = pp[1] - s.pos.z;
-    const dist = upReal ? Math.hypot(dx, dz, upReal.fy) : Math.hypot(dx, dz);
-    // dormant far away (v24.30 upstairs: far from the building, so the street below keeps moving)
-    if ((upReal ? Math.hypot(up!.anchor[0] - s.pos.x, up!.anchor[1] - s.pos.z) : dist) > 120) continue;
-    // vision
-    let range = (night ? 11 : 20) * (player.sneak ? 0.55 : 1) * (player.light && night ? 2 : 1);
-    if (inside && !upReal)
-      range *= 0.6; // (upstairs `inside` is the building the player is up in, not a room they are seen in)
-    else range *= 1 - WX.amt * 0.3; // v24.11 a downpour hides you
-    const facing =
-      Math.abs(Math.atan2(Math.sin(Math.atan2(dz, dx) - s.dir), Math.cos(Math.atan2(dz, dx) - s.dir))) < Math.PI / 5;
-    const sees = upReal
-      ? // a head at a window is seen from further off, and one that has just fired from it from further still
-        dist < range * (upFireT > 0 ? 3 : 1.4) && (facing || upFireT > 0) && !player.sleeping && upLos(s.pos.x, s.pos.z)
-      : (dist < range &&
-          (facing || dist < 1.6) &&
-          !player.sleeping &&
-          shotRay([s.pos.x, s.pos.z], pp, 1.6, playerAimH() + 0.1, 0.6) >= 1) ||
-        (player.sleeping && dist < 2.5);
+    if (sees && marks.length > 1) s.foe = m.id;
     if (sees) {
       s.alert += dt * (1.6 - dist / range) * 1.6;
       if (s.state !== 'combat') {
@@ -8813,7 +8917,8 @@ function update(dt: number) {
     } else s.alert = Math.max(0, s.alert - dt * 0.15);
     if (s.alert >= 1 && s.state !== 'combat') {
       s.state = 'combat';
-      log(tr('你被佔領軍發現了！', 'Occupation troops spotted you!'), '#f66');
+      if (m.me) log(tr('你被佔領軍發現了！', 'Occupation troops spotted you!'), '#f66');
+      else m.spotted?.(s);
       noise(s.pos.x, s.pos.z, 25);
       radio(pp, s);
     }
@@ -8849,8 +8954,8 @@ function update(dt: number) {
       }
     } else if (s.state === 'combat') {
       s.cd -= dt;
-      if (sees && dist < (upReal ? 60 : 24)) {
-        goal = dist > 8 && !upReal ? pp : null; // (nobody runs at a wall to shoot up it)
+      if (sees && dist < (mUp ? 60 : 24)) {
+        goal = dist > 8 && !mUp ? pp : null; // (nobody runs at a wall to shoot up it)
         s.dir = Math.atan2(dz, dx);
         // v21.4 enemies use cover: run to the nearest cover between them and you, then crouch / peek and fire
         s.covT = (s.covT || 0) - dt;
@@ -8887,8 +8992,17 @@ function update(dt: number) {
           s.mHit -= dt;
           if (s.mHit <= 0) {
             s.mHit = undefined;
-            const f = Math.cos(s.dir) * (player.pos.x - s.pos.x) + Math.sin(s.dir) * (player.pos.z - s.pos.z);
-            if (dist < 1.9 && f > 0.2 && !dead && !player.sleeping) {
+            const tx = m.me ? player.pos.x : pp[0],
+              tz = m.me ? player.pos.z : pp[1];
+            const f = Math.cos(s.dir) * (tx - s.pos.x) + Math.sin(s.dir) * (tz - s.pos.z);
+            if (!m.me) {
+              // v24.39 someone else at arm's length
+              if (dist < 1.9 && f > 0.2 && m.alive()) {
+                hitStop(s.rig, 0.06);
+                AU.meleeHit(dist0, true);
+                m.hurt(15, s, true);
+              } else AU.swish(dist0, true);
+            } else if (dist < 1.9 && f > 0.2 && !dead && !player.sleeping) {
               hitStop(s.rig, 0.06);
               AU.meleeHit(0, true);
               player.rig.hurtT = 0.35;
@@ -8924,37 +9038,40 @@ function update(dt: number) {
         ) {
           gunFx(s.rig, false);
           s.cd = (1.1 + rnd() * 0.6) * (s.role === 'suppress' ? 0.6 : flanking ? 1.6 : 1);
-          AU.gunshot('rifle', dist, !!bldAt(s.pos.x, s.pos.z) || indoorAt(player.pos.x, player.pos.z));
+          // (heard where the player is)
+          AU.gunshot('rifle', m.me ? dist : dist0, !!bldAt(s.pos.x, s.pos.z) || indoorAt(player.pos.x, player.pos.z));
           noise(s.pos.x, s.pos.z, 40);
           // v21.4 ray against walls / cover first, then the hit roll (lower vs a covered target)
-          const clear = upReal
+          const clear = mUp
             ? upLos(s.pos.x, s.pos.z, 1.4)
               ? 1
               : 0
-            : shotRay([s.pos.x, s.pos.z], pp, 1.4, playerAimH(), 1.0);
+            : shotRay([s.pos.x, s.pos.z], pp, 1.4, m.aimH(), 1.0);
           const hitP =
             Math.max(0.08, 0.55 - dist / 60) *
-            (upReal ? 0.55 : 1) * // up at a window: a head and shoulders
-            (player.sneak ? 0.7 : 1) *
+            (mUp ? 0.55 : 1) * // up at a window: a head and shoulders
+            (m.sneak ? 0.7 : 1) *
             (night ? 0.7 : 1) *
-            (player.cover ? 0.5 : 1) *
+            (m.cover ? 0.5 : 1) *
             (s.role === 'suppress' ? 0.6 : 1); // suppressive fire: more rounds, fewer hits
           const hitIt = clear >= 1 && rnd() < hitP;
+          const at = m.me ? player.pos : new THREE.Vector3(pp[0], 0, pp[1]);
           const miss =
             clear < 1
               ? new THREE.Vector3(s.pos.x + (pp[0] - s.pos.x) * clear, 0, s.pos.z + (pp[1] - s.pos.z) * clear)
-              : new THREE.Vector3(player.pos.x + (rnd() - 0.5) * 3, 0, player.pos.z + (rnd() - 0.5) * 3);
-          if (upReal)
+              : new THREE.Vector3(at.x + (rnd() - 0.5) * 3, 0, at.z + (rnd() - 0.5) * 3);
+          if (mUp)
             tracer3(
               new THREE.Vector3(s.pos.x, 1.3, s.pos.z),
               hitIt
-                ? new THREE.Vector3(bx, upReal.fy + 1.3, bz)
-                : new THREE.Vector3(bx + (rnd() - 0.5) * 2.4, upReal.fy + 0.6 + rnd() * 2, bz + (rnd() - 0.5) * 2.4),
+                ? new THREE.Vector3(bx, mUp.fy + 1.3, bz)
+                : new THREE.Vector3(bx + (rnd() - 0.5) * 2.4, mUp.fy + 0.6 + rnd() * 2, bz + (rnd() - 0.5) * 2.4),
             );
-          else tracer(s.pos, hitIt ? player.pos : miss);
+          else tracer(s.pos, hitIt ? at : miss);
           coverStats.enemyShots++;
           if (clear < 1) coverStats.blocked++;
-          if (hitIt) {
+          if (hitIt && !m.me) m.hurt(10 + rnd() * 12, s, false);
+          else if (hitIt) {
             player.rig.hurtT = 0.35;
             player.rig.hurtSide = rnd() < 0.5 ? -1 : 1;
             player.stun = 0.35;
@@ -9015,7 +9132,7 @@ function update(dt: number) {
     }
     let moved = 0;
     if (s.state !== 'combat') ((s.cov = null), (s.crouch = false));
-    s.aiming = s.state === 'combat' && sees && dist < (upReal ? 60 : 24) && !(s.stun! > 0) && !s.crouch;
+    s.aiming = s.state === 'combat' && sees && dist < (mUp ? 60 : 24) && !(s.stun! > 0) && !s.crouch;
     if (s.stun! > 0) {
       s.stun! -= dt;
       goal = null;
@@ -10546,7 +10663,11 @@ async function boot() {
               player.inv[k] = (player.inv[k] || 0) + n;
             dropMoved = 2;
           }
-        } else makeCont(c[0], c[2], 'crate', undefined, c[1]);
+        } else {
+          const k = makeCont(c[0], c[2], 'crate', undefined, c[1]);
+          // v24.39 a fallen remnant squad's gear keeps its name
+          if (id.startsWith('remgear')) k.label = '國軍殘部遺留裝備';
+        }
       });
       if (dropMoved)
         log(
@@ -11348,9 +11469,44 @@ async function boot() {
           p: q.p,
           alive: rem!.alive(q),
           save: (surv as any).rem[q.id],
+          // v24.39 how far each man's fall has gone (1: lying)
+          deadT: q.men.map(m => m.rig.deadT),
         })),
       },
     remTalk: () => rem?.talk(),
+    // v24.39 a stand-in the soldiers deal with as they will with a teammate (plaOthers): seen, gone after, fired on
+    standIn: (x: number, z: number, hp = 100) => {
+      const rig = makeRig({ gender: 'm', hair: 0x111111, top: 0x68714a, bottom: 0x4a5234, shoes: 0x1a1a14 });
+      rig.root.position.set(x, walkH(x, z), z);
+      scene.add(rig.root);
+      const S = { hp, hits: 0, melee: 0, spotted: 0, by: [] as number[] };
+      const m: PlaMark = {
+        id: 'stand' + plaOthers.length,
+        me: false,
+        p: [x, z],
+        sneak: false,
+        cover: false,
+        light: false,
+        inside: !!bldAt(x, z),
+        aimH: () => 1.25,
+        alive: () => S.hp > 0,
+        hurt: (dmg, s, melee) => {
+          S.hp -= dmg;
+          S.hits++;
+          if (melee) S.melee++;
+          S.by.push(s.id);
+          if (S.hp <= 0) rig.root.rotation.x = -Math.PI / 2;
+        },
+        spotted: () => S.spotted++,
+      };
+      plaOthers.push(m);
+      standInStats.set(m.id, S);
+      return m.id;
+    },
+    standIns: () => plaOthers.map(m => ({ id: m.id, p: m.p, alive: m.alive(), ...standInStats.get(m.id) })),
+    // which soldiers are after whom
+    solFoes: () =>
+      sols.filter(s => s.state !== 'dead').map(s => ({ id: s.id, state: s.state, foe: s.foe, lastSeen: s.lastSeen })),
     // v24.4 日本支援 test hooks
     jp: () => jp && { stats: jp.stats, cd: jp.cd, crafts: jp.crafts.length, liaison: liaison?.p ?? null },
     jpCall: (k: JpKind) => jpCall(k),

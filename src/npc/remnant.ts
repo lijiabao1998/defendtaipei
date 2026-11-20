@@ -38,7 +38,8 @@ type Squad = {
   p: V2;
   ang: number;
   g: THREE.Group;
-  men: { rig: Rig; p: V2; cd: number; state: 'idle' | 'aim' | 'death' }[];
+  /** fell: went down in front of the player (the collapse plays); any other man down lies where he fell (v24.39) */
+  men: { rig: Rig; p: V2; cd: number; state: 'idle' | 'aim' | 'death'; fell?: boolean }[];
   lines: string[];
   fallenLine: string;
 };
@@ -146,11 +147,10 @@ export class RemnantSystem {
   constructor(private d: RemDeps) {}
   /** place the squads at the given street corners (deterministic sites from core/main) */
   init(sites: { p: V2; ang: number }[]) {
-    const st = this.d.store();
     sites.slice(0, ROSTER.length).forEach((s, i) => {
       const R = ROSTER[i];
       const id = 'rem' + i;
-      const sv = (st[id] ||= { hp: [100, 100, 100, 100] });
+      const sv = this.sv(id);
       const g = new THREE.Group();
       this.d.scene.add(g);
       const ux = Math.cos(s.ang),
@@ -189,8 +189,16 @@ export class RemnantSystem {
   heldIn(inDistrict: (p: V2) => boolean) {
     return this.squads.find(s => inDistrict(s.p) && this.alive(s) > 0)?.unit ?? null;
   }
+  /**
+   * a squad's saved state. v24.39 looked up in the store every time: Continue replaces the survival state after the
+   * squads are placed at boot, and a reference kept from then went on reading and writing the one a new game starts with
+   * (after Continue, a fallen squad stood again and nothing that happened to the squads reached the save)
+   */
+  sv(id: string): RemSave {
+    return (this.d.store()[id] ||= { hp: [100, 100, 100, 100] });
+  }
   alive(q: Squad) {
-    const sv = this.d.store()[q.id];
+    const sv = this.sv(q.id);
     return q.men.filter((_, k) => sv.hp[k] > 0).length;
   }
   /** the squad whose leader stands within reach of the player */
@@ -201,7 +209,7 @@ export class RemnantSystem {
   prompt() {
     const q = this.near();
     if (!q) return '';
-    const sv = this.d.store()[q.id];
+    const sv = this.sv(q.id);
     return sv.fallen
       ? tr(`[E] 國軍殘部最後的陣地（${q.unit}）`, `[E] Last position of the ROC remnant (${q.unit})`)
       : tr(`[E] 和${q.leader}交談（${q.unit}）`, `[E] Talk to ${q.leader} (${q.unit})`);
@@ -211,7 +219,7 @@ export class RemnantSystem {
     const q = this.near();
     if (!q) return false;
     const d = this.d,
-      sv = d.store()[q.id];
+      sv = this.sv(q.id);
     if (sv.fallen) {
       d.dlg(
         tr('🎖 國軍殘部最後的陣地', '🎖 Last position of the ROC remnant'),
@@ -250,7 +258,9 @@ export class RemnantSystem {
       btns.push([
         tr('幫傷兵包紮', 'Bandage the wounded'),
         () => {
-          const k = wounded.sort((a, b) => sv.hp[a] - sv.hp[b])[0];
+          // (v24.39 not one who has died since the talk began: the game goes on while it is open)
+          const k = wounded.filter(k => sv.hp[k] > 0).sort((a, b) => sv.hp[a] - sv.hp[b])[0];
+          if (k === undefined) return;
           const kit = d.has('medkit') ? 'medkit' : 'bandage';
           d.take(kit);
           sv.hp[k] = Math.min(100, sv.hp[k] + (kit === 'medkit' ? 70 : 40));
@@ -284,18 +294,28 @@ export class RemnantSystem {
     d.dlg(`🎖 ${q.leader}`, intro + line, btns);
     return true;
   }
+  /**
+   * a man who is down. v24.39 one who was down already when this game was loaded (Continue: the squads are placed at boot,
+   * before the save is read) lies where he fell instead of falling again when the player first comes near
+   */
+  private down(m: Squad['men'][number], k: number, dt: number) {
+    if (!m.fell && m.rig.deadT < 1) {
+      m.rig.deathV = k % 3; // (the way he lies: picked when a fall starts, and there was no fall to see)
+      m.rig.deadT = 1;
+    }
+    this.d.animate(m.rig, 'death', dt);
+  }
   /** per frame: aim and fire on PLA soldiers in sight; take fire back; fall when the last one is down */
   update(dt: number) {
     const d = this.d,
       P = d.player();
     this.t += dt;
-    const st = d.store();
     for (const q of this.squads) {
       const far = Math.hypot(q.p[0] - P.x, q.p[1] - P.z) > 150;
       q.g.visible = !far;
-      const sv = st[q.id];
+      const sv = this.sv(q.id);
       if (far || sv.fallen) {
-        if (!far) for (const m of q.men) d.animate(m.rig, 'death', dt);
+        if (!far) q.men.forEach((m, k) => this.down(m, k, dt));
         continue;
       }
       const foes = d.foes().filter(f => f.state !== 'dead' && Math.hypot(f.pos.x - q.p[0], f.pos.z - q.p[1]) < 42);
@@ -303,7 +323,7 @@ export class RemnantSystem {
       this.stats.inRange = foes.length;
       q.men.forEach((m, k) => {
         if (sv.hp[k] <= 0) {
-          d.animate(m.rig, 'death', dt);
+          this.down(m, k, dt);
           return;
         }
         const tgt = foes
@@ -340,6 +360,7 @@ export class RemnantSystem {
             this.stats.wounded++;
             if (sv.hp[k] <= 0) {
               sv.hp[k] = 0;
+              q.men[k].fell = true;
               d.log(
                 tr(
                   `🎖 ${q.unit}又倒下一名弟兄。其餘的人沒有退。`,
@@ -371,8 +392,7 @@ export class RemnantSystem {
   }
   /** morning radio from a squad still holding (story flavour; nothing when all have fallen) */
   dawn() {
-    const st = this.d.store();
-    const holding = this.squads.filter(q => !st[q.id].fallen);
+    const holding = this.squads.filter(q => !this.sv(q.id).fallen);
     if (!holding.length) return;
     const q = holding[this.d.day() % holding.length];
     this.d.log(
