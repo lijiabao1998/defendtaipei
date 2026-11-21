@@ -4,7 +4,7 @@
 // Low-poly and generic, no real insignia. Models face +z, like every driven vehicle.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { tr } from '../i18n';
+import { tr, getLanguage } from '../i18n';
 
 type V2 = [number, number];
 type G = THREE.BufferGeometry;
@@ -192,6 +192,14 @@ export type HeliDeps = {
   salvo: (x: number, z: number) => void;
   smoke: (x: number, y: number, z: number, fire: boolean) => void;
   crash: (x: number, z: number, kind: HeliKind) => void;
+  /** v24.42 the teammates (where they are on the map, whether out of sight, a round that hits them) */
+  others?: () => {
+    id: string;
+    name: string;
+    p: THREE.Vector3;
+    hidden: boolean;
+    hurt: (n: number, by: string) => void;
+  }[];
 };
 export type Craft = HeliModel & {
   kind: HeliKind;
@@ -205,6 +213,8 @@ export type Craft = HeliModel & {
   spot: number;
   lost: number;
   huntT: number;
+  /** v24.42 the teammate it is after (none: the player) */
+  tgt?: string | null;
   gunT: number;
   burst: number;
   rocketT: number;
@@ -369,11 +379,26 @@ export class HeliPatrols {
     spinRotor(c, 1, dt);
     const px = g.position.x,
       pz = g.position.z;
-    const dist = Math.hypot(P.x - px, P.z - pz);
+    // v24.42 whom it is after: the player, or a teammate it has spotted (gone from the list: back to the player)
+    const others = d.others?.() ?? [];
+    let o = c.tgt ? others.find(q => q.id === c.tgt) : undefined;
+    if (c.tgt && !o) {
+      // (the one it was after is down, aboard or gone: the hunt is over; the player has to be spotted first)
+      c.tgt = null;
+      if (c.state === 'hunt') {
+        c.state = 'patrol';
+        c.spot = 0;
+        this.newRoute(c);
+      }
+    }
+    const T = o ? o.p : P;
+    const hid = () => (o ? o.hidden : d.hidden());
+    const heard = Math.hypot(P.x - px, P.z - pz);
+    const dist = Math.hypot(T.x - px, T.z - pz);
     if ((c.soundT -= dt) <= 0) {
       c.soundT = 1.1;
-      if (dist < 300) {
-        d.rotor(dist);
+      if (heard < 300) {
+        d.rotor(heard);
         this.stats.sounds++;
       }
     }
@@ -390,21 +415,30 @@ export class HeliPatrols {
       while (c.way.length && Math.hypot(c.way[0][0] - px, c.way[0][1] - pz) < 12) c.way.shift();
       if (!c.way.length) this.newRoute(c);
       if (c.way.length) [tx, tz] = c.way[0];
-      // can it see you?
-      const inPool = dist < (d.night() ? 12 : SEE);
-      if (inPool && !d.hidden()) {
+      // can it see you? (v24.42 or else a teammate in the open)
+      const pool = d.night() ? 12 : SEE;
+      const you = Math.hypot(P.x - px, P.z - pz) < pool && !d.hidden();
+      const cand = you ? undefined : others.find(q => !q.hidden && Math.hypot(q.p.x - px, q.p.z - pz) < pool);
+      if (you || cand) {
         c.spot += dt;
         if (c.spot > (d.night() ? 0.9 : 1.6)) {
           c.state = 'hunt';
           c.huntT = 28;
           c.lost = 0;
+          c.tgt = you ? null : cand!.id;
+          o = cand;
           this.stats.hunts++;
-          d.alert(P.x, P.z);
+          const S = you ? P : cand!.p;
+          d.alert(S.x, S.z);
           d.log(
-            tr(
-              `⚠ ${HELI_NAME[c.kind]} 發現你了！快躲進室內或騎樓！`,
-              `⚠ The ${HELI_NAME[c.kind]} has seen you! Get indoors or under an arcade!`,
-            ),
+            you
+              ? tr(
+                  `⚠ ${HELI_NAME[c.kind]} 發現你了！快躲進室內或騎樓！`,
+                  `⚠ The ${HELI_NAME[c.kind]} has seen you! Get indoors or under an arcade!`,
+                )
+              : getLanguage() === 'en'
+                ? `⚠ The ${HELI_NAME[c.kind]} has seen ${cand!.name}! Get them indoors or under an arcade!`
+                : `⚠ ${HELI_NAME[c.kind]} 發現${cand!.name}了！快帶他們躲進室內或騎樓！`,
             '#f66',
           );
         }
@@ -414,17 +448,20 @@ export class HeliPatrols {
       c.ang += dt * 0.42;
       // close enough to be seen doing it: the view only reaches some twenty metres up
       const r = c.kind === 'z10' ? 18 : 14;
-      tx = P.x + Math.cos(c.ang) * r;
-      tz = P.z + Math.sin(c.ang) * r;
+      const Q = o ? o.p : P;
+      tx = Q.x + Math.cos(c.ang) * r;
+      tz = Q.z + Math.sin(c.ang) * r;
       speed = 16;
       c.huntT -= dt;
-      if (d.hidden()) c.lost += dt;
+      if (hid()) c.lost += dt;
       else c.lost = Math.max(0, c.lost - dt);
-      if (c.lost > 6 || c.huntT <= 0 || dist > 90) {
+      const dq = Math.hypot(Q.x - px, Q.z - pz);
+      if (c.lost > 6 || c.huntT <= 0 || dq > 90) {
         c.state = 'patrol';
         c.spot = 0;
+        c.tgt = null;
         this.newRoute(c);
-      } else if (dist < 44 && !d.hidden()) this.shoot(c, P, dt);
+      } else if (dq < 44 && !hid()) this.shoot(c, Q, dt, o ? o.hurt : d.hurt, heard);
     }
     // fly there: a little banked and nose down, as they do
     const dx = tx - px,
@@ -459,7 +496,7 @@ export class HeliPatrols {
     const want = Math.max(c.state === 'hunt' ? 15 : CRUISE, look + 7);
     c.alt += THREE.MathUtils.clamp(want - c.alt, -4 * dt, 8 * dt);
     g.position.y = c.alt;
-    this.lights(c, P);
+    this.lights(c, o ? o.p : P);
   }
   /** the searchlight, by night */
   private lights(c: Craft, P: THREE.Vector3) {
@@ -480,7 +517,7 @@ export class HeliPatrols {
     c.beam.quaternion.setFromUnitVectors(UP, tv);
     c.beam.scale.set(r, h, r);
   }
-  private shoot(c: Craft, P: THREE.Vector3, dt: number) {
+  private shoot(c: Craft, P: THREE.Vector3, dt: number, hurt: (n: number, by: string) => void, heard: number) {
     const d = this.d;
     c.gunT -= dt;
     if (c.gunT <= 0) {
@@ -488,7 +525,7 @@ export class HeliPatrols {
       if (c.burst <= 0) c.burst = 8;
       if (--c.burst <= 0) c.gunT = 2.4 + Math.random() * 1.3;
       this.stats.shots++;
-      d.gun(Math.hypot(P.x - c.g.position.x, P.z - c.g.position.z));
+      d.gun(heard); // (heard where the player is)
       const a = this.tracers.geometry.attributes.position as THREE.BufferAttribute;
       a.setXYZ(this.trI, c.g.position.x, c.alt + 1.2, c.g.position.z);
       a.setXYZ(this.trI + 1, P.x + (Math.random() - 0.5) * 3, 0.6, P.z + (Math.random() - 0.5) * 3);
@@ -496,7 +533,7 @@ export class HeliPatrols {
       this.trI = (this.trI + 2) % 16;
       this.tracers.visible = true;
       this.trT = 0.2;
-      if (Math.random() < 0.12) d.hurt(8 + Math.random() * 4, HELI_NAME[c.kind]);
+      if (Math.random() < 0.12) hurt(8 + Math.random() * 4, HELI_NAME[c.kind]);
     }
     if (c.kind === 'z10' && (c.rocketT -= dt) <= 0) {
       c.rocketT = 13 + Math.random() * 7;

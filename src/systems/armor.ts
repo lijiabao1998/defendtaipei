@@ -224,9 +224,12 @@ export class ArmorSystem {
     public deps: {
       canSee: (ax: number, az: number, bx: number, bz: number) => boolean;
       hurt: (d: number, from: string) => void;
-      alert: (x: number, z: number) => void;
+      /** where the crew sends the infantry: (x, z) the vehicle, (tx, tz) whoever it saw */
+      alert: (x: number, z: number, tx: number, tz: number) => void;
       log: (m: string, c?: string) => void;
       player: () => THREE.Vector3;
+      /** v24.42 the teammates in the street (where, and a round that hits them) */
+      others?: () => { p: THREE.Vector3; hurt: (d: number, from: string) => void }[];
       /** v24.22 the crew has abandoned it: true if it should leave the fight as something the player can take */
       bail?: (a: Armor) => boolean;
     },
@@ -404,23 +407,41 @@ export class ArmorSystem {
         const yaw = Math.atan2(-(q[1] - p[1]) * a.dir, (q[0] - p[0]) * a.dir);
         a.g.rotation.y += (((yaw - a.g.rotation.y + Math.PI * 3) % (Math.PI * 2)) - Math.PI) * Math.min(1, dt * 2);
       }
-      // mounted MG: fires at visible player within 38 m
-      const see = d < 38 && this.deps.canSee(pos.x, pos.z, P.x, P.z);
+      // mounted MG: fires at visible player within 38 m (v24.42 else at a teammate in sight)
+      let T = P,
+        hurt = (n: number) => this.deps.hurt(n, ARMOR_NAME[a.kind]),
+        mine = true,
+        see = d < 38 && this.deps.canSee(pos.x, pos.z, P.x, P.z);
+      if (!see)
+        for (const o of this.deps.others?.() ?? [])
+          if (Math.hypot(o.p.x - pos.x, o.p.z - pos.z) < 38 && this.deps.canSee(pos.x, pos.z, o.p.x, o.p.z)) {
+            T = o.p;
+            hurt = (n: number) => o.hurt(n, ARMOR_NAME[a.kind]);
+            mine = false;
+            see = true;
+            break;
+          }
       if (see) {
         a.spot += dt;
-        const ty = Math.atan2(-(P.z - pos.z), P.x - pos.x) - a.g.rotation.y;
+        const ty = Math.atan2(-(T.z - pos.z), T.x - pos.x) - a.g.rotation.y;
         a.tur.rotation.y += (((ty - a.tur.rotation.y + Math.PI * 3) % (Math.PI * 2)) - Math.PI) * Math.min(1, dt * 3);
         if (!a.alerted && a.spot > 0.6) {
           a.alerted = true;
           a.stop = 6;
-          this.deps.alert(pos.x, pos.z);
-          this.deps.log(
-            tr(
-              `⚠ ${ARMOR_NAME[a.kind]} 發現你！步兵下車搜索——快躲進騎樓或巷子`,
-              `⚠ ${ARMOR_NAME[a.kind]} spotted you! Infantry are dismounting to search. Hide under an arcade or in an alley.`,
-            ),
-            '#f66',
-          );
+          this.deps.alert(pos.x, pos.z, T.x, T.z);
+          if (mine)
+            this.deps.log(
+              tr(
+                `⚠ ${ARMOR_NAME[a.kind]} 發現你！步兵下車搜索——快躲進騎樓或巷子`,
+                `⚠ ${ARMOR_NAME[a.kind]} spotted you! Infantry are dismounting to search. Hide under an arcade or in an alley.`,
+              ),
+              '#f66',
+            );
+          else
+            this.deps.log(
+              tr(`⚠ ${ARMOR_NAME[a.kind]} 發現了你的隊友！`, `⚠ ${ARMOR_NAME[a.kind]} has spotted your companion!`),
+              '#f66',
+            );
         }
         a.fireCd -= dt;
         if (a.alerted && a.fireCd <= 0) {
@@ -428,12 +449,12 @@ export class ArmorSystem {
           if (tn < 8) {
             const o = tn * 6;
             this.tp.set(
-              [pos.x, 2.8, pos.z, P.x + (Math.random() - 0.5) * 2, 1 + Math.random(), P.z + (Math.random() - 0.5) * 2],
+              [pos.x, 2.8, pos.z, T.x + (Math.random() - 0.5) * 2, 1 + Math.random(), T.z + (Math.random() - 0.5) * 2],
               o,
             );
             tn++;
           }
-          if (Math.random() < 0.13) this.deps.hurt(7 + Math.random() * 6, ARMOR_NAME[a.kind]);
+          if (Math.random() < 0.13) hurt(7 + Math.random() * 6);
         }
       } else {
         a.spot = Math.max(0, a.spot - dt);

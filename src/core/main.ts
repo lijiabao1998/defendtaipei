@@ -1381,15 +1381,22 @@ function setupRecon(c: V2) {
         );
       },
       muted: () => inMetro(player.pos.z), // (v24.38 it circles over the station's exit then)
+      // v24.42 a teammate in the open under it is reported as the player would be
+      others: () => matesOut().map(o => ({ p: [o.p.x, o.p.z] as V2, hidden: o.hidden })),
       spotTime: () => (isNight() ? 1.5 : 2.5),
       spotCd: () => (isNight() ? 40 : 70),
-      spotted: p => {
+      spotted: (p, you = true) => {
         radio(p, null, tr('無人機回報目標位置', 'Drone reporting target position'));
         log(
-          tr(
-            '⚠ 解放軍偵察無人機發現你！砲擊與巡邏隊正趕來——快躲進騎樓或室內！',
-            '⚠ A PLA recon drone spotted you! Artillery and patrols are on their way—get under an arcade or indoors!',
-          ),
+          you
+            ? tr(
+                '⚠ 解放軍偵察無人機發現你！砲擊與巡邏隊正趕來——快躲進騎樓或室內！',
+                '⚠ A PLA recon drone spotted you! Artillery and patrols are on their way—get under an arcade or indoors!',
+              )
+            : tr(
+                '⚠ 解放軍偵察無人機發現你的隊友！砲擊與巡邏隊正往那裡去——快帶他們躲進騎樓或室內！',
+                '⚠ A PLA recon drone spotted your companion! Artillery and patrols are heading there. Get them under an arcade or indoors!',
+              ),
           '#f66',
         );
         slowDown(tr('被無人機發現', 'Spotted by a drone'));
@@ -1506,6 +1513,15 @@ function setupHeli() {
       if (!inMetro(player.pos.z)) AU.rotor(dist, 1.2);
     },
     salvo: (x, z) => warBarrage(2, [x, z]),
+    // v24.42 a teammate in the open: spotted, circled and fired on as the player would be
+    others: () =>
+      matesOut().map(o => ({
+        id: o.id,
+        name: o.name,
+        p: o.p,
+        hidden: o.hidden,
+        hurt: (n: number) => mateShot(o.m, n, n > 9 ? 0.3 : 0),
+      })),
     smoke: (x, y, z, fire) => {
       blastFx.smoke.spawn({ k: 2, x, y, z, vy: 1, life: 2.6, s0: 1.2, s1: 3.6, a0: 0.5 });
       if (fire) blastFx.fire.spawn({ k: 0, x, y, z, vy: 0.5, life: 0.5, s0: 1.2, s1: 2.2, a0: 0.9 });
@@ -2378,17 +2394,19 @@ function setupArmor(c: V2) {
         log(tr('你被機槍擊中，流血了！', 'Machine-gun fire hit you. You are bleeding!'), '#f66');
       }
     },
-    alert: (x, z) => {
+    alert: (x, z, tx, tz) => {
       sols
         .filter(s => s.state !== 'dead' && !s.post)
         .sort((a, b) => Math.hypot(a.pos.x - x, a.pos.z - z) - Math.hypot(b.pos.x - x, b.pos.z - z))
         .slice(0, 3)
         .forEach(s => {
           s.state = 'investigate';
-          s.target = [player.pos.x, player.pos.z];
+          s.target = [tx, tz]; // (v24.42 whoever it saw; it was always where the player was)
           s.timer = 300;
         });
     },
+    // v24.42 a teammate in the street in sight of its gun
+    others: () => matesOut().map(o => ({ p: o.p, hurt: (n: number) => mateShot(o.m, n, 0.35) })),
     log,
     player: () => player.pos,
     // v24.22 badly hurt: the crew bails out and leaves it where it stands, and it can be taken
@@ -3423,6 +3441,7 @@ const drive = new DriveSystem({
   inv: () => player.inv,
   hurt: n => {
     player.hp -= n;
+    for (const m of mates) if (m.car && m.st === 0) mateRide(m, n); // v24.42 the passengers too
   },
   roadW: roadWAt,
   roofAt: (x, z) => roofAt(x, z),
@@ -3462,6 +3481,7 @@ const traffic = new Traffic({
   junction: (x, z) => JN.has(jk(x, z)),
   green: (ux, uz) => roadT.green(ux, uz),
   player: () => player.pos,
+  others: () => mates.filter(m => m.st === 0 && !m.car).map(m => ({ x: m.pos.x, z: m.pos.z })), // v24.42
   bldAt: (x, z) => bldAt(x, z),
   abandon: (kind, x, z, hd) => {
     const v = drive.spawn(kind, x, z, hd, Math.random, { key: Math.random() < 0.6 });
@@ -4236,9 +4256,16 @@ function rvLine() {
     ? getLanguage() === 'en'
       ? `${hhmm(INF.rvT)}, ${r.n}. Take “Wanhua Zhongzheng 1st Road”—it is fastest. Just past the third traffic light. <b>Come alone and leave all your weapons behind</b>. No guns on the boat. Tell no one.`
       : `${hhmm(INF.rvT)}，${r.n}。走「萬華中正一路」最快，過了第三個紅綠燈就到。<b>一個人來，武器全部留下</b>，帶槍的船不載。別跟任何人說。`
-    : getLanguage() === 'en'
-      ? `${hhmm(INF.rvT)}, ${r.n} (near ${sec}). From the end of Xiyuan Road, take Huanhe South Road. Pass the floodgate and follow the levee down—it is under the metal sheet. The boat waits only ten minutes. Bring water, medicine, and your knife.`
-      : `${hhmm(INF.rvT)}，${r.n}（${sec}一帶）。從西園路尾走環河南路，過了水門沿堤防往下，鐵板下面就是。船只等十分鐘，水和藥帶在身上，刀也帶著。`;
+    : (getLanguage() === 'en'
+        ? `${hhmm(INF.rvT)}, ${r.n} (near ${sec}). From the end of Xiyuan Road, take Huanhe South Road. Pass the floodgate and follow the levee down—it is under the metal sheet. The boat waits only ten minutes. Bring water, medicine, and your knife.`
+        : `${hhmm(INF.rvT)}，${r.n}（${sec}一帶）。從西園路尾走環河南路，過了水門沿堤防往下，鐵板下面就是。船只等十分鐘，水和藥帶在身上，刀也帶著。`) +
+        // v24.42 the real contact knows you are not alone; the false one still says to come alone
+        (mates.some(m => m.st !== 2)
+          ? tr(
+              '你身邊的人也一起帶來，橡皮艇擠得下，別落下誰。',
+              ' Bring the people with you too. There is room in the boat; leave no one behind.',
+            )
+          : '');
 }
 function talkInformant() {
   if (INF.hid && !INF.caught) {
@@ -5006,6 +5033,12 @@ function updateInformant(dt: number) {
     if (INF.fake) springTrap(!!INF.saw);
     else {
       INF.done = 1;
+      // v24.42 the contact counts who came
+      if (mates.some(m => m.st === 0))
+        log(
+          tr('聯絡人：「人都到了？上船，快。」', 'The contact: “Is everyone here? Into the boat, quickly.”'),
+          '#9fd0ff',
+        );
       doEvac('boat');
       return;
     }
@@ -5231,6 +5264,10 @@ function setSpeed(v: number) {
     log(tr('附近有敵情，無法快轉', 'Enemies nearby—cannot fast-forward'), '#f99');
     v = 1;
   }
+  if (v > 1 && mates.some(m => m.st === 1)) {
+    log(tr('隊友倒下了，無法快轉', 'A companion is down—cannot fast-forward'), '#f99'); // v24.42
+    v = 1;
+  }
   speed = v;
   renderSpeed();
 }
@@ -5287,7 +5324,7 @@ function callout(s: Sol, msg: string) {
 /**
  * Someone a PLA soldier can see, go after and fire on. Until v24.39 the soldier loop knew only the player; it now takes
  * whom it deals with from plaMarks(): the player first, then whoever else is on plaOthers (teammates, from v24.40, behind
- * ?mates=1). With the player alone the loop runs exactly as before: the same checks, the same rnd() calls in the same order.
+ * chosen at the start since v24.40). With the player alone the loop runs exactly as before: the same checks, the same rnd() calls in the same order.
  */
 type PlaMark = {
   id: string;
@@ -5311,7 +5348,7 @@ type PlaMark = {
   /** a soldier has just spotted them (the player's line is in the loop) */
   spotted?: (s: Sol) => void;
 };
-/** v24.39 anyone besides the player the soldiers deal with (empty unless ?mates=1, or a check puts a stand-in here) */
+/** v24.39 anyone besides the player the soldiers deal with (the teammates, v24.41; or a check's stand-in) */
 const plaOthers: PlaMark[] = [];
 /** v24.39 what happened to the checks' stand-ins (__game.standIn) */
 const standInStats = new Map<string, { hp: number; hits: number; melee: number; spotted: number; by: number[] }>();
@@ -5445,7 +5482,7 @@ type Mate = {
   useT: number;
   mark: PlaMark;
 };
-/** v24.40 the teammates (empty unless chosen at the start, behind ?mates=1 until they are finished) */
+/** v24.40 the teammates (empty unless chosen at the start) */
 const mates: Mate[] = [];
 const mateTrail = new Trail();
 /** what the teammates did (checks) and what they knew last frame */
@@ -6082,6 +6119,8 @@ function mateRide(m: Mate, n: number) {
   m.hp -= n;
   m.hurtAt = performance.now();
   if (m.hp > 0) return;
+  // (v24.42 in the air nobody is put out: they hang on until it is down)
+  if (drive.cur?.s.air && (drive.cur.alt ?? 0) > 0.3) return void (m.hp = 1);
   m.car = false;
   m.left = false;
   const q = mateSpot([player.pos.x, player.pos.z], mates.indexOf(m) + 3, [[player.pos.x, player.pos.z]]);
@@ -6277,6 +6316,30 @@ function mateAid(m: Mate, dt: number, sp: number): { goal: V2 | null; speed: num
   );
   return { goal: null, speed: 0 };
 }
+/**
+ * v24.42 the teammates out in the street, as the drone, the helicopters, the snipers and the armour see them: on their
+ * feet, not riding, on the map (not upstairs, not underground); hidden indoors or close under a wall, as the player is
+ */
+function matesOut() {
+  return mates
+    .filter(m => m.st === 0 && !m.car && spaceOf(m.pos.x, m.pos.z) === 0)
+    .map(m => ({
+      m,
+      id: m.id,
+      name: mateName2(m),
+      p: m.pos,
+      hidden:
+        indoorAt(m.pos.x, m.pos.z) ||
+        [
+          [1.6, 0],
+          [-1.6, 0],
+          [0, 1.6],
+          [0, -1.6],
+        ].some(([dx, dz]) => bldAt(m.pos.x + dx, m.pos.z + dz)),
+    }));
+}
+/** v24.42 a round from above or from a vehicle's gun (no soldier to go after: a stagger, maybe bleeding) */
+const mateShot = (m: Mate, n: number, bleed: number) => mateHurt(m, n, null, false, bleed);
 /** is the ground under them loaded (walls only exist on loaded district tiles) */
 function mateGround(x: number, z: number) {
   if (spaceOf(x, z) !== 0 || inCore(x, z) || !district.ix) return true;
@@ -7952,6 +8015,28 @@ function setupSnipers() {
         return los(snpEye(s), P);
       },
       player: () => realPos.set(realX(), realY(), realZ()),
+      // v24.42 a teammate in his sights at his junction (out in the open, not behind a car)
+      others: () =>
+        matesOut()
+          .filter(o => !indoorAt(o.p.x, o.p.z))
+          .map(o => ({
+            id: o.id,
+            p: o.p,
+            sees: (s: any) =>
+              !vehicles.list.some(v => Math.hypot(v.pos.x - o.p.x, v.pos.z - o.p.z) < 1.8) &&
+              los(snpEye(s), [o.p.x, o.p.z]),
+            hurt: (dmg: number) => mateShot(o.m, dmg, 0.5),
+          })),
+      aimAt: id => {
+        const m = mates.find(q => q.id === id);
+        if (m && m.sayT <= 0)
+          log(
+            getLanguage() === 'en'
+              ? `⚠ A sniper has ${mateName2(m)} in his sights!`
+              : `⚠ 狙擊手瞄準了${mateName2(m)}！`,
+            '#f66',
+          );
+      },
       hurt: dmg => {
         if (player.sleeping) player.sleeping = false;
         player.rig.hurtT = 0.35;
@@ -9299,6 +9384,10 @@ function barricade() {
   log(tr('門封好了（敲打聲可能引來巡邏）', 'Door barricaded (hammering may attract patrols).'), '#9f9');
 }
 function sleep() {
+  if (mates.some(m => m.st === 1)) {
+    log(tr('隊友倒下了，現在不能睡', 'A companion is down. Not now.'), '#f99'); // v24.42
+    return;
+  }
   if (!indoorAt(player.pos.x, player.pos.z)) {
     log(tr('只能在室內睡覺', 'You can only sleep indoors.'), '#f99');
     return;
@@ -9864,6 +9953,22 @@ const evacOpen = () => !UT.ev.ex && gameMin >= EV0 && gameMin < EV1;
 function doEvac(mode: 'heli' | 'boat' = 'heli') {
   if (cine.on) return;
   if (mode === 'heli') UT.ev.ex = 1;
+  // v24.42 whoever is with the player (on their feet, within 10 m, or riding) gets aboard; the rest stay in Wanhua
+  // (one who is down within reach is carried aboard)
+  const aboard = mates.filter(
+    m =>
+      m.st !== 2 &&
+      (m.car ||
+        (spaceOf(m.pos.x, m.pos.z) === spaceOf(player.pos.x, player.pos.z) &&
+          Math.hypot(m.pos.x - player.pos.x, m.pos.z - player.pos.z) < 10)),
+  );
+  const stay = mates.filter(m => m.st !== 2 && !aboard.includes(m));
+  const who = (l: Mate[]) => l.map(mateName2).join(getLanguage() === 'en' ? ', ' : '、');
+  const withRow = !mates.length
+    ? ''
+    : getLanguage() === 'en'
+      ? `<tr><td>With you</td><td>${aboard.length ? who(aboard) : 'Nobody'}${stay.length ? ` (stayed behind: ${who(stay)})` : ''}</td></tr>`
+      : `<tr><td>同行的人</td><td>${aboard.length ? who(aboard) : '沒有人'}${stay.length ? `（留在萬華：${who(stay)}）` : ''}</td></tr>`;
   save();
   closePanel();
   setSpeed(1);
@@ -9879,8 +9984,8 @@ function doEvac(mode: 'heli' | 'boat' = 'heli') {
     d.id = 'evacend';
     d.innerHTML =
       getLanguage() === 'en'
-        ? `<h1>You have reached safety aboard USS Gerald R. Ford (CVN-78)</h1><h2>An alternate ending: you survived and carried Wanhua's story to the world. (Evacuation route: ${mode === 'boat' ? 'Boat · Out to sea via the Tamsui River' : 'Helicopter · Riverside extraction zone'})</h2><table><tr><td>Evacuation route</td><td>${mode === 'boat' ? '🚤 Boat (contact pickup)' : '🚁 Helicopter'}</td></tr><tr><td>Days survived</td><td>${day} days (Day ${day}, ${hh2})</td></tr><tr><td>Districts reclaimed</td><td>${libN()} / ${NSEC}</td></tr><tr><td>Occupation troops defeated</td><td>${player.kills}</td></tr><tr><td>Items carried</td><td>${items} items</td></tr></table><div><button id=evcont>Stay in Wanhua (the road to liberation)</button><button id=evnew>New game</button></div><p style="font-size:12px;color:#678;margin-top:18px">A work of fiction · Ships and helicopters use generic low-poly models</p>`
-        : `<h1>您已成功撤離至 福特號航空母艦（USS Gerald R. Ford, CVN-78）</h1><h2>另一個結局：你活了下來，把萬華的故事帶出去。（撤離路線：${mode === 'boat' ? '小艇・淡水河出海' : '直升機・河濱撤離區'}）</h2><table><tr><td>撤離路線</td><td>${mode === 'boat' ? '🚤 小艇（聯絡人接應）' : '🚁 直升機'}</td></tr><tr><td>存活天數</td><td>${day} 天（第 ${day} 天 ${hh2}）</td></tr><tr><td>奪回街區</td><td>${libN()} / ${NSEC}</td></tr><tr><td>擊倒佔領軍</td><td>${player.kills}</td></tr><tr><td>攜帶物品</td><td>${items} 件</td></tr></table><div><button id=evcont>繼續留在萬華（奪回之路）</button><button id=evnew>新遊戲</button></div><p style="font-size:12px;color:#678;margin-top:18px">虛構作品・艦艇與直升機為通用低多邊形模型</p>`;
+        ? `<h1>You have reached safety aboard USS Gerald R. Ford (CVN-78)</h1><h2>An alternate ending: you survived and carried Wanhua's story to the world. (Evacuation route: ${mode === 'boat' ? 'Boat · Out to sea via the Tamsui River' : 'Helicopter · Riverside extraction zone'})</h2><table><tr><td>Evacuation route</td><td>${mode === 'boat' ? '🚤 Boat (contact pickup)' : '🚁 Helicopter'}</td></tr><tr><td>Days survived</td><td>${day} days (Day ${day}, ${hh2})</td></tr><tr><td>Districts reclaimed</td><td>${libN()} / ${NSEC}</td></tr><tr><td>Occupation troops defeated</td><td>${player.kills}</td></tr><tr><td>Items carried</td><td>${items} items</td></tr>${withRow}</table><div><button id=evcont>Stay in Wanhua (the road to liberation)</button><button id=evnew>New game</button></div><p style="font-size:12px;color:#678;margin-top:18px">A work of fiction · Ships and helicopters use generic low-poly models</p>`
+        : `<h1>您已成功撤離至 福特號航空母艦（USS Gerald R. Ford, CVN-78）</h1><h2>另一個結局：你活了下來，把萬華的故事帶出去。（撤離路線：${mode === 'boat' ? '小艇・淡水河出海' : '直升機・河濱撤離區'}）</h2><table><tr><td>撤離路線</td><td>${mode === 'boat' ? '🚤 小艇（聯絡人接應）' : '🚁 直升機'}</td></tr><tr><td>存活天數</td><td>${day} 天（第 ${day} 天 ${hh2}）</td></tr><tr><td>奪回街區</td><td>${libN()} / ${NSEC}</td></tr><tr><td>擊倒佔領軍</td><td>${player.kills}</td></tr><tr><td>攜帶物品</td><td>${items} 件</td></tr>${withRow}</table><div><button id=evcont>繼續留在萬華（奪回之路）</button><button id=evnew>新遊戲</button></div><p style="font-size:12px;color:#678;margin-top:18px">虛構作品・艦艇與直升機為通用低多邊形模型</p>`;
     document.body.appendChild(d);
     $('evcont').onclick = () => {
       d.remove();
@@ -12390,7 +12495,7 @@ async function boot() {
       spawnRole(ROLE, skipIntro);
     }
     // v24.40 the people who started with you: a saved game brings back whoever it has (whatever the URL says, so that
-    // opening it without ?mates=1 never drops them); multiplayer has nobody
+    // opening it with ?mates=0 never drops them); multiplayer has nobody
     if (MP) clearMates();
     else if (load && sv) matesLoad(sv.m);
     else spawnMates(picks);
@@ -13139,6 +13244,8 @@ async function boot() {
     facade: () => facade,
     setSpeed,
     speed: () => speed,
+    // v24.42 the evacuation now (the ending screen, with who comes along)
+    evacNow: (mode: 'heli' | 'boat' = 'heli') => doEvac(mode),
     WX,
     airdrop,
     makeBucket,
