@@ -3,6 +3,7 @@ import { tr, getLanguage, requestLanguageChange } from '../i18n';
 // 操作說明 and 製作名單. Used from the title menu and the in-game pause menu.
 import { SET, saveSettings, ACTIONS, BIND, keyName, rebind, resetKeys, applyBtnSize, type Quality } from './settings';
 import { VERSION } from '../core/version';
+import { MATES_ON } from '../debug/flags';
 
 /** touch device (phone / tablet): no Esc key, no mouse */
 export const TOUCH =
@@ -164,13 +165,18 @@ export function openSettings() {
             if (e.code !== 'Escape') {
               const a = (b as HTMLElement).dataset.a!;
               const sw = rebind(a, e.code);
-              const lab = (x: string) => ACTIONS.find(q => q[0] === x)![1];
-              msg.textContent = sw
+              const lab = (x: string) => ACTIONS.find(q => q[0] === x)?.[1] ?? tr('隊友', 'Companions');
+              msg.textContent = sw?.startsWith('!')
                 ? tr(
-                    `${keyName(e.code)} 原本是「${lab(sw)}」，已與「${lab(a)}」互換。`,
-                    `${keyName(e.code)} was assigned to “${lab(sw)}”; swapped with “${lab(a)}”.`,
+                    `${keyName(e.code)} 已經是「${lab(sw.slice(1))}」的按鍵，先把那一項換成別的鍵。`,
+                    `${keyName(e.code)} is already “${lab(sw.slice(1))}”. Give that one another key first.`,
                   )
-                : tr(`「${lab(a)}」= ${keyName(e.code)}`, `“${lab(a)}” = ${keyName(e.code)}`);
+                : sw
+                  ? tr(
+                      `${keyName(e.code)} 原本是「${lab(sw)}」，已與「${lab(a)}」互換。`,
+                      `${keyName(e.code)} was assigned to “${lab(sw)}”; swapped with “${lab(a)}”.`,
+                    )
+                  : tr(`「${lab(a)}」= ${keyName(e.code)}`, `“${lab(a)}” = ${keyName(e.code)}`);
             }
             draw();
           };
@@ -202,12 +208,24 @@ export function openHelp() {
   const survival = {
     title: tr('搜刮與生存', 'Loot & survival'),
     html:
-      table(['interact', 'inv', 'map', 'shelter', 'barricade', 'sleep', 'light', 'speed1', 'speed2', 'speed3']) +
+      table([
+        'interact',
+        'inv',
+        'map',
+        'shelter',
+        'barricade',
+        'sleep',
+        'light',
+        'speed1',
+        'speed2',
+        'speed3',
+        'mates',
+      ]) +
       `<p class="mnote">${tr('按 Esc 關閉視窗／開啟暫停選單。按鍵可在「設定 → 按鍵設定」更改。', 'Press Esc to close a window / open the pause menu. Change bindings under Settings → Key bindings.')}</p>`,
   };
   const mobile = {
     title: tr('手機觸控', 'Touch controls'),
-    html: `<table class="ktab"><tr><th colspan="2">${tr('手機', 'Mobile')}</th></tr><tr><td>${tr('左下搖桿', 'Bottom-left joystick')}</td><td>${tr('移動（推到底奔跑）', 'Move (push all the way to sprint)')}</td></tr><tr><td>${tr('大圓鈕', 'Large round button')}</td><td>${tr('打（按住連續攻擊）；靠近可互動的東西時變成 搜／開門／爬上／上車…，點一下互動、長按攻擊；狙擊槍時是「瞄」：按住開鏡、拖曳瞄準、放開射擊', 'Attack (hold to attack repeatedly). Near interactable objects, this changes to Search / Open / Climb / Enter… Tap to interact; hold to attack. With a sniper rifle, it becomes Aim: hold to scope in, drag to aim, and release to fire.')}</td></tr><tr><td>${tr('蹲', 'Crouch')}</td><td>${tr('貼牆掩體或潛行；再點起身；長按撤退；開鏡時 ✕ 關鏡', 'Take cover against a wall or sneak. Tap again to stand; hold to retreat. While scoped in, tap ✕ to exit the scope.')}</td></tr><tr><td>${tr('武器欄 ⇄', 'Weapon bar ⇄')}</td><td>${tr('切換武器', 'Switch weapons')}</td></tr><tr><td>☰ ／ 🗺</td><td>${tr('選單（暫停、背包、存檔）／地圖', 'Menu (pause, inventory, save) / map')}</td></tr><tr><td>${tr('返回鍵', 'Back button')}</td><td>${tr('關閉視窗／選單', 'Close window / menu')}</td></tr></table>`,
+    html: `<table class="ktab"><tr><th colspan="2">${tr('手機', 'Mobile')}</th></tr><tr><td>${tr('左下搖桿', 'Bottom-left joystick')}</td><td>${tr('移動（推到底奔跑）', 'Move (push all the way to sprint)')}</td></tr><tr><td>${tr('大圓鈕', 'Large round button')}</td><td>${tr('打（按住連續攻擊）；靠近可互動的東西時變成 搜／開門／爬上／上車…，點一下互動、長按攻擊；狙擊槍時是「瞄」：按住開鏡、拖曳瞄準、放開射擊', 'Attack (hold to attack repeatedly). Near interactable objects, this changes to Search / Open / Climb / Enter… Tap to interact; hold to attack. With a sniper rifle, it becomes Aim: hold to scope in, drag to aim, and release to fire.')}</td></tr><tr><td>${tr('蹲', 'Crouch')}</td><td>${tr('貼牆掩體或潛行；再點起身；長按撤退；開鏡時 ✕ 關鏡', 'Take cover against a wall or sneak. Tap again to stand; hold to retreat. While scoped in, tap ✕ to exit the scope.')}</td></tr><tr><td>${tr('武器欄 ⇄', 'Weapon bar ⇄')}</td><td>${tr('切換武器', 'Switch weapons')}</td></tr>${MATES_ON ? `<tr><td>${tr('隊', 'Team')}</td><td>${tr('有隊友時：點一下看最近那位的背包和命令，長按全隊待命／跟上', 'With companions: tap for the nearest one’s pack and orders; hold to make everyone wait / follow')}</td></tr>` : ''}<tr><td>☰ ／ 🗺</td><td>${tr('選單（暫停、背包、存檔）／地圖', 'Menu (pause, inventory, save) / map')}</td></tr><tr><td>${tr('返回鍵', 'Back button')}</td><td>${tr('關閉視窗／選單', 'Close window / menu')}</td></tr></table>`,
   };
   const pages = TOUCH ? [mobile, movement, survival] : [movement, survival, mobile];
   const m = open(

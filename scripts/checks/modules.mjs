@@ -26,6 +26,7 @@ try {
     'src/story/index.check.ts',
     'src/map/tiles/manager.check.ts',
     'src/map/tiles/grid-lod.check.ts',
+    'src/npc/mates.check.ts',
   ]) {
     const outfile = join(temp, 'check.mjs');
     await build({ entryPoints: [join(root, entry)], outfile, bundle: true, platform: 'node', format: 'esm' });

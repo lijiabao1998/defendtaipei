@@ -31,6 +31,8 @@ export type RigOpts = {
   outfit?: string;
   /** v17.2 fabric per garment; defaults are guessed from the colours */
   fabric?: { top?: Fabric; bottom?: Fabric; jacket?: Fabric };
+  /** v24.40 one plain mesh per joint (no skin gloss, no fabric, no detail): a teammate on a phone */
+  lite?: boolean;
 };
 type J = THREE.Object3D;
 export type Rig = {
@@ -105,6 +107,7 @@ export function makeRig(o: RigOpts): Rig {
     S = o.soldier;
   const { k, LT, LS, hipH } = bodyDims(o.gender);
   const P = new Parts();
+  P.lite = !!o.lite;
   const fab = (f: Fabric | 'plain') => (P.fab = f);
   const det = (fn: () => void) => {
     P.det = true;

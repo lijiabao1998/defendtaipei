@@ -14,7 +14,8 @@ const result = await build({
       export { ITEMS } from './src/systems/items';
       export { newSurv, survivorName, survivorRole } from './src/systems/survival';
       export { STORY_EVENTS } from './src/story/events/catalog';
-      export { AM765 } from './src/story/broadcasts/am765';`,
+      export { AM765 } from './src/story/broadcasts/am765';
+      export { relation, mateLine, ruleName } from './src/npc/mates';`,
     resolveDir: root,
   },
   bundle: true,
@@ -204,6 +205,24 @@ for (const survivor of zh.api.newSurv().group) {
   assert.ok(!/\p{Script=Han}/u.test(en.api.survivorRole(legacy)));
   assert.equal(JSON.stringify(legacy), original, 'legacy survivor data remains unchanged');
 }
+// v24.40 the teammates: who they are to you and the fire rules have English of their own
+for (const me of [
+  { r: 'tech', g: 'm' },
+  { r: 'student', g: 'f' },
+  { r: 'office', g: 'f' },
+])
+  for (const R of en.api.ROLES)
+    for (const g of ['m', 'f']) {
+      if (R.id === me.r && g === me.g) continue;
+      const m = { r: R.id, g };
+      const line = en.api.mateLine(me, m, [me, m, { r: 'student', g: 'm' }]);
+      assert.ok(!/\p{Script=Han}/u.test(line), `English teammate line: ${line}`);
+    }
+for (const r of [0, 1, 2]) assert.ok(!/\p{Script=Han}/u.test(en.api.ruleName(r)));
+assert.equal(zh.api.relation({ r: 'student', g: 'f' }, { r: 'tech', g: 'm' }, []), '爸爸');
+assert.equal(en.api.relation({ r: 'tech', g: 'm' }, { r: 'tech', g: 'f' }, [{ r: 'student', g: 'f' }]), 'wife');
+assert.equal(zh.api.ctxLabel('[E] 救阿財（剩 45 秒）', 'E'), '救人');
+assert.equal(en.api.ctxLabel('[E] Save A-Cai (45 s)', 'E'), 'Save');
 const unknownSurvivor = Object.freeze({ id: 'custom', name: 'Custom name', role: 'Custom role' });
 assert.equal(en.api.survivorName(unknownSurvivor), 'Custom name');
 assert.equal(en.api.survivorRole(unknownSurvivor), 'Custom role');

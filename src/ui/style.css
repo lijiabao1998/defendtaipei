@@ -2361,6 +2361,145 @@ body.selmode #daylen button.on {
 #selection-settings #mpsel {
   grid-column: 1/-1;
 }
+/* v24.40 who comes with you */
+#matesel {
+  grid-column: 1/-1;
+  padding: 20px 24px;
+  border: 1px solid #65573e;
+  border-radius: 12px;
+  background: #181916;
+}
+#matesel .mates-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 14px;
+  margin-bottom: 14px;
+}
+#matesel .mates-head b {
+  font-size: 15px;
+}
+#matesel .mates-head small {
+  color: #aca596;
+  font-size: 12px;
+}
+#matesel .mates-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+#matesel .mc {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  grid-template-rows: auto auto;
+  gap: 4px 10px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid #4d4434;
+  border-radius: 9px;
+  background: #23211b;
+  cursor: pointer;
+  text-align: left;
+}
+#matesel .mc.on {
+  border-color: #f0d291;
+  background: #3a3220;
+  box-shadow: 0 0 0 1px #d0ae65 inset;
+}
+#matesel .mc:focus-visible {
+  outline: 2px solid #f0d291;
+  outline-offset: 2px;
+}
+#matesel .mc .pv {
+  grid-row: 1/3;
+  width: 44px;
+  height: 64px;
+  object-fit: contain;
+}
+#matesel .mc .mt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+#matesel .mc .mt b {
+  font-size: 13px;
+}
+#matesel .mc .mt small {
+  color: #bdb6a7;
+  font-size: 11px;
+  line-height: 1.5;
+}
+#matesel .mc .mt small.mp {
+  color: #d6bc83;
+}
+#matesel .mc .mg {
+  display: flex;
+  gap: 6px;
+}
+#matesel .mc .mg button {
+  margin: 0;
+  min-width: 40px;
+  padding: 4px 10px;
+  border: 1px solid #65573e;
+  border-radius: 6px;
+  background: #302d25;
+  color: #ded3bc;
+  font-size: 12px;
+}
+#matesel .mc .mg button.on {
+  color: #241c10;
+  background: #d0ae65;
+  border-color: #f0d291;
+}
+#matesel .mc .mg button:disabled {
+  opacity: 0.35;
+}
+.selection-mates {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #413c31;
+  font-size: 13px;
+}
+.selection-mates > span:first-child {
+  flex-basis: 100%;
+  color: #aca596;
+  font-size: 12px;
+}
+.selection-mates .sm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#selection-summary .selection-mates img {
+  width: 34px;
+  height: 48px;
+}
+@media (max-width: 700px) {
+  #matesel {
+    padding: 14px;
+  }
+  #matesel .mates-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  #matesel .mc {
+    grid-template-columns: 34px 1fr;
+    padding: 8px;
+  }
+  #matesel .mc .pv {
+    width: 34px;
+    height: 50px;
+  }
+  #matesel .mc .mt small.mp {
+    display: none;
+  }
+}
 #selection-summary {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2895,4 +3034,83 @@ body.portrait #mpleave {
   right: 8px;
   left: auto;
   transform: none;
+}
+/* v24.40 computer teammates: one line each under the bars, the opening card, the ending, the phone's 隊 button */
+.mates-hud {
+  margin-top: 4px;
+}
+.mate-row {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  height: 16px;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.mate-row b {
+  flex: none;
+  min-width: 34px;
+  color: #cfe8ff;
+}
+.mate-row i {
+  position: absolute;
+  left: 0;
+  bottom: 1px;
+  height: 2px;
+  background: #c33;
+}
+.mate-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #bcc;
+}
+.mate-row.down span {
+  color: #f88;
+}
+.mate-row.dead {
+  opacity: 0.55;
+}
+#wake small.wake-mates {
+  max-width: 90vw;
+  color: #cfe8ff;
+  text-align: center;
+}
+.mates-end {
+  color: #cfe8ff;
+  line-height: 1.8;
+}
+#teambtn {
+  display: none;
+}
+body.mobile.ingame.has-mates #teambtn {
+  display: block;
+  position: fixed;
+  z-index: 20;
+  right: calc(70px + env(safe-area-inset-right));
+  top: calc(266px + env(safe-area-inset-top));
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid #9cf;
+  background: rgba(20, 30, 40, 0.8);
+  color: #e6f2ff;
+  font-size: 18px;
+}
+body.mobile.portrait.ingame.has-mates #teambtn {
+  top: auto;
+  width: calc(52px * var(--pbs, 1));
+  height: calc(52px * var(--pbs, 1));
+  right: calc(42px + 60px * var(--pbs, 1) + env(safe-area-inset-right));
+  bottom: calc(60px + 88px * var(--pbs, 1) + env(safe-area-inset-bottom));
+  font-size: calc(19px * var(--pbs, 1));
+}
+html[lang='en'] body.mobile.ingame.has-mates #teambtn {
+  font-size: calc(11px * var(--pbs, 1));
+}
+body.mobile.inventory-open #teambtn {
+  display: none !important;
 }
