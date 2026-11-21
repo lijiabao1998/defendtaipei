@@ -5880,7 +5880,12 @@ function mateVitals(m: Mate, dt: number, gm: number) {
       mateSay(m, '我好餓……你有吃的嗎？', 'I’m starving… do you have anything to eat?', '#fd9', 90);
     else if (m.thirst < 15) mateSay(m, '我好渴……有水嗎？', 'I’m so thirsty… any water?', '#fd9', 90);
   }
-  if (m.hp <= 0) mateDown(m, m.hunger <= 0 || m.thirst <= 0 ? 'starve' : 'bleed');
+  if (m.hp <= 0) {
+    const why = m.hunger <= 0 || m.thirst <= 0 ? 'starve' : 'bleed';
+    // (v24.42 riding: they hang on in the air, and on the ground are lifted out beside the vehicle)
+    if (m.car) mateRide(m, 0, why);
+    else mateDown(m, why);
+  }
 }
 /** a teammate eats, drinks or treats itself (a nurse treats twice as well, as the player does) */
 function mateUse(m: Mate, k: string) {
@@ -6114,10 +6119,10 @@ function matesBlast(p: V2, r: number, dmgAt: (d: number) => number, R: BlastRule
   }
 }
 /** v24.41 hurt riding with the player (a crash, a blast by the vehicle); down, they are lifted out beside it */
-function mateRide(m: Mate, n: number) {
+function mateRide(m: Mate, n: number, why = 'blast') {
   if (m.st !== 0) return;
   m.hp -= n;
-  m.hurtAt = performance.now();
+  if (n > 0) m.hurtAt = performance.now();
   if (m.hp > 0) return;
   // (v24.42 in the air nobody is put out: they hang on until it is down)
   if (drive.cur?.s.air && (drive.cur.alt ?? 0) > 0.3) return void (m.hp = 1);
@@ -6125,7 +6130,7 @@ function mateRide(m: Mate, n: number) {
   m.left = false;
   const q = mateSpot([player.pos.x, player.pos.z], mates.indexOf(m) + 3, [[player.pos.x, player.pos.z]]);
   m.pos.set(q[0], 0, q[1]);
-  mateDown(m, 'blast');
+  mateDown(m, why);
 }
 
 const FISTS = { dmg: 8, range: 1.1, noise: 2, cd: 0.5, kind: 'melee' } as any;
@@ -6322,7 +6327,7 @@ function mateAid(m: Mate, dt: number, sp: number): { goal: V2 | null; speed: num
  */
 function matesOut() {
   return mates
-    .filter(m => m.st === 0 && !m.car && spaceOf(m.pos.x, m.pos.z) === 0)
+    .filter(m => m.st === 0 && !m.car && spaceOf(m.pos.x, m.pos.z) === 0 && mateGround(m.pos.x, m.pos.z))
     .map(m => ({
       m,
       id: m.id,
@@ -6398,6 +6403,8 @@ function updateMate(m: Mate, i: number, dt: number, pSpace: number, night: boole
   const dP = Math.hypot(P.x - m.pos.x, P.z - m.pos.z);
   const far = !same || dP > 150;
   m.rig.root.visible = !far && (m.st !== 2 || m.body);
+  // (v24.42 one down or dead lies where they are: lifted out of a vehicle, brought down the stairs with the player)
+  if (m.st && !far) m.rig.root.position.set(m.pos.x, walkH(m.pos.x, m.pos.z), m.pos.z);
   if (m.st === 2) {
     if (!far && m.body && m.rig.deadT < 1) animate(m.rig, 'death', 0, dt);
     return;
@@ -6415,15 +6422,9 @@ function updateMate(m: Mate, i: number, dt: number, pSpace: number, night: boole
     speed = 0;
   // left behind: they wait until the player is back near them
   if (m.left && same && dP < 15 && !drive.cur) m.left = false;
-  const follow =
-    m.mode === 0 &&
-    !m.left &&
-    same &&
-    !drive.cur &&
-    !player.sleeping &&
-    !roofB &&
-    !m.sleeping &&
-    mateGround(m.pos.x, m.pos.z);
+  const called = m.mode === 0 && !m.left && same && !drive.cur && !player.sleeping && !roofB && !m.sleeping;
+  // (they walk only on ground that is loaded; called from streets that are gone, they come back where the player is)
+  const follow = called && mateGround(m.pos.x, m.pos.z);
   const sneak = player.sneak || !!player.cover;
   m.sneak = (follow || (same && dP < 20)) && sneak;
   m.cover = same && dP < 3 && !!player.cover;
@@ -6441,7 +6442,7 @@ function updateMate(m: Mate, i: number, dt: number, pSpace: number, night: boole
   } else if (A) {
     goal = A.goal;
     speed = A.speed;
-  } else if (follow && dP > 60) {
+  } else if (called && dP > 60) {
     // far behind (the player ran off, or the streets around them are gone): back where the player walked
     const T = mateTrail.behind(1.6 + i * 1.1),
       q = mateTrail.at(T);
@@ -6740,7 +6741,7 @@ function matesStart(load: boolean) {
 function matesFollowToggle() {
   const live = mates.filter(m => m.st === 0);
   if (!live.length) return;
-  const wait = live.some(m => m.mode === 0);
+  const wait = live.some(m => m.mode === 0 && !m.left); // (those left behind are already waiting: T calls them)
   for (const m of live) {
     m.mode = wait ? 1 : 0;
     m.left = false;
@@ -13458,8 +13459,12 @@ async function boot() {
         sleeping: m.sleeping,
         visible: m.rig.root.visible,
         y: m.rig.root.position.y,
+        rp: [m.rig.root.position.x, m.rig.root.position.z],
+        left: m.left,
         anim: m.rig.state,
       })),
+    matesOut: () => matesOut().map(o => o.id),
+    mateGround: (x: number, z: number) => mateGround(x, z),
     mateStats: () => ({ ...MS, trail: mateTrail.pts.length, head: mateTrail.head, len: mateTrail.len }),
     doorsNear: (x: number, z: number, r = 6) =>
       (doors as LiveDoor[])
@@ -13480,7 +13485,9 @@ async function boot() {
     },
     mateSet: (
       i: number,
-      o: Partial<Pick<Mate, 'hp' | 'hunger' | 'thirst' | 'fatigue' | 'bleed' | 'mode' | 'rule' | 'downT' | 'inv'>>,
+      o: Partial<
+        Pick<Mate, 'hp' | 'hunger' | 'thirst' | 'fatigue' | 'bleed' | 'mode' | 'rule' | 'downT' | 'inv' | 'left'>
+      >,
     ) => !!mates[i] && (Object.assign(mates[i], o), o.inv && (mates[i].equip = pickWeapon(mates[i].inv, ITEMS)), true),
     mateGiveTo: (i: number, k: string, n = 1) => {
       const m = mates[i];

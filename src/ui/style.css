@@ -2489,8 +2489,13 @@ body.selmode #daylen button.on {
     gap: 8px;
   }
   #matesel .mc {
-    grid-template-columns: 34px 1fr;
+    grid-template-columns: 34px minmax(0, 1fr);
     padding: 8px;
+  }
+  #matesel .mc .mg button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 4px 0;
   }
   #matesel .mc .pv {
     width: 34px;
