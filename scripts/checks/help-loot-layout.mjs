@@ -127,6 +127,10 @@ async function fixture(page, inventory, loot, lang) {
         s.state = 'dead';
         s.mesh.visible = false;
       });
+      // (v24.42 nothing from the sky either: half the time the nearest crate is out in the open where a recon drone
+      // spots the player, and its shells killed them mid-check, three CI runs in a row; this checks the layout)
+      for (const d of g.recon()?.list || []) ((d.cd = 1e9), (d.spot = 0));
+      for (const c of g.heli()?.list || []) ((c.state = 'patrol'), (c.spot = -1e9));
       const p = g.contNear();
       if (!p) throw Error('No outdoor container available');
       const c = g.conts.find(c => c.p[0] === p[0] && c.p[1] === p[1]);
