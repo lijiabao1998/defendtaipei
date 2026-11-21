@@ -65,6 +65,10 @@ eq(pickWeapon({ knife: 1, pipe: 1 }, ITEMS), 'pipe', 'the hardest-hitting thing 
 eq(pickWeapon({ knife: 1, pistol: 1 }, ITEMS), 'knife', 'a gun with no rounds is not held');
 eq(pickWeapon({ knife: 1, pistol: 1, a9: 5 }, ITEMS), 'pistol', 'a gun with rounds');
 eq(pickWeapon({ at4: 1, knife: 1 }, ITEMS), 'knife', 'never a launcher');
+{
+  const mag = Object.keys(ITEMS).find(k => ITEMS[k].mag && ITEMS[k].ammo === ITEMS.qbz191?.ammo);
+  if (mag) eq(pickWeapon({ qbz191: 1, [mag]: 1, knife: 1 }, ITEMS), 'qbz191', 'a gun with a magazine for it');
+}
 eq(pickWeapon({ water: 1 }, ITEMS), '', 'bare hands');
 
 // when they fight
@@ -73,6 +77,8 @@ ok(!engages(0, { ...c, fighting: true, playerFired: true }), 'hold fire: not eve
 ok(engages(0, { ...c, foeOnUs: true, close: true }), 'hold fire: one already on them at arm’s length');
 ok(engages(1, { ...c, fighting: true }), 'use judgement: a soldier in a fight with the team');
 ok(engages(1, { ...c, hurt: true }), 'use judgement: once hurt');
+ok(!engages(1, { ...c, hurt: true, sneaking: true }), 'hurt, but not an unaware one while the player sneaks');
+ok(engages(1, { ...c, fighting: true, sneaking: true }), 'one already in a fight, sneaking or not');
 ok(engages(1, { ...c, playerFired: true }), 'use judgement: once the player has opened up');
 ok(!engages(1, { ...c, playerFired: true, sneaking: true }), 'but not an unaware one while the player sneaks');
 ok(!engages(1, c), 'use judgement: not an unaware one');
