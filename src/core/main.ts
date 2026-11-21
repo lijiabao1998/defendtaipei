@@ -95,6 +95,7 @@ import {
   pickWeapon,
   pickConsumable,
   ruleName,
+  engages,
 } from '../npc/mates';
 import { frontageInfill } from '../map/infill';
 import { blockInfill } from '../map/blocks';
@@ -1310,11 +1311,13 @@ function shellDmg(d: number) {
   return 0;
 }
 let lastBlast: unknown = null;
-function blast(p: THREE.Vector3, fromAbove: boolean) {
+function blast(p: THREE.Vector3, fromAbove: boolean, by?: HitBy) {
   lastBlast = { x: p.x, y: p.y, z: p.z, fromAbove };
   boom(scene, p, 1);
   noise(p.x, p.z, 45);
-  for (const s of sols) if (s.state !== 'dead' && Math.hypot(s.pos.x - p.x, s.pos.z - p.z) < 6) damageSol(s, 220, true);
+  // (v24.41 a JSDF bomb: theirs, and the wounded look for where it fell, not for the player)
+  for (const s of sols)
+    if (s.state !== 'dead' && Math.hypot(s.pos.x - p.x, s.pos.z - p.z) < 6) damageSol(s, 220, !by, by);
   if (armor) armor.hit(p.x, p.z, fromAbove ? 160 : 55, true);
   // (v24.38 upstairs from where the player really stands, and how far above or below it: an FPV flown from a roof
   // that crashes on it next to them; a bomb in the street under the roof does not reach them)
@@ -1324,6 +1327,7 @@ function blast(p: THREE.Vector3, fromAbove: boolean) {
     player.hp -= 45 * (1 - dp / 6);
     player.rig.hurtT = 0.35;
   }
+  if (mates.length) matesBlast([p.x, p.z], 6, d => 45 * (1 - d / 6), { up: { y: p.y } }); // v24.41
 }
 const fpvP = new THREE.Vector3();
 async function launchFPV() {
@@ -1434,6 +1438,13 @@ function updateShells(dt: number) {
       const d = Math.hypot(o.pos.x - p.x, o.pos.z - p.z);
       if (d < wound) damageSol(o, d < core ? 300 : dmgAt(d) * 1.5, true);
     }
+    // v24.41 the teammates, by the player's rule here (wherever the player is: they may be in the street above)
+    if (mates.length)
+      matesBlast(s.p, wound, d => dmgAt(d), {
+        indoor: d => (W ? (d < core ? 0.6 : 0.25) : 0.15),
+        cover: 0.5,
+        bleed: true,
+      });
     // v24.38 down in a station the shells fall in the street above: nothing reaches you
     if (inMetro(player.pos.z)) continue;
     // on an upper floor or a roof, from where you really stand in that building (v24.38: the drones and helicopters
@@ -1534,6 +1545,7 @@ function heliCrash(x: number, z: number, kind: HeliKind) {
     player.hp -= 60 * (1 - dp / 14);
     player.rig.hurtT = 0.4;
   }
+  if (mates.length) matesBlast([x, z], 14, d => 60 * (1 - d / 14)); // v24.41
   warFires.push({ x, z, r: 3, t: 60 });
   if (warFires.length > 5) warFires.shift();
   // what is left: burnt out, on its side, with whatever was on board
@@ -1967,6 +1979,7 @@ const grenades: {
 let grenadeMat: THREE.Material | null = null;
 function playerThrow(k: string) {
   if (!player.inv[k]) return;
+  MS.fireAt = performance.now(); // v24.41
   player.inv[k]--;
   if (player.inv[k] <= 0) delete player.inv[k];
   const P = player.pos;
@@ -2037,6 +2050,17 @@ function grenadeTick(dt: number) {
       if (dd < GREN.wound && blastReach([p.x, p.z], [o.pos.x, o.pos.z]))
         damageSol(o, dd < GREN.core ? 240 : GREN.woundDmg * 1.6 * ((GREN.wound - dd) / (GREN.wound - GREN.core)), true);
     }
+    // v24.41 the player's own grenade reaches the teammates too
+    if (mates.length)
+      matesBlast(
+        [p.x, p.z],
+        GREN.wound,
+        d =>
+          d < GREN.core
+            ? GREN.coreDmg * (1 - 0.4 * (d / GREN.core))
+            : GREN.woundDmg * ((GREN.wound - d) / (GREN.wound - GREN.core)),
+        { reach: true, bleed: true },
+      );
     const dp = Math.hypot(player.pos.x - p.x, player.pos.z - p.z);
     if (dp < GREN.wound && blastReach([p.x, p.z], [player.pos.x, player.pos.z])) {
       const dmg =
@@ -2170,6 +2194,7 @@ function setupRoc() {
         player.hp -= 25;
         player.rig.hurtT = 0.3;
       }
+      if (mates.length) matesBlast([t.x, t.z], 3.5, () => 25, { up: 'skip' }); // v24.41
       checkSectors();
     },
   });
@@ -4611,8 +4636,9 @@ function setupJapan(c: V2) {
     scene,
     player: () => skyPos(jpP),
     foes: () => sols,
-    hit: (f, dmg) => damageSol(f as Sol, dmg, false),
-    blast: p => blast(p, true),
+    // (v24.41 a soldier their guns hit searches where he was hit; theirs are not the player's)
+    hit: (f, dmg) => damageSol(f as Sol, dmg, false, { p: [f.pos.x, f.pos.z], name: tr('自衛隊', 'The JSDF') }),
+    blast: p => blast(p, true, { p: [p.x, p.z], name: tr('自衛隊', 'The JSDF') }),
     freeNear: p => freeNear(p),
     landed: p => jpLanded(p),
     log,
@@ -4828,7 +4854,8 @@ function setupRemnants(c: V2) {
     foes: () => sols,
     // over the 1 m sandbags (theirs within 2.6 m are fired over), walls and buildings block
     los: (p, q) => shotRay(p, q, 1.5, 1.4, 2.6) > 0.98,
-    hit: (f, dmg) => damageSol(f as Sol, dmg, false),
+    // (v24.41 a soldier they hit looks for them at their position; theirs are not the player's)
+    hit: (f, dmg, from, who) => damageSol(f as Sol, dmg, false, { p: [from[0], from[1]], name: who }),
     fire: (r, dist) => {
       gunFx(r, false);
       AU.gunshot('rifle', dist, indoorAt(player.pos.x, player.pos.z));
@@ -5379,6 +5406,19 @@ type Mate = {
   why: string;
   /** the day they died (1-based) */
   diedDay: number;
+  /** v24.41 when they were last hurt and spotted (performance.now), what has them staggering */
+  hurtAt: number;
+  spottedAt: number;
+  stun: number;
+  /** v24.41 the soldier they have in mind, the time to look round again, a blow on its way, where they face to fight */
+  foeS: Sol | null;
+  scanT: number;
+  cd: number;
+  pend: { s: Sol; d: any; t: number } | null;
+  face: number | null;
+  aiming: boolean;
+  /** v24.41 seconds spent bandaging someone who is down */
+  aidT: number;
   /** riding in the player's vehicle */
   car: boolean;
   /** left behind (no seat in the vehicle, not close enough on the stairs or at the station gate): waits where they are
@@ -5430,6 +5470,12 @@ const MS = {
   used: 0,
   saved: 0,
   died: 0,
+  /** v24.41 the fighting: shots, hits, blows, people brought back by a teammate; when the player last attacked */
+  shots: 0,
+  hits: 0,
+  blows: 0,
+  aided: 0,
+  fireAt: -1e9,
 };
 const mateName2 = (m: Mate) => mateName(m.pick);
 /** 他 or 她 */
@@ -5483,6 +5529,16 @@ function makeMate(p: MatePick, i: number): Mate {
     downT: 0,
     why: '',
     diedDay: 0,
+    hurtAt: -1e9,
+    spottedAt: -1e9,
+    stun: 0,
+    foeS: null,
+    scanT: 0,
+    cd: 0,
+    pend: null,
+    face: null,
+    aiming: false,
+    aidT: 0,
     car: false,
     left: false,
     body: false,
@@ -5539,6 +5595,7 @@ function spawnMates(picks: MatePick[]) {
     m.pos.set(q[0], 0, q[1]);
     m.yaw = Math.atan2(P[0] - q[0], P[1] - q[1]);
     mates.push(m);
+    plaOthers.push(m.mark); // v24.41 the soldiers see them
   });
   matesSettle();
 }
@@ -5636,6 +5693,7 @@ function matesLoad(list: MateSave[] | undefined) {
     avoid.push(q);
     m.pos.set(q[0], 0, q[1]);
     mates.push(m);
+    if (m.st !== 2) plaOthers.push(m.mark); // v24.41 the soldiers see them
   });
   matesSettle();
 }
@@ -5817,6 +5875,9 @@ function mateDown(m: Mate, why: string) {
   m.hp = 0;
   m.downT = 60;
   m.why = why;
+  m.pend = null; // (a swing, a soldier in mind, a bandage half on: all dropped)
+  m.foeS = null;
+  m.aidT = 0;
   m.bleed = false;
   m.vault = null;
   m.car = false;
@@ -5898,16 +5959,323 @@ function mateRescue() {
   mateSay(m, '……謝了。我還走得動。', '…Thanks. I can still walk.');
   return true;
 }
-/** v24.41 hurt by a soldier (filled in with the fighting) */
-function mateHurt(m: Mate, dmg: number, s: Sol, melee: boolean) {
-  void m;
-  void dmg;
-  void s;
-  void melee;
+/** v24.41 who hit a soldier, when it was not the player: where he then looks, whom he goes after, and who downed him */
+type HitBy = {
+  /** where the shot or blow came from (map coordinates) */
+  p: V2;
+  /** the mark he goes after (a teammate's id), when the shooter is one */
+  id?: string;
+  /** a soldier down: credited here, not to the player */
+  kill?: () => void;
+  /** "阿財", "陸軍守備第 307 營・二連殘部": who downed him, in the log */
+  name?: string;
+};
+/** v24.41 a teammate as the one who hit a soldier */
+const mateBy = (m: Mate): HitBy => ({
+  p: [m.mark.p[0], m.mark.p[1]],
+  id: m.id,
+  kill: () => m.kills++,
+  name: mateName2(m),
+});
+/** v24.41 hurt (a soldier's round or rifle butt, or a blast: s null): bleeding, a stagger, down at nothing left */
+function mateHurt(m: Mate, dmg: number, s: Sol | null, melee: boolean, bleedP = 0.45) {
+  if (m.st === 2 || m.car) return;
+  if (m.st === 1) {
+    // (down: a blast finishes them; a soldier does not fire on someone down)
+    if (!s && dmg > 20) mateDie(m);
+    return;
+  }
+  m.hp -= dmg;
+  m.hurtAt = performance.now();
+  m.rig.hurtT = 0.35;
+  m.rig.hurtSide = Math.random() < 0.5 ? -1 : 1;
+  m.stun = melee ? 0.45 : 0.3;
+  if (melee && s) {
+    // knocked back a little, as the player is
+    const dx = m.pos.x - s.pos.x,
+      dz = m.pos.z - s.pos.z,
+      L = Math.hypot(dx, dz) || 1;
+    const kb = m.pos.clone();
+    kb.x += (dx / L) * 0.6;
+    kb.z += (dz / L) * 0.6;
+    if (placeAt(kb.x, kb.z) === placeAt(m.pos.x, m.pos.z)) {
+      collide(kb, 0.35);
+      m.pos.copy(kb);
+    }
+  }
+  if (!melee && !m.bleed && Math.random() < bleedP) m.bleed = true;
+  if (s) m.foeS = s;
+  if (m.hp <= 0) return mateDown(m, s ? 'shot' : 'blast');
+  if (m.sayT <= 0)
+    mateSay(
+      m,
+      melee ? '被槍托打到了！' : m.bleed ? '我中彈了，在流血！' : '我被打到了！',
+      melee ? 'Rifle butt, ugh!' : m.bleed ? 'I’m hit, I’m bleeding!' : 'I’m hit!',
+      '#f99',
+      6,
+    );
+  slowDown(tr('隊友受傷了', 'A teammate is hurt'));
 }
+/** v24.41 a soldier has just spotted a teammate */
 function mateSpotted(m: Mate, s: Sol) {
-  void m;
-  void s;
+  m.spottedAt = performance.now();
+  m.foeS = s;
+  if (m.sayT <= 0) mateSay(m, '被發現了！', 'They’ve seen me!', '#f66', 8);
+}
+/** v24.41 what a blast does to a teammate: the same rule as at that site for the player */
+type BlastRule = {
+  /** walls between them stop it (the player's grenade) */
+  reach?: boolean;
+  /** indoors or upstairs: times this (none: no reduction at that site, as for the player) */
+  indoor?: (d: number) => number;
+  /** a low wall or pillar beside them, beyond `coverFrom` metres: times this */
+  cover?: number;
+  coverFrom?: number;
+  /** in another building or room than the blast: times this */
+  place?: number;
+  /** bleeding when it does more than 15 (where the player bleeds) */
+  bleed?: boolean;
+  /** upstairs: a street blast does not reach them (where it does not reach the player), or measured with the height */
+  up?: 'skip' | { y: number };
+};
+/**
+ * v24.41 the blasts that reach the player reach the teammates the same way: measured where they really are (upstairs,
+ * where the floor is on the map; a blast in the floors' own space, there), nothing underground unless it went off down
+ * there; riders take what the vehicle's driver takes
+ */
+function matesBlast(p: V2, r: number, dmgAt: (d: number) => number, R: BlastRule = {}) {
+  const bs = spaceOf(p[0], p[1]);
+  for (const m of mates) {
+    if (m.st === 2) continue;
+    if (m.car) {
+      // (in the vehicle with the player: as close as the player; armour stops nine tenths)
+      const d = Math.hypot(player.pos.x - p[0], player.pos.z - p[1]);
+      const dmg = d < r ? dmgAt(d) * (drive.cur?.gun ? 0.1 : 1) : 0;
+      if (dmg > 0) mateRide(m, dmg);
+      continue;
+    }
+    const sp = spaceOf(m.pos.x, m.pos.z);
+    let q: V2;
+    if (bs !== 0) {
+      if (sp !== bs) continue; // (a blast upstairs or underground stays there)
+      q = [m.pos.x, m.pos.z];
+    } else {
+      if (sp === 2) continue; // (nothing reaches underground)
+      if (sp === 1 && R.up === 'skip') continue;
+      q = [m.mark.p[0], m.mark.p[1]];
+    }
+    const dy = sp === 1 && bs === 0 && R.up && R.up !== 'skip' && up ? up.fy + 1 - R.up.y : 0;
+    const d = Math.hypot(q[0] - p[0], q[1] - p[1], dy);
+    if (d >= r) continue;
+    if (R.reach && !blastReach(p, bs !== 0 ? q : [q[0], q[1]])) continue;
+    let dmg = dmgAt(d);
+    if (dmg <= 0) continue;
+    if (R.indoor && (sp === 1 || indoorAt(m.pos.x, m.pos.z))) dmg *= R.indoor(d);
+    else if (R.place !== undefined && placeAt(p[0], p[1]) !== placeAt(m.pos.x, m.pos.z)) dmg *= R.place;
+    else if (R.cover !== undefined && d > (R.coverFrom ?? 0) && findCover(m.pos.x, m.pos.z, 1.3)) dmg *= R.cover;
+    mateHurt(m, dmg, null, false, R.bleed && dmg > 15 ? 1 : 0);
+  }
+}
+/** v24.41 hurt riding with the player (a crash, a blast by the vehicle); down, they are lifted out beside it */
+function mateRide(m: Mate, n: number) {
+  if (m.st !== 0) return;
+  m.hp -= n;
+  m.hurtAt = performance.now();
+  if (m.hp > 0) return;
+  m.car = false;
+  m.left = false;
+  const q = mateSpot([player.pos.x, player.pos.z], mates.indexOf(m) + 3, [[player.pos.x, player.pos.z]]);
+  m.pos.set(q[0], 0, q[1]);
+  mateDown(m, 'blast');
+}
+
+const FISTS = { dmg: 8, range: 1.1, noise: 2, cd: 0.5, kind: 'melee' } as any;
+/**
+ * v24.41 a teammate in a fight: the soldier to take on (the one after them first, then the nearest in sight), by the
+ * fire rule; a gun from where they stand (no rounds: a magazine emptied, else the next weapon), anything else to swing
+ * by closing in. Returns where to go instead of following (null: stand and fight), or undefined when not fighting.
+ */
+function mateFight(m: Mate, dt: number, dP: number, night: boolean): { goal: V2 | null; speed: number } | undefined {
+  m.cd -= dt;
+  m.scanT -= dt;
+  const me: V2 = [m.pos.x, m.pos.z];
+  // (what they hold is in their pack: if it has gone, the best of what is left)
+  if (m.equip && !(m.inv[m.equip] > 0)) m.equip = pickWeapon(m.inv, ITEMS);
+  const following = m.mode === 0 && !m.left;
+  const k = m.equip;
+  const d = k ? ITEMS[k] : FISTS;
+  const gun = d.kind === 'gun' && !d.at;
+  const reach = gun ? Math.min(d.range || 25, 28) : 9;
+  // (only soldiers the soldier loop is running: within 120 m of where the player is on the map)
+  const Pm = mapPos();
+  const awake = (q: Sol) =>
+    q.state !== 'dead' && q.mesh.visible && sols.includes(q) && Math.hypot(q.pos.x - Pm[0], q.pos.z - Pm[1]) <= 120;
+  const now = performance.now();
+  const may = (q: Sol, dd: number) =>
+    engages(m.rule, {
+      foeOnUs: q.foe === m.id && q.state === 'combat',
+      close: dd < 1.9,
+      fighting: q.state === 'combat',
+      playerFired: now - MS.fireAt < 10000,
+      hurt: now - m.hurtAt < 15000,
+      sneaking: player.sneak,
+    });
+  // the soldier they have in mind: still there, and still one to take on?
+  let s = m.foeS;
+  if (s && (!awake(s) || !may(s, Math.hypot(s.pos.x - me[0], s.pos.z - me[1])))) s = m.foeS = null;
+  if (m.scanT <= 0) {
+    m.scanT = 0.3;
+    // the one after them first, else the nearest the fire rule lets them take on (a nearer one it does not, hides none)
+    let best: Sol | null = null,
+      bd = reach,
+      mine: Sol | null = null,
+      md = reach;
+    for (const q of sols) {
+      if (!awake(q)) continue;
+      const dd = Math.hypot(q.pos.x - me[0], q.pos.z - me[1]);
+      if (dd >= reach || !may(q, dd) || !los(me, [q.pos.x, q.pos.z])) continue;
+      if (q.foe === m.id && dd < md) ((md = dd), (mine = q));
+      if (dd < bd) ((bd = dd), (best = q));
+    }
+    s = m.foeS = mine || best;
+  }
+  if (!s) return undefined;
+  const dist = Math.hypot(s.pos.x - me[0], s.pos.z - me[1]);
+  // face him
+  m.face = Math.atan2(s.pos.x - me[0], s.pos.z - me[1]);
+  if (gun) {
+    // rounds: what is loose, else a magazine emptied into the pack, else put the gun away
+    if (!(m.inv[d.ammo!] > 0)) {
+      const mag = Object.keys(m.inv).find(q => ITEMS[q]?.mag && ITEMS[q].ammo === d.ammo && m.inv[q] > 0);
+      if (mag) {
+        m.inv[d.ammo!] = (m.inv[d.ammo!] || 0) + ITEMS[mag].mag!;
+        if (--m.inv[mag] <= 0) delete m.inv[mag];
+      } else {
+        m.equip = pickWeapon(m.inv, ITEMS);
+        return undefined;
+      }
+    }
+    m.aiming = true;
+    if (m.cd <= 0) {
+      m.cd = (d.cd || 0.4) * 2.2 + Math.random() * 0.35;
+      if (--m.inv[d.ammo!] <= 0) delete m.inv[d.ammo!];
+      gunFx(m.rig, false);
+      AU.gunshot(AU.gunKind(k, d), mateHeard(me), indoorAt(player.pos.x, player.pos.z) || inMetro(player.pos.z));
+      noise(me[0], me[1], d.noise || 40, true);
+      const clear = shotRay(me, [s.pos.x, s.pos.z], 1.35, s.crouch ? 0.75 : 1.25) >= 1;
+      const hitP =
+        Math.max(0.12, 0.6 - (dist / (d.range || 25)) * 0.45) *
+        (night ? 0.75 : 1) *
+        (s.crouch ? 0.6 : 1) *
+        (m.moving > 1 ? 0.6 : 1);
+      const hit = clear && Math.random() < hitP;
+      const from = new THREE.Vector3(m.pos.x, 0, m.pos.z);
+      tracer(
+        from,
+        hit ? s.pos : new THREE.Vector3(s.pos.x + (Math.random() - 0.5) * 3, 0, s.pos.z + (Math.random() - 0.5) * 3),
+      );
+      MS.shots++;
+      if (hit) {
+        MS.hits++;
+        damageSol(s, (d.dmg || 20) * (0.8 + Math.random() * 0.4), false, mateBy(m));
+      }
+    }
+    // (stand and shoot; one following the player keeps up with them when they get away)
+    return following && dP > 12 ? undefined : { goal: null, speed: 0 };
+  }
+  // something to swing (or bare hands): close in, then strike at the moment the blow lands
+  const r = (d.range || 1.1) + 0.2;
+  if (dist > r) {
+    // (never far after him: one following the player stays within 15 m of them)
+    if (dist > 8 || (following && dP > 15) || (m.rule === 0 && !(s.foe === m.id))) return undefined;
+    // (one who has not seen them yet is stalked, crouched and silent; one in a fight is run at)
+    const stalk = s.state !== 'combat';
+    if (stalk) m.sneak = true;
+    return { goal: [s.pos.x, s.pos.z], speed: stalk ? 2.2 : 5 };
+  }
+  if (m.cd <= 0 && !m.pend) {
+    m.cd = Math.max(0.6, (d.cd || 0.5) * 1.4);
+    const dur = Math.max(0.42, (d.cd || 0.5) * 0.85);
+    startMelee(m.rig, dur);
+    m.pend = { s, d, t: dur * 0.44 };
+    noise(me[0], me[1], d.noise || 2, true);
+  }
+  return { goal: null, speed: 0 };
+}
+/** how far from the player a teammate's sound is heard (where the player really is: upstairs, the floor's place) */
+function mateHeard(me: V2) {
+  const L = nearPos();
+  return Math.hypot(me[0] - L[0], me[1] - L[1]);
+}
+/** v24.41 a teammate's blow lands at the contact frame of the swing (its own timer: it lands whether drawn or not) */
+function mateBlow(m: Mate, dt: number) {
+  const p = m.pend;
+  if (!p) return;
+  if ((p.t -= dt) > 0) return;
+  m.pend = null;
+  const s = p.s;
+  if (s.state === 'dead' || !sols.includes(s)) return;
+  const dx = s.pos.x - m.pos.x,
+    dz = s.pos.z - m.pos.z,
+    dist = Math.hypot(dx, dz);
+  const fwd = (Math.sin(m.yaw) * dx + Math.cos(m.yaw) * dz) / (dist || 1);
+  const dd = mateHeard([m.pos.x, m.pos.z]);
+  if (dist > (p.d.range || 1.1) + 0.4 || fwd < 0.4) {
+    AU.swish(dd, false);
+    return;
+  }
+  const stealth = s.state !== 'combat' && s.alert < 0.5;
+  damageSol(s, (p.d.dmg || 8) * (stealth ? 3.2 : 1) * (0.85 + Math.random() * 0.3), stealth, mateBy(m));
+  hitStop(m.rig, 0.07);
+  hitStop(s.rig, 0.07);
+  AU.meleeHit(dd, m.rig.weaponKind !== 'knife');
+  MS.blows++;
+  const kb = s.pos
+    .clone()
+    .addScaledVector(new THREE.Vector3(dx / (dist || 1), 0, dz / (dist || 1)), s.hp > 0 ? 0.45 : 0.25);
+  if (placeAt(kb.x, kb.z) === placeAt(s.pos.x, s.pos.z)) {
+    s.pos.copy(kb);
+    collide(s.pos, 0.35);
+  }
+}
+/** v24.41 someone down within 20 m and a bandage or kit in the pack: go over and bring them back (a few seconds) */
+function mateAid(m: Mate, dt: number, sp: number): { goal: V2 | null; speed: number } | null {
+  if (!m.inv.bandage && !m.inv.medkit) return ((m.aidT = 0), null);
+  let o: Mate | null = null,
+    od = 20;
+  for (const q of mates) {
+    if (q === m || q.st !== 1 || spaceOf(q.pos.x, q.pos.z) !== sp) continue;
+    const d = Math.hypot(q.pos.x - m.pos.x, q.pos.z - m.pos.z);
+    if (d < od) ((od = d), (o = q));
+  }
+  if (!o) return ((m.aidT = 0), null);
+  if (od > 1.1) {
+    m.aidT = 0;
+    // (round a corner: a path to them)
+    const to: V2 = [o.pos.x, o.pos.z];
+    const g = sp === 0 && !los([m.pos.x, m.pos.z], to) ? mateNavTo(m, to, dt) : to;
+    return { goal: g, speed: 5 };
+  }
+  m.face = Math.atan2(o.pos.x - m.pos.x, o.pos.z - m.pos.z);
+  m.aidT += dt;
+  if (m.aidT < 2.5) return { goal: null, speed: 0 };
+  const kit = m.inv.medkit ? 'medkit' : 'bandage';
+  if (--m.inv[kit] <= 0) delete m.inv[kit];
+  o.st = 0;
+  o.hp = (kit === 'medkit' ? 45 : 25) * (mateRole(m).skills.medic ?? 1);
+  o.bleed = false;
+  o.downT = 0;
+  o.ti = -1;
+  o.rig.deadT = 0;
+  m.aidT = 0;
+  MS.aided++;
+  log(
+    getLanguage() === 'en'
+      ? `${mateName2(m)} gets ${mateName2(o)} back on their feet (${ITEMS[kit].name}).`
+      : `${mateName2(m)}用${ITEMS[kit].name}把${mateName2(o)}救了起來。`,
+    '#9f9',
+  );
+  return { goal: null, speed: 0 };
 }
 /** is the ground under them loaded (walls only exist on loaded district tiles) */
 function mateGround(x: number, z: number) {
@@ -5996,7 +6364,21 @@ function updateMate(m: Mate, i: number, dt: number, pSpace: number, night: boole
   const sneak = player.sneak || !!player.cover;
   m.sneak = (follow || (same && dP < 20)) && sneak;
   m.cover = same && dP < 3 && !!player.cover;
-  if (follow && dP > 60) {
+  // v24.41 a fight comes first (by the fire rule), then someone down to bring back, then following
+  m.stun = Math.max(0, m.stun - dt);
+  m.aiming = false;
+  m.face = null;
+  const F = sp === 0 && !m.sleeping && !PRO.hide ? mateFight(m, dt, dP, night) : undefined;
+  const A = F || m.sleeping ? null : mateAid(m, dt, sp);
+  if (F) m.aidT = 0;
+  mateBlow(m, dt); // v24.41 (at the contact frame of the swing)
+  if (F) {
+    goal = F.goal;
+    speed = F.speed;
+  } else if (A) {
+    goal = A.goal;
+    speed = A.speed;
+  } else if (follow && dP > 60) {
     // far behind (the player ran off, or the streets around them are gone): back where the player walked
     const T = mateTrail.behind(1.6 + i * 1.1),
       q = mateTrail.at(T);
@@ -6059,38 +6441,14 @@ function updateMate(m: Mate, i: number, dt: number, pSpace: number, night: boole
       }
     } else {
       // off the trail (just come along, loaded, called back from waiting): a path back to the player
-      const N = nav;
-      if (N && sp === 0 && pSpace === 0 && !offMap(P.x, P.z)) {
-        const nv = m.nv;
-        if (!nv.navQ && (!nv.pgoal || Math.hypot(nv.pgoal[0] - P.x, nv.pgoal[1] - P.z) > 3 || nv.t <= 0)) {
-          nv.pgoal = [P.x, P.z];
-          nv.t = 2;
-          if (N.clear(me, N.snap(nv.pgoal))) {
-            nv.path = [nv.pgoal];
-            nv.pi = 0;
-          } else {
-            nv.navQ = true;
-            navQ.push(nv as any as Sol);
-            MS.paths++;
-          }
-        }
-        nv.t -= dt;
-        if (nv.path && nv.pi !== undefined) {
-          while (nv.pi < nv.path.length - 1) {
-            const w = nv.path[nv.pi];
-            const d = Math.hypot(w[0] - m.pos.x, w[1] - m.pos.z);
-            if (d < 0.35 || (d < 1.2 && N.clear(me, nv.path[nv.pi + 1]))) nv.pi++;
-            else break;
-          }
-          goal = nv.path[nv.pi];
-        }
-      } else goal = [P.x, P.z];
+      goal = sp === 0 && pSpace === 0 && !offMap(P.x, P.z) ? mateNavTo(m, [P.x, P.z], dt) : [P.x, P.z];
       if (dP < 1.6 + i * 1.1) goal = null;
       speed = sneak ? 2.4 : dP > 6 ? 6 : 3.4;
     }
   }
   if (m.fatigue >= 95) speed = Math.min(speed, 3.4);
   if (m.fatigue > 80) speed *= 0.7;
+  if (m.stun > 0) speed *= 0.25;
   // moving
   const ox = m.pos.x,
     oz = m.pos.z;
@@ -6173,7 +6531,8 @@ function updateMate(m: Mate, i: number, dt: number, pSpace: number, night: boole
   }
   // facing: where they are going; standing, the way the player came (each a little to one side)
   let want = m.yaw;
-  if (m.moving > 0.3) want = Math.atan2(m.vel.x, m.vel.z);
+  if (m.face !== null) want = m.face;
+  else if (m.moving > 0.3) want = Math.atan2(m.vel.x, m.vel.z);
   else if (follow && dP < 6) want = player.mesh.rotation.y + Math.PI + (i ? -0.7 : 0.7);
   m.yaw += Math.atan2(Math.sin(want - m.yaw), Math.cos(want - m.yaw)) * Math.min(1, dt * 7);
   mateMarkAt(m, sp);
@@ -6182,12 +6541,53 @@ function updateMate(m: Mate, i: number, dt: number, pSpace: number, night: boole
   setWeapon(m.rig, m.equip);
   animate(
     m.rig,
-    m.sleeping ? 'sleep' : m.sneak || m.cover ? 'sneak' : m.moving > 3.6 ? 'run' : m.moving > 0.15 ? 'walk' : 'idle',
+    m.sleeping
+      ? 'sleep'
+      : m.aidT > 0
+        ? 'loot'
+        : m.aiming
+          ? 'aim'
+          : m.sneak || m.cover
+            ? 'sneak'
+            : m.moving > 3.6
+              ? 'run'
+              : m.moving > 0.15
+                ? 'walk'
+                : 'idle',
     m.moving,
     dt,
   );
+
   m.rig.root.position.set(m.pos.x, walkH(m.pos.x, m.pos.z), m.pos.z);
   void night;
+}
+/** a path for a teammate to somewhere on the map (the shared path queue, navPump); null while it is being found */
+function mateNavTo(m: Mate, to: V2, dt: number): V2 | null {
+  const N = nav;
+  if (!N) return to;
+  const me: V2 = [m.pos.x, m.pos.z];
+  const nv = m.nv;
+  if (!nv.navQ && (!nv.pgoal || Math.hypot(nv.pgoal[0] - to[0], nv.pgoal[1] - to[1]) > 3 || nv.t <= 0)) {
+    nv.pgoal = [to[0], to[1]];
+    nv.t = 2;
+    if (N.clear(me, N.snap(nv.pgoal))) {
+      nv.path = [nv.pgoal];
+      nv.pi = 0;
+    } else {
+      nv.navQ = true;
+      navQ.push(nv as any as Sol);
+      MS.paths++;
+    }
+  }
+  nv.t -= dt;
+  if (!nv.path || nv.pi === undefined) return null;
+  while (nv.pi < nv.path.length - 1) {
+    const w = nv.path[nv.pi];
+    const d = Math.hypot(w[0] - m.pos.x, w[1] - m.pos.z);
+    if (d < 0.35 || (d < 1.2 && N.clear(me, nv.path[nv.pi + 1]))) nv.pi++;
+    else break;
+  }
+  return nv.path[nv.pi];
 }
 /** where on the map a teammate is (upstairs: where that floor really is; underground: the street exit above) */
 function mateMarkAt(m: Mate, sp: number) {
@@ -6503,7 +6903,11 @@ function matesEnding() {
     mates
       .map(m => {
         const who = en ? `${mateName2(m)} (${mateRole(m).name})` : `${mateName2(m)}（${mateRole(m).name}）`;
-        const k = m.kills ? (en ? `, having downed ${m.kills} occupation troops` : `，擊倒 ${m.kills} 名`) : '';
+        const k = m.kills
+          ? en
+            ? `, having downed ${m.kills === 1 ? 'an occupation soldier' : `${m.kills} occupation troops`}`
+            : `，擊倒 ${m.kills} 名`
+          : '';
         return m.st === 2
           ? en
             ? `${who} fell on day ${m.diedDay}${k}.`
@@ -6601,6 +7005,14 @@ function updateGrenades(dt: number, night: boolean) {
         const d = Math.hypot(o.pos.x - p.x, o.pos.z - p.z);
         if (d < SQ.AI.grenWound) damageSol(o, SQ.grenadeDmg(d), true);
       }
+    if (mates.length)
+      matesBlast([p.x, p.z], SQ.AI.grenWound, d => SQ.grenadeDmg(d), {
+        place: 0.2,
+        cover: 0.6,
+        coverFrom: 1.5,
+        bleed: true,
+        up: 'skip',
+      }); // v24.41
     let dmg = SQ.grenadeDmg(dp);
     if (dmg <= 0) continue;
     if (placeAt(p.x, p.z) !== placeAt(player.pos.x, player.pos.z)) dmg *= 0.2;
@@ -7647,6 +8059,7 @@ function scopeFire() {
   if (!d || player.cd > 0) return;
   if (!player.inv[d.ammo!]) return log(tr('沒有子彈了', 'Out of ammunition'), '#f99');
   if (--player.inv[d.ammo!] <= 0) delete player.inv[d.ammo!];
+  MS.fireAt = performance.now(); // v24.41
   player.cd = d.cd;
   gunFx(player.rig, true);
   AU.gunshot(AU.gunKind(k, d), 0, indoorAt(player.pos.x, player.pos.z));
@@ -8963,6 +9376,8 @@ function playerAttack() {
   const k = player.equip;
   const d = k ? ITEMS[k] : ({ dmg: 8, range: 1.1, noise: 2, cd: 0.5, kind: 'melee' } as any);
   if (player.cd > 0) return;
+  // v24.41 (the teammates who use their judgement join in; not on a dry click)
+  if (d.kind !== 'gun' || player.inv[d.ammo]) MS.fireAt = performance.now();
   netAttack();
   if (coopActive()) {
     player.cd = d.cd || 0.5;
@@ -9271,16 +9686,33 @@ function solUnstick(s: Sol, goal: V2, dt: number): V2 | null {
   }
   return goal;
 }
-function damageSol(s: Sol, dmg: number, stealth: boolean) {
+function damageSol(s: Sol, dmg: number, stealth: boolean, by?: HitBy) {
   s.hp -= dmg;
-  if (stealth) log(tr('偷襲！', 'Sneak attack!'), '#ff9');
+  if (stealth)
+    log(
+      by?.name
+        ? getLanguage() === 'en'
+          ? `${by.name}: a sneak attack!`
+          : `${by.name}偷襲！`
+        : tr('偷襲！', 'Sneak attack!'),
+      '#ff9',
+    );
   if (s.hp <= 0) {
     s.state = 'dead';
     AU.death(pDist(s.pos.x, s.pos.z));
     s.cone.visible = false;
     if (s.tile) district.save(s.tile, 'dead', { ...(district.saved[s.tile]?.dead || {}), [s.tid!]: 1 });
-    player.kills++;
-    log(tr('擊倒一名佔領軍士兵', 'An occupation soldier is down.'), '#ffd76a');
+    // (v24.41 one downed by a teammate, the remnants or the JSDF is theirs, not the player's)
+    if (by) by.kill?.();
+    else player.kills++;
+    log(
+      by?.name
+        ? getLanguage() === 'en'
+          ? `${by.name} downs an occupation soldier.`
+          : `${by.name}擊倒一名佔領軍士兵`
+        : tr('擊倒一名佔領軍士兵', 'An occupation soldier is down.'),
+      '#ffd76a',
+    );
     const it = plaDrop(s.id);
     const dc = makeCont('d' + s.id, [s.pos.x, s.pos.z], 'crate', undefined, it);
     dc.label = tr('士兵遺留裝備', 'Dropped soldier equipment');
@@ -9293,8 +9725,10 @@ function damageSol(s: Sol, dmg: number, stealth: boolean) {
     s.stun = Math.max(s.stun || 0, 0.4);
     s.state = 'combat';
     s.alert = 1;
-    s.lastSeen = hitFrom();
-    if (s.foe) s.foe = 'player'; // (v24.39 the one he goes after, falls back from and radios about)
+    // (v24.41 hit by someone else: he looks for them where they are, and goes after a teammate who did it)
+    s.lastSeen = by ? (by.p.slice() as V2) : hitFrom();
+    if (by?.id) s.foe = by.id;
+    else if (s.foe && !by) s.foe = 'player'; // (v24.39 the one he goes after, falls back from and radios about)
   }
 }
 const liberated = new Set<number>();
@@ -12847,6 +13281,7 @@ async function boot() {
           unit: q.unit,
           leader: q.leader,
           p: q.p,
+          ang: q.ang,
           alive: rem!.alive(q),
           save: (surv as any).rem[q.id],
           // v24.39 how far each man's fall has gone (1: lying)
@@ -12909,6 +13344,8 @@ async function boot() {
         inv: { ...m.inv },
         equip: m.equip,
         kills: m.kills,
+        foe: m.foeS ? m.foeS.id : null,
+        aiming: m.aiming,
         ti: m.ti,
         sneak: m.sneak,
         sleeping: m.sleeping,
@@ -12937,7 +13374,7 @@ async function boot() {
     mateSet: (
       i: number,
       o: Partial<Pick<Mate, 'hp' | 'hunger' | 'thirst' | 'fatigue' | 'bleed' | 'mode' | 'rule' | 'downT' | 'inv'>>,
-    ) => !!mates[i] && (Object.assign(mates[i], o), true),
+    ) => !!mates[i] && (Object.assign(mates[i], o), o.inv && (mates[i].equip = pickWeapon(mates[i].inv, ITEMS)), true),
     mateGiveTo: (i: number, k: string, n = 1) => {
       const m = mates[i];
       if (!m) return false;
@@ -12946,6 +13383,16 @@ async function boot() {
       return true;
     },
     mateDown: (i: number) => !!mates[i] && (mateDown(mates[i], 'test'), true),
+    // a mortar round coming down exactly here in half a second
+    shellAt: (x: number, z: number) =>
+      shells.push({ t: 0.5, p: [x, z], k: WAR.mortar, w: blastFx.warn(x, z, WAR.mortar.core, WAR.mortar.wound) }),
+    mateUp: (i: number) => {
+      const m = mates[i];
+      if (!m || m.st === 2) return false;
+      Object.assign(m, { st: 0, hp: 100, bleed: false, downT: 0, ti: -1 });
+      m.rig.deadT = 0;
+      return true;
+    },
     mateSkill: (k: keyof Skills) => teamSkill(k),
     // draw calls of the teammates' figures: the same view drawn with them and without
     mateDraw: () => {

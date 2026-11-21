@@ -15,7 +15,8 @@ export type RemDeps = {
   flag: () => THREE.Object3D;
   foes: () => Foe[];
   los: (p: V2, q: V2) => boolean;
-  hit: (f: Foe, dmg: number) => void;
+  /** v24.41 with where the shot came from and the unit that fired it (the soldier looks for them, not the player) */
+  hit: (f: Foe, dmg: number, from: V2, unit: string) => void;
   fire: (r: Rig, dist: number) => void;
   noise: (x: number, z: number, r: number) => void;
   player: () => THREE.Vector3;
@@ -345,7 +346,7 @@ export class RemnantSystem {
         d.noise(m.p[0], m.p[1], 45);
         this.stats.shots++;
         if (Math.random() < Math.max(0.18, 0.45 - dist / 120)) {
-          d.hit(f, 40);
+          d.hit(f, 40, m.p, q.unit);
           this.stats.hits++;
         }
       });

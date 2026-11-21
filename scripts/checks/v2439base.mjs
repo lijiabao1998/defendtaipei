@@ -466,6 +466,15 @@ if (spot && hasStandIn) {
     const face = () => {
       s.pos.set(P[0] + Math.cos(b) * 12, 0, P[1] + Math.sin(b) * 12);
       s.mesh.position.copy(s.pos);
+      // (on duty now and nothing to walk back to, as the soldier of the first case: one picked by distance may be off
+      // shift by day, or a sentry)
+      s.night = s.day = false;
+      s.post = undefined;
+      s.route = [
+        [s.pos.x, s.pos.z],
+        [s.pos.x, s.pos.z],
+      ];
+      s.wi = 0;
       s.state = 'patrol';
       s.alert = 0;
       s.lastSeen = undefined;

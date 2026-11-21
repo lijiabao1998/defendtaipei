@@ -43,9 +43,8 @@ export function engages(
 ) {
   if (rule === 0) return c.foeOnUs && c.close;
   if (rule === 2) return true;
-  if (c.foeOnUs || c.hurt) return true;
-  if (c.fighting) return true;
-  return c.playerFired && !c.sneaking;
+  if (c.foeOnUs || c.fighting) return true;
+  return (c.playerFired || c.hurt) && !c.sneaking;
 }
 /**
  * what a teammate eats, drinks or treats itself with from its own pack, or null. Nothing raw, nothing that needs cooking,
@@ -95,7 +94,10 @@ export function pickWeapon(inv: Record<string, number>, items: Record<string, It
   for (const k of Object.keys(inv)) {
     const d = items[k];
     if (!d || !(inv[k] > 0)) continue;
-    if (d.kind === 'gun' && !d.at && d.ammo && inv[d.ammo] > 0 && (d.dmg || 0) * (d.range || 1) > gs)
+    const loaded =
+      !!d.ammo &&
+      (inv[d.ammo] > 0 || Object.keys(inv).some(m => inv[m] > 0 && items[m]?.mag && items[m].ammo === d.ammo));
+    if (d.kind === 'gun' && !d.at && loaded && (d.dmg || 0) * (d.range || 1) > gs)
       ((gs = (d.dmg || 0) * (d.range || 1)), (gun = k));
     if (d.kind === 'melee' && (d.dmg || 0) > ms) ((ms = d.dmg || 0), (mel = k));
   }
