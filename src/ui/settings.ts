@@ -68,7 +68,7 @@ export const ACTIONS: [id: string, label: string, def: string][] = [
   ['speed1', tr('時間 ×1', 'Time ×1'), 'Digit1'],
   ['speed2', tr('時間 ×3', 'Time ×3'), 'Digit2'],
   ['speed3', tr('時間 ×20', 'Time ×20'), 'Digit3'],
-  // v24.40 computer teammates (shown while they are behind ?mates=1 only with it)
+  // v24.40 computer teammates (the row is left out with ?mates=0)
   ...(MATES_ON
     ? [
         ['mates', tr('隊友：待命／跟上（長按：開火規則）', 'Companions: wait / follow (hold: fire rule)'), 'KeyT'] as [
@@ -79,8 +79,8 @@ export const ACTIONS: [id: string, label: string, def: string][] = [
       ]
     : []),
 ];
-// (v24.40 the companions' key is bound even while its row is hidden: a save with companions brings them back without
-// ?mates=1, and T still works for them)
+// (v24.40 the companions' key is bound even while its row is hidden: a save with companions brings them back even with
+// ?mates=0, and T still works for them)
 const KDEF: Record<string, string> = { mates: 'KeyT', ...Object.fromEntries(ACTIONS.map(a => [a[0], a[2]])) };
 export const BIND: Record<string, string> = load(KKEY, KDEF);
 // v24.40 T is new: someone who had already put another action on it keeps theirs (the companions get no key until set)
@@ -122,7 +122,7 @@ export const keyLabel = (a: string) => keyName(BIND[a]);
 /** bind; a key already used by another action is swapped onto it so there are never two actions on one key */
 export function rebind(a: string, code: string): string | null {
   if (RESERVED.has(code)) return null;
-  // (v24.40 an action whose row is hidden — the companions without ?mates=1 — gives its key up instead of swapping)
+  // (v24.40 an action whose row is hidden — the companions with ?mates=0 — gives its key up instead of swapping)
   const shown = new Set(ACTIONS.map(q => q[0]));
   for (const k of Object.keys(BIND)) if (k !== a && !shown.has(k) && BIND[k] === code) BIND[k] = '';
   const other = Object.keys(BIND).find(k => k !== a && BIND[k] === code);

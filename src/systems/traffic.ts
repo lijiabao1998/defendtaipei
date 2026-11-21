@@ -28,6 +28,8 @@ export type TrafficDeps = {
   junction: (x: number, z: number) => boolean;
   green: (ux: number, uz: number) => boolean;
   player: () => THREE.Vector3;
+  /** v24.42 the teammates walking with the player (the cars stop for them too) */
+  others?: () => { x: number; z: number }[];
   bldAt: (x: number, z: number) => any;
   abandon: (kind: DKind, x: number, z: number, hd: number) => void;
 };
@@ -166,6 +168,13 @@ export class Traffic {
           side = Math.abs(dx * c.uz - dz * c.ux);
         if (ahead > -1 && ahead < 6 && side < 1.6) target = 0;
       } // yield to the player
+      for (const o of this.d.others?.() ?? []) {
+        const dx = o.x - c.x,
+          dz = o.z - c.z;
+        const ahead = dx * c.ux + dz * c.uz,
+          side = Math.abs(dx * c.uz - dz * c.ux);
+        if (ahead > -1 && ahead < 6 && side < 1.6) target = 0;
+      }
       if (this.mode === 'panic' && c.panic > 0) {
         c.panic -= dt;
         target *= 0.5 + 0.5 * Math.sin(performance.now() / 300 + c.vmax);

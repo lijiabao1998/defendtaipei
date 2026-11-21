@@ -19,6 +19,8 @@ export type Sniper = Post & {
   hp: number;
   dead: boolean;
   st: 'idle' | 'aim' | 'cool';
+  /** v24.42 who the aim started on ('you', or a teammate's id) */
+  aimId?: string;
   t: number;
   rig?: any;
   laser: THREE.Line;
@@ -133,6 +135,15 @@ export type SniperDeps = {
   warn: (on: boolean, s?: Sniper) => void;
   sound: (k: 'shot' | 'lock', s?: Sniper) => void;
   cleared: (s: Sniper) => void;
+  /** v24.42 the teammates: where they stand (y: the floor), whether this sniper sees them, and a hit */
+  others?: () => {
+    id: string;
+    p: THREE.Vector3;
+    sees: (s: Sniper) => boolean;
+    hurt: (dmg: number, s: Sniper) => void;
+  }[];
+  /** v24.42 a sniper has started to aim at a teammate */
+  aimAt?: (id: string, s: Sniper) => void;
 };
 let glintTex: THREE.Texture | null = null;
 function glintTexture() {
@@ -215,19 +226,38 @@ export class SniperSys {
     for (const s of this.list) {
       if (s.dead) continue;
       if (s.rig) this.D.animate(s.rig, 'aim', dt);
-      const inR = Math.hypot(P.x - s.p[0], P.z - s.p[1]) < s.r + 25 && Math.hypot(P.x - s.j[0], P.z - s.j[1]) < s.r;
-      const see = day && inR && this.D.sees(s);
-      if (s.rig && see) s.rig.root.rotation.y = Math.atan2(P.x - s.p[0], P.z - s.p[1]);
+      const inRAt = (q: THREE.Vector3) =>
+        Math.hypot(q.x - s.p[0], q.z - s.p[1]) < s.r + 25 && Math.hypot(q.x - s.j[0], q.z - s.j[1]) < s.r;
+      const inR = inRAt(P);
+      // the player first; else (v24.42) a teammate in his sights at his junction
+      let T = P,
+        hit = (dmg: number) => this.D.hurt(dmg, s),
+        mine = true,
+        tid = 'you',
+        see = day && inR && this.D.sees(s);
+      if (!see && day)
+        for (const o of this.D.others?.() ?? [])
+          if (inRAt(o.p) && o.sees(s)) {
+            T = o.p;
+            hit = (dmg: number) => o.hurt(dmg, s);
+            mine = false;
+            tid = o.id;
+            see = true;
+            if (s.st === 'idle') this.D.aimAt?.(o.id, s);
+            break;
+          }
+      if (s.rig && see) s.rig.root.rotation.y = Math.atan2(T.x - s.p[0], T.z - s.p[1]);
       s.t -= dt;
       if (s.st === 'cool') {
         if (s.t <= 0) s.st = 'idle';
       } else if (s.st === 'idle') {
-        if (see) ((s.st = 'aim'), (s.t = AIM_T), this.D.sound('lock', s));
+        if (see) ((s.st = 'aim'), (s.t = AIM_T), (s.aimId = tid), this.D.sound('lock', s));
       } else if (s.st === 'aim') {
-        if (!see) s.st = 'idle';
+        // (v24.42 someone else in the sights now: the aim starts over, with its warning)
+        if (!see || s.aimId !== tid) s.st = 'idle';
         else if (s.t <= 0) {
           this.D.sound('shot', s);
-          this.D.hurt(38 + ((s.id.charCodeAt(3) * 7) % 10), s);
+          hit(38 + ((s.id.charCodeAt(3) * 7) % 10));
           s.st = 'cool';
           s.t = 3.5;
         }
@@ -240,10 +270,10 @@ export class SniperSys {
         s.glint.scale.set(k, k, k);
       }
       if (aiming) {
-        lock = s;
+        if (mine) lock = s; // (the warning is the player's: a teammate in the sights is said in the log)
         const a = s.laser.geometry.attributes.position as THREE.BufferAttribute;
         a.setXYZ(0, s.p[0], s.y + 1.2, s.p[1]);
-        a.setXYZ(1, P.x, P.y + 1.3, P.z); // (P.y: the floor or roof the player stands on)
+        a.setXYZ(1, T.x, T.y + 1.3, T.z); // (T.y: the floor or roof the one in the sights stands on)
         a.needsUpdate = true;
         (s.laser.material as THREE.LineBasicMaterial).opacity = 0.4 + 0.6 * (1 - Math.max(0, s.t) / AIM_T);
       }

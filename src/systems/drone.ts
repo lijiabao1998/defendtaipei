@@ -9,13 +9,16 @@ export class Recon {
     public deps: {
       player: () => THREE.Vector3;
       hidden: () => boolean;
-      spotted: (p: V2) => void;
+      spotted: (p: V2, you?: boolean) => void;
       log: (m: string, c?: string) => void;
       /** v22.11 seconds of exposure before a spot, and re-spot cooldown (night: faster) */
       spotTime?: () => number;
       spotCd?: () => number;
       /** v24.38 not heard (the player is down in a station) */
       muted?: () => boolean;
+      /** v24.42 the teammates out in the open (where on the map, and whether out of its sight); spotted() says whether
+       *  it was the player it saw */
+      others?: () => { p: V2; hidden: boolean }[];
     },
     centres: V2[],
   ) {
@@ -71,12 +74,21 @@ export class Recon {
       const hd = Math.hypot(P.x - d.g.position.x, P.z - d.g.position.z);
       near = Math.min(near, Math.hypot(hd, d.h));
       d.cd -= dt;
-      if (hd < 24 && !this.deps.hidden()) {
+      // the player first; else (v24.42) a teammate in the open under it
+      let seen: V2 | null = hd < 24 && !this.deps.hidden() ? [P.x, P.z] : null;
+      const you = !!seen;
+      if (!seen)
+        for (const o of this.deps.others?.() ?? [])
+          if (!o.hidden && Math.hypot(o.p[0] - d.g.position.x, o.p[1] - d.g.position.z) < 24) {
+            seen = o.p;
+            break;
+          }
+      if (seen) {
         d.spot += dt;
         if (d.spot > (this.deps.spotTime?.() ?? 2.5) && d.cd <= 0) {
           d.cd = this.deps.spotCd?.() ?? 70;
           d.spot = 0;
-          this.deps.spotted([P.x, P.z]);
+          this.deps.spotted([seen[0], seen[1]], you);
         }
       } else d.spot = Math.max(0, d.spot - dt * 0.5);
     }
